@@ -45,7 +45,7 @@ namespace PersonCleaner.UI
             this.libraryManager = applicationHost.Resolve<ILibraryManager>();
             this.jsonSerializer = applicationHost.Resolve<IJsonSerializer>();
             this.taskManager = applicationHost.Resolve<ITaskManager>();
-            this.ShowSave = false;
+            this.ShowSave = true;
             this.ShowBack = true;
             this.AllowBack = true;
             RebuildContentData();
@@ -143,11 +143,20 @@ namespace PersonCleaner.UI
                 if (incoming != null)
                 {
                     config.EnablePlugin = incoming.EnablePlugin;
+                    config.TvdbApiKey = incoming.TvdbApiKey?.Trim() ?? string.Empty;
+                    config.TvdbSubscriberPin = incoming.TvdbSubscriberPin?.Trim() ?? string.Empty;
+                    config.SuccessCacheDays = Math.Max(1, incoming.SuccessCacheDays);
+                    config.FailureRetryMinutes = Math.Max(1, incoming.FailureRetryMinutes);
+                    config.MinimumRequestIntervalMilliseconds = Math.Max(0, incoming.MinimumRequestIntervalMilliseconds);
+                    config.PreviewItemLimit = Math.Max(1, incoming.PreviewItemLimit);
+                    config.RequireSuccessfulPreview = incoming.RequireSuccessfulPreview;
+                    config.ResolutionEvaluationItemsPerType = Math.Max(1, incoming.ResolutionEvaluationItemsPerType);
+                    config.AutoResolutionMinimumConfidence = Math.Max(0.5, Math.Min(1.0, incoming.AutoResolutionMinimumConfidence));
                     config.LibraryPaths = incoming.LibraryPaths ?? new List<LibraryPathFilterItem>();
 
                     Plugin.Instance.SaveConfiguration();
 
-                    this.logger.Info("Poster To Folder configuration saved");
+                    this.logger.Info("TVDB Archive configuration saved (API key present: {0})", !string.IsNullOrWhiteSpace(config.TvdbApiKey));
                 }
             }
             catch (Exception ex)

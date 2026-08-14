@@ -32,6 +32,12 @@
     	  <PackageReference Include="System.Memory" Version="4.6.0" />
   </ItemGroup>
 	<ItemGroup>
+	  <!-- Emby 4.10 uses its own SQLitePCLRawEx fork. Referencing the server copies
+	       (without copying them into the plugin folder) avoids loading incompatible SQLite binaries. -->
+	  <Reference Include="SQLitePCL.pretty" HintPath="$(APPDATA)\Emby-Server\system\SQLitePCL.pretty.dll" Private="false" />
+	  <Reference Include="SQLitePCLRawEx.core" HintPath="$(APPDATA)\Emby-Server\system\SQLitePCLRawEx.core.dll" Private="false" />
+	</ItemGroup>
+	<ItemGroup>
 		<EmbeddedResource Include="thumb.png">
 			<LogicalName>$(RootNamespace).thumb.png</LogicalName>
 		</EmbeddedResource>
@@ -43,7 +49,7 @@
 		<GenerateDependencyFile>false</GenerateDependencyFile>
 	</PropertyGroup>
 	
-	<Target Name="PostBuild" AfterTargets="PostBuildEvent">
+	<Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="'$(SkipPluginDeploy)' != 'true'">
 		<Exec Command="xcopy &quot;$(TargetDir)$(TargetName).*&quot; &quot;$(APPDATA)\Emby-Server\programdata\plugins\&quot; /Y" />
 	</Target>
 

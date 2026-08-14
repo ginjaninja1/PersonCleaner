@@ -48,7 +48,7 @@ namespace PersonCleaner
 
 
         public override string Description =>
-            "Copies poster.ext to folder.ext for movies and TV shows that are missing a folder image.";
+            "Archives TVDB identities and filmography to a human-searchable SQLite database.";
 
 
         public override Guid Id =>
@@ -56,7 +56,7 @@ namespace PersonCleaner
 
 
         public override string Name =>
-            "Poster To Folder";
+            "TVDB Archive";
 
 
         public ImageFormat ThumbImageFormat =>

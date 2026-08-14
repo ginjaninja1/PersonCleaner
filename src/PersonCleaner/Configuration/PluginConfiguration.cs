@@ -21,6 +21,24 @@ namespace PersonCleaner.Configuration
     {
         public bool EnablePlugin { get; set; } = true;
 
+        public string TvdbApiKey { get; set; } = string.Empty;
+
+        public string TvdbSubscriberPin { get; set; } = string.Empty;
+
+        public int SuccessCacheDays { get; set; } = 30;
+
+        public int FailureRetryMinutes { get; set; } = 30;
+
+        public int MinimumRequestIntervalMilliseconds { get; set; } = 250;
+
+        public int PreviewItemLimit { get; set; } = 5;
+
+        public bool RequireSuccessfulPreview { get; set; } = true;
+
+        public int ResolutionEvaluationItemsPerType { get; set; } = 25;
+
+        public double AutoResolutionMinimumConfidence { get; set; } = 0.95;
+
         /// <summary>
         /// The real, persisted library/path filter data.
         /// </summary>

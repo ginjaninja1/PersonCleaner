@@ -33,8 +33,8 @@ namespace PersonCleaner.UI
             {
                 Name = "PersonCleaner",
                 EnableInMainMenu = false,
-                DisplayName = "Poster To Folder",
-                MenuIcon = "image",
+                DisplayName = "TVDB Archive",
+                MenuIcon = "storage",
                 IsMainConfigPage = true
             };
         }
