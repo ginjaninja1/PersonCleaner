@@ -153,6 +153,52 @@ Store TMDB evidence and crosswalk results separately from TVDB observations and 
 
 TMDB work is an enhancement to rejected/unresolved identity resolution. It must not interrupt or contaminate the ongoing TVDB archive export.
 
+## Materialized evidence and cleansing architecture
+
+Adopt this design principle for the next phase:
+
+> Any fact used in an identity decision should first be materialized in the plugin SQLite database, with its source, observation/fetch time, expiry or revalidation time, and a reference to the raw evidence where applicable.
+
+This applies to inexpensive local Emby observations as well as paid/remote TVDB and TMDB responses. The plugin database should contain enough evidence to reproduce and audit a decision without querying the live Emby library during analysis. Emby-derived observations still require a TTL or equivalent revalidation timestamp so duplicated local facts do not silently become stale. A short TTL or refresh at the start of an analysis task is appropriate; unchanged content may be fingerprinted to avoid unnecessary history rows.
+
+Do not design the final observation/assertion schema speculatively. First implement direct TMDB capture and run a small Emby/TMDB evidence probe, then use the real payloads and available Emby relationship fields to decide:
+
+- current-state rows plus history versus append-only observations;
+- field-level provenance and evidence references;
+- TTLs/revalidation rules for each source;
+- proposed versus applied Emby mutations;
+- normalized identity assertions and contradiction handling.
+
+Add the resulting schema through explicit numbered transactional migrations, rather than continuing indefinitely with ad hoc `CREATE TABLE IF NOT EXISTS` initialization.
+
+One concrete early addition may be justified alongside the probe: persist the complete local Emby person-to-production observation, including person Emby ID, media Emby ID, media type, production provider IDs, person type, role/character, observation time and revalidation/expiry time. The current `person_local_production` table records the TVDB production link but not the local media ID or role, losing useful evidence used to compare Emby and provider credits.
+
+### Identity-cleansing pipeline
+
+Keep canonical-name cleansing separate from foreign-provider-ID enrichment. The intended order is:
+
+1. Snapshot and validate the person's existing Emby name, provider IDs and production/role relationships.
+2. Ask the provider owning each existing ID whether the entity still exists and record its current canonical name, aliases and external IDs.
+3. Resolve the canonical identity and propose or apply an auditable name cleansing decision.
+4. Resolve missing foreign provider IDs using the cleansed identity and already validated IDs.
+5. Check production and role consistency as corroboration and, especially, as contradiction detection.
+
+Do not let a weak foreign-provider name result drive the initial rename. Proposed and applied Emby mutations must remain distinguishable and auditable.
+
+### Coco Sumner / Eliot Sumner design case
+
+Emby person 173844 is stored as Coco Sumner with IMDb `nm1091393`, TMDB `1586573`, and a local relationship to RIPLEY (Emby 338517, TVDB series 372727). TVDB name search cannot connect `Coco Sumner` to `Eliot Sumner`: TVDB person 8192078 only supplies the alias `Eliot Paulina Sumner`, not `Coco Sumner`.
+
+The identity is nevertheless strongly corroborated by independent routes available to the proposed pipeline:
+
+- TVDB remote lookup of IMDb `nm1091393` uniquely returns Eliot Sumner, TVDB person 8192078.
+- TVDB remote lookup of TMDB `1586573` returns that same TVDB person.
+- The TVDB extended person record owns both external IDs.
+- RIPLEY credits TVDB person 8192078 as Freddie Miles.
+- Direct TMDB capture is expected to supply the missing canonical-name/alias explanation and must be archived rather than assumed.
+
+This case currently remains rejected because remote lookups are deliberately non-authoritative and the names conflict. Use it as a primary probe for the new pipeline. A production link alone is very weak evidence and a matching role/character is only low evidence; exact external-ID agreement is much stronger. Multiple agreeing IDs, a provider-supported alias/canonical-name transition, and consistent production/role evidence together are suitable for very-high-confidence or configurable auto-accept handling, while any contradiction must force review. Call this very high confidence rather than an absolute guarantee because providers can share upstream errors.
+
 ## Current progress interpretation
 
 The full manifest total observed was 187,286 items:

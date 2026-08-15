@@ -35,7 +35,7 @@ namespace PersonCleaner.UI.Config
         public int FailureRetryMinutes { get; set; } = 30;
 
         [DisplayName("Minimum request interval (milliseconds)")]
-        public int MinimumRequestIntervalMilliseconds { get; set; } = 250;
+        public int MinimumRequestIntervalMilliseconds { get; set; } = 100;
 
         [DisplayName("Preview items per media type")]
         public int PreviewItemLimit { get; set; } = 5;

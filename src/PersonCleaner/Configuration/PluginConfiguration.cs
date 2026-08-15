@@ -29,7 +29,7 @@ namespace PersonCleaner.Configuration
 
         public int FailureRetryMinutes { get; set; } = 30;
 
-        public int MinimumRequestIntervalMilliseconds { get; set; } = 250;
+        public int MinimumRequestIntervalMilliseconds { get; set; } = 100;
 
         public int PreviewItemLimit { get; set; } = 5;
 
