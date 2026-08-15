@@ -121,9 +121,53 @@ These candidates must remain evidence, not silently become authoritative matches
 ## TVDB external-ID findings
 
 - TVDB extended records can expose `remoteIds` for series, movies, episodes and people.
+- TVDB v4 supports reverse lookup by both IMDb ID and TMDB ID through `GET /search/remoteid/{external_id}`. The response can contain multiple entity types, so consumers must filter by expected type and validate name/year or stronger evidence; a bare numeric ID is not globally unique.
 - Availability is record-specific. Some people have IMDb, TMDB, Wikidata and other IDs; plausible exact-name people may have none.
 - Store TVDB's literal `id`, numeric `type` and `sourceName`; do not infer meaning solely from the numeric type.
 - Current archive statistics showed substantial but incomplete IMDb, TMDB and Wikidata coverage for TVDB people.
+
+### Recovery opportunity demonstrated by the 2026-08-15 failed export
+
+The completed export reported 50 distinct `NotFound` failures. A live TVDB reverse-lookup pass against every available Emby IMDb and TMDB ID demonstrated that a 404 from the stored TVDB entity ID does not necessarily mean the identity is absent from TVDB. Treat reverse-lookup results as persisted evidence/signals, not as automatic mutations.
+
+Eleven items had a strong same-type replacement whose current TVDB entity endpoint was also verified:
+
+| Emby ID | Type | Emby identity | Stale TVDB ID | Current TVDB ID | Evidence |
+|---:|---|---|---:|---:|---|
+| 66663 | series | Stephen Hawking and the Theory of Everything | 31657 | 81719 | Exact TMDB `213057`, compatible name/year |
+| 36042 | person | Renée Taylor | 7910281 | 343928 | IMDb `nm0853041` and TMDB `56105` converge |
+| 57995 | person | Nicholas Sidi | 391163 | 7894971 | Exact IMDb `nm0796594`; TVDB name `Nick Sidi` |
+| 66191 | person | Nae Yuuki | none | 8302286 | Exact TMDB `142869`; TVDB name `Nae` |
+| 106895 | person | Dermot O'Leary | 7866725 | 9120093 | IMDb `nm0641581` and TMDB `1216116` converge |
+| 133149 | person | Charlie Adler | 276646 | 263034 | IMDb `nm0012121` and TMDB `81178` converge; TVDB name `Charles Adler` |
+| 143662 | person | Luo Jin | 472247 | 8545511 | IMDb `nm2950480` and TMDB `1115666` converge; TVDB name order is `Jin Luo` |
+| 167491 | person | Ingrid Unnur Giæver | 645870 | 8009040 | Exact TMDB `1908557`; compatible shortened name |
+| 168170 | person | Zehra Leverman | 407808 | 8347913 | Exact IMDb `nm0505358`; TVDB spelling `Zerha Leverman` |
+| 177774 | person | Andrew Lauer | 339403 | 7967760 | Exact IMDb `nm0490774`; TVDB name `Andy Lauer` |
+| 285649 | person | Trinity Bliss | 8174490 | 9098746 | Exact TMDB `1895788`; TVDB full name `Trinity Jo-Li Bliss` |
+
+Three more items had a strong external-ID match under a different TVDB entity type. These are valuable classification signals but must not be applied as same-type TVDB-ID replacements:
+
+| Emby ID | Emby type | Identity | Stale TVDB ID | Live TVDB identity |
+|---:|---|---|---:|---|
+| 47264 | series | Tales from the Far Side | 122781 | movie 117283 via IMDb `tt0109873` |
+| 294584 | movie | Maggie Simpson in "The Longest Daycare" | 354146 | episode 4531854 via IMDb `tt2175842` |
+| 398581 | episode | My Scientology Movie | 6848718 | movie 11563 via IMDb `tt5111874` |
+
+Ten records had external IDs but no usable TVDB crosswalk: Das Boot (1985), Bernard Zilinskas, James V. Scott, Mark Allan Staubach, Bohdan Poraj, Raoul Max Trujillo, Jerrod Carmichael, Aaron Schwartz, Jim J. Poslof and Marvin Campbell. Some numeric TMDB searches returned unrelated movies or series; those collisions reinforce the requirement to retain the source namespace and expected entity type. These ten are candidates for the planned direct-TMDB capture: TMDB identity, aliases, external IDs, credits and production crosswalks may provide additional evidence even where TVDB's reverse index is empty.
+
+The remaining 26 failed records had no IMDb or TMDB ID available for this reverse-lookup pass.
+
+Stephen Hawking is an important edge case. TVDB series 81719 exists and is returned by direct lookup and TMDB `213057`, but an exact TVDB name search returns zero results, so it is effectively unindexed/orphaned from UI search. The stale Emby value `31657` is actually season 1's TVDB season ID, not the series ID. This proves that direct entity lookup, name search and external-ID reverse lookup are distinct evidence channels and their disagreement must be preserved. Do not reject an otherwise verified entity solely because TVDB UI/name search cannot surface it.
+
+Implementation opportunity:
+
+- For any direct TVDB 404, query every available IMDb and TMDB ID through TVDB remote-ID search before final classification.
+- Persist the raw remote-search response, source namespace, requested external ID, returned entity type, candidate TVDB ID and validation result.
+- Record same-type replacements and cross-type matches as evidence. Do not silently overwrite Emby provider IDs.
+- Require type compatibility plus corroboration. IMDb/TMDB convergence is stronger than one external ID; name/year, aliases, production structure and credit overlap can strengthen or contradict it.
+- Feed empty or ambiguous TVDB crosswalks into the later direct-TMDB evidence stage rather than treating them as exhausted identities.
+- Evaluate this recovery path on known-good withheld records before defining confidence thresholds or permitting configurable auto-application.
 
 ## Next work: direct TMDB capture and corroboration
 
@@ -228,3 +272,17 @@ ORDER BY CASE entity_type WHEN 'series' THEN 1 WHEN 'movie' THEN 2
 - Preserve candidates and contradictory evidence for human review.
 - Do not modify provider IDs in Emby as part of this archive/resolution work.
 - The user wants working probes and small evaluations before any broad new inference rule is enabled.
+
+## Direct TMDB implementation (2026-08-15)
+
+- Added a persisted, source-empty `TmdbApiKey` configuration field and Generic UI input.
+- Added independent preview/full resumable tasks: `TmdbArchivePreview` and `TmdbArchiveFull`.
+- Direct TMDB capture covers shows, movies, people, and regular episodes. Episodes use their parent
+  TMDB series ID plus season/episode coordinates, preserving the returned TMDB episode ID.
+- Missing direct TMDB IDs can be queried through `/find/{imdb_id}`. All typed candidates are retained;
+  only a unique typed result is fetched, and ambiguity remains explicit evidence.
+- TMDB entities, raw payloads, literal external IDs, aliases, credits, response history/cache, failures,
+  candidates and per-Emby provenance live in separate `tmdb_*` tables in `tvdb-archive.db`.
+- `provider_identity_signals` provides a first side-by-side answer for TMDB versus TVDB by Emby ID.
+- `TMDB_ARCHIVE_VERIFY.sql` contains inspection queries, including the Coco/Eliot Sumner case.
+- This capture does not modify Emby metadata or feed TMDB evidence into TVDB confidence thresholds.

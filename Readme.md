@@ -1,8 +1,12 @@
-# TVDB Archive for Emby 4.10
+# TVDB / TMDB Archive for Emby 4.10
 
 This Emby scheduled-task plugin archives TVDB v4 identity, cast and filmography data into
 `tvdb-archive.db` under Emby's data directory. It uses the SQLite assemblies already shipped by
 Emby 4.10; no SQLite DLL is deployed alongside the plugin.
+
+TMDB-native identity, aliases, external IDs and credits can be archived independently in the same
+database. TMDB observations use their own `tmdb_*` tables and cache namespace; they do not change
+TVDB resolutions or Emby provider IDs.
 
 ## Safe first run
 
@@ -12,6 +16,11 @@ Emby 4.10; no SQLite DLL is deployed alongside the plugin.
 3. Run **TVDB Archive - Probe IMDb/TVDB mappings**. Results are written to `id_probe`.
 4. Run **TVDB Archive - Preview first items**. By default this processes five Emby rows of each type.
 5. Inspect the SQLite views/tables and Emby log, then run **TVDB Archive - Full resumable export**.
+
+For TMDB, enter a v3 API key, run **TMDB Archive - Preview first items**, inspect
+`TMDB_ARCHIVE_VERIFY.sql`, and then run **TMDB Archive - Full resumable export**. The
+`provider_identity_signals` view compares the independently recorded TVDB and TMDB answers for an
+Emby ID.
 
 Stopping a task is safe. Each response is committed independently and `run_state` records status,
 counts and the last Emby id. Successful fetches are cached for 30 days by default; failures and

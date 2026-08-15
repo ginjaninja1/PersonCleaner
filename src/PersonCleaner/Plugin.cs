@@ -48,7 +48,7 @@ namespace PersonCleaner
 
 
         public override string Description =>
-            "Archives TVDB identities and filmography to a human-searchable SQLite database.";
+            "Archives TVDB and TMDB identities, external IDs and credits to a human-searchable SQLite database.";
 
 
         public override Guid Id =>
@@ -56,7 +56,7 @@ namespace PersonCleaner
 
 
         public override string Name =>
-            "TVDB Archive";
+            "TVDB / TMDB Archive";
 
 
         public ImageFormat ThumbImageFormat =>

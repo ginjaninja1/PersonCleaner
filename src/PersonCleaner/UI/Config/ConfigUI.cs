@@ -28,6 +28,10 @@ namespace PersonCleaner.UI.Config
         [DisplayName("TVDB subscriber PIN (optional)")]
         public string TvdbSubscriberPin { get; set; }
 
+        [DisplayName("TMDB v3 API key")]
+        [Description("Used only for direct TMDB archive requests. Stored in Emby's plugin configuration and never written to the archive database or logs.")]
+        public string TmdbApiKey { get; set; }
+
         [DisplayName("Successful response cache (days)")]
         public int SuccessCacheDays { get; set; } = 30;
 
@@ -36,6 +40,22 @@ namespace PersonCleaner.UI.Config
 
         [DisplayName("Minimum request interval (milliseconds)")]
         public int MinimumRequestIntervalMilliseconds { get; set; } = 100;
+
+        [DisplayName("Concurrent person workers")]
+        [Description("Shared ceiling for person enrichment work across metadata providers. Changes apply when the task is restarted.")]
+        public int PersonWorkerCount { get; set; } = 4;
+
+        [DisplayName("TVDB maximum concurrent requests")]
+        [Description("TVDB does not publish a numeric concurrency allowance; 2 is the conservative default. Changes apply when the task is restarted.")]
+        public int TvdbMaximumConcurrentRequests { get; set; } = 2;
+
+        [DisplayName("TMDB maximum concurrent requests")]
+        [Description("Direct TMDB requests in flight; all providers still share the person-worker ceiling.")]
+        public int TmdbMaximumConcurrentRequests { get; set; } = 4;
+
+        [DisplayName("TMDB minimum request interval (milliseconds)")]
+        [Description("Minimum delay between direct TMDB request starts.")]
+        public int TmdbMinimumRequestIntervalMilliseconds { get; set; } = 30;
 
         [DisplayName("Preview items per media type")]
         public int PreviewItemLimit { get; set; } = 5;

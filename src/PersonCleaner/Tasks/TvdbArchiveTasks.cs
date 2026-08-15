@@ -49,6 +49,10 @@ namespace PersonCleaner.Tasks
             if (!Plugin.Instance.Configuration.EnablePlugin) { logger.Info("TVDB Archive is disabled."); return; }
             if (!IsPreview && Plugin.Instance.Configuration.RequireSuccessfulPreview && !repository.HasSuccessfulPreview())
                 throw new InvalidOperationException("Run 'TVDB Archive - Preview first items' successfully before the full export.");
+            logger.Info("TVDB request policy: {0} shared person workers, {1} maximum TVDB requests in flight, {2} ms minimum between TVDB request starts.",
+                Math.Max(1, Plugin.Instance.Configuration.PersonWorkerCount),
+                Math.Max(1, Plugin.Instance.Configuration.TvdbMaximumConcurrentRequests),
+                Math.Max(0, Plugin.Instance.Configuration.MinimumRequestIntervalMilliseconds));
 
             var media = library.GetItemList(new InternalItemsQuery
             {
@@ -96,63 +100,38 @@ namespace PersonCleaner.Tasks
                 var seriesTvdb = repository.GetAcceptedResolvedTvdbId(series.InternalId) ?? series.GetProviderId(MetadataProviders.Tvdb);
                 if (!string.IsNullOrWhiteSpace(seriesTvdb)) resolvedSeries[series.InternalId] = seriesTvdb;
             }
+            var skippedUnchangedPeople = 0;
+            var lastCheckpointDone = done;
             try
             {
-                foreach (var item in items.Skip(done))
+                while (done < items.Count)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    last = item.InternalId;
-                    SaveEmbyItem(item);
-                    var type = EntityType(item);
-                    var observedId = item.GetProviderId(MetadataProviders.Tvdb);
-                    string id; string provenance; string method; double confidence; int candidateCount; string evidence;
-                    try
+                    var item = items[done];
+                    ItemProcessResult[] results;
+                    if (item is Person)
                     {
-                        if (!string.IsNullOrWhiteSpace(observedId))
-                        {
-                            id = observedId; provenance = "direct"; method = "emby-tvdb-id"; confidence = 1.0; candidateCount = 1; evidence = "TVDB id already present on Emby item";
-                            repository.SaveResolutionCandidates(item.InternalId, Enumerable.Empty<ResolutionCandidate>(), value => json.SerializeToString(value));
-                        }
-                        else
-                        {
-                            string parentSeriesId = null;
-                            if (item is Episode unresolvedEpisode && unresolvedEpisode.Series != null) resolvedSeries.TryGetValue(unresolvedEpisode.Series.InternalId, out parentSeriesId);
-                            var result = await resolver.Resolve(item, cancellationToken, parentSeriesId).ConfigureAwait(false);
-                            id = result.TvdbId; method = result.Method; confidence = result.Confidence; candidateCount = result.CandidateCount; evidence = result.Evidence;
-                            repository.SaveResolutionCandidates(item.InternalId, result.Candidates, value => json.SerializeToString(value));
-                            provenance = string.IsNullOrWhiteSpace(id) ? "unresolved" : confidence >= Plugin.Instance.Configuration.AutoResolutionMinimumConfidence ? "inferred" : "rejected";
-                        }
-                        repository.SaveItemResolution(item.InternalId, type, observedId, id, provenance, method, confidence, candidateCount, json.SerializeToString(new { evidence }));
-                        if ((provenance == "direct" || provenance == "inferred") && !string.IsNullOrWhiteSpace(id))
-                        {
-                            if (item is Series) resolvedSeries[item.InternalId] = id;
-                            if (type == "episode" && item is Episode episode)
-                            {
-                                if (episode.Series is Series parent && resolvedSeries.TryGetValue(parent.InternalId, out var resolvedParentId))
-                                    await FetchSeriesEpisodes(resolvedParentId, cancellationToken).ConfigureAwait(false);
-                                await FetchEntity(type, id, cancellationToken).ConfigureAwait(false);
-                            }
-                            else await FetchEntity(type, id, cancellationToken).ConfigureAwait(false);
-                            successes++;
-                        }
-                        repository.SetExportScopeResult(Key, item.InternalId, provenance);
-                        logger.Info("TVDB identity {0} Emby={1} '{2}': observed={3}, resolved={4}, provenance={5}, method={6}, confidence={7:F3}", type, item.InternalId, item.Name, observedId ?? "(none)", id ?? "(none)", provenance, method, confidence);
+                        var count = Math.Min(Math.Max(1, Plugin.Instance.Configuration.PersonWorkerCount), items.Count - done);
+                        while (count > 1 && !(items[done + count - 1] is Person)) count--;
+                        var batch = items.Skip(done).Take(count).ToArray();
+                        results = await Task.WhenAll(batch.Select(x => ProcessItem(x, resolvedSeries, cancellationToken))).ConfigureAwait(false);
                     }
-                    catch (Exception ex) when (!(ex is OperationCanceledException))
+                    else
                     {
-                        failures++;
-                        if (!string.IsNullOrWhiteSpace(observedId)) repository.MarkFetch(type + ":" + observedId, false, ex.Message);
-                        if (!string.IsNullOrWhiteSpace(observedId) && ex is HttpException httpException && httpException.StatusCode == System.Net.HttpStatusCode.NotFound)
-                        {
-                            repository.SaveItemResolution(item.InternalId, type, observedId, observedId, "direct-unavailable", "tvdb-404", 0.0, 0,
-                                json.SerializeToString(new { evidence = "Emby has this TVDB id, but TVDB returned HTTP 404 for the entity endpoint. Human review recommended; Emby was not modified." }));
-                            repository.SetExportScopeResult(Key, item.InternalId, "direct-unavailable");
-                        }
-                        else repository.SetExportScopeResult(Key, item.InternalId, "failed");
-                        logger.ErrorException("TVDB resolution/fetch failed for {0} (Emby {1})", ex, type, item.InternalId);
+                        results = new[] { await ProcessItem(item, resolvedSeries, cancellationToken).ConfigureAwait(false) };
                     }
-                    done++; progress.Report(items.Count == 0 ? 100 : done * 100.0 / items.Count);
-                    repository.SetRun(Key, "running", items.Count, done, successes, failures, last, item.Name);
+                    done += results.Length;
+                    successes += results.Sum(x => x.Successes);
+                    failures += results.Sum(x => x.Failures);
+                    skippedUnchangedPeople += results.Count(x => x.SkippedUnchanged);
+                    last = items[done - 1].InternalId;
+                    progress.Report(items.Count == 0 ? 100 : done * 100.0 / items.Count);
+                    if (!(item is Person) || done - lastCheckpointDone >= 250)
+                    {
+                        repository.SetRun(Key, "running", items.Count, done, successes, failures, last,
+                            skippedUnchangedPeople > 0 ? "Skipped " + skippedUnchangedPeople.ToString(CultureInfo.InvariantCulture) + " unchanged cached people" : items[done - 1].Name);
+                        lastCheckpointDone = done;
+                    }
                 }
                 if (successes == 0 && items.Count > 0)
                 {
@@ -164,12 +143,80 @@ namespace PersonCleaner.Tasks
                 logger.Info("TVDB cast identity coverage: {0} distinct cast people; TMDB {1} ({2:F2}%); IMDb {3} ({4:F2}%).",
                     coverage.Item1, coverage.Item2, Percent(coverage.Item2, coverage.Item1), coverage.Item3, Percent(coverage.Item3, coverage.Item1));
                 logger.Info("TVDB Archive {0}: {1} processed, {2} successful, {3} failed. Database: {4}", IsPreview ? "preview" : "export", done, successes, failures, repository.DatabasePath);
+                if (skippedUnchangedPeople > 0) logger.Info("TVDB Archive fast path skipped {0} unchanged direct people with unexpired successful fetches.", skippedUnchangedPeople);
             }
             catch (OperationCanceledException)
             {
                 repository.SetRun(Key, "cancelled", items.Count, done, successes, failures, last, "Stopped; next run resumes using the cache/checkpoint");
                 throw;
             }
+        }
+
+        private async Task<ItemProcessResult> ProcessItem(BaseItem item, Dictionary<long, string> resolvedSeries, CancellationToken cancellationToken)
+        {
+            var type = EntityType(item);
+            var observedId = item.GetProviderId(MetadataProviders.Tvdb);
+            if (item is Person && repository.IsUnchangedCachedDirectPerson(item.InternalId, item.Id.ToString("N"), item.Name,
+                item.ProductionYear, item.Parent?.InternalId, observedId, item.GetProviderId(MetadataProviders.Imdb),
+                item.GetProviderId(MetadataProviders.Tmdb), item.Path))
+                return new ItemProcessResult { Successes = 1, SkippedUnchanged = true };
+
+            SaveEmbyItem(item);
+            string id; string provenance; string method; double confidence; int candidateCount; string evidence;
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(observedId))
+                {
+                    id = observedId; provenance = "direct"; method = "emby-tvdb-id"; confidence = 1.0; candidateCount = 1; evidence = "TVDB id already present on Emby item";
+                    repository.SaveResolutionCandidates(item.InternalId, Enumerable.Empty<ResolutionCandidate>(), value => json.SerializeToString(value));
+                }
+                else
+                {
+                    string parentSeriesId = null;
+                    if (item is Episode unresolvedEpisode && unresolvedEpisode.Series != null) resolvedSeries.TryGetValue(unresolvedEpisode.Series.InternalId, out parentSeriesId);
+                    var result = await resolver.Resolve(item, cancellationToken, parentSeriesId).ConfigureAwait(false);
+                    id = result.TvdbId; method = result.Method; confidence = result.Confidence; candidateCount = result.CandidateCount; evidence = result.Evidence;
+                    repository.SaveResolutionCandidates(item.InternalId, result.Candidates, value => json.SerializeToString(value));
+                    provenance = string.IsNullOrWhiteSpace(id) ? "unresolved" : confidence >= Plugin.Instance.Configuration.AutoResolutionMinimumConfidence ? "inferred" : "rejected";
+                }
+                repository.SaveItemResolution(item.InternalId, type, observedId, id, provenance, method, confidence, candidateCount, json.SerializeToString(new { evidence }));
+                var accepted = (provenance == "direct" || provenance == "inferred") && !string.IsNullOrWhiteSpace(id);
+                if (accepted)
+                {
+                    if (item is Series) resolvedSeries[item.InternalId] = id;
+                    if (type == "episode" && item is Episode episode)
+                    {
+                        if (episode.Series is Series parent && resolvedSeries.TryGetValue(parent.InternalId, out var resolvedParentId))
+                            await FetchSeriesEpisodes(resolvedParentId, cancellationToken).ConfigureAwait(false);
+                        await FetchEntity(type, id, cancellationToken).ConfigureAwait(false);
+                    }
+                    else await FetchEntity(type, id, cancellationToken).ConfigureAwait(false);
+                }
+                repository.SetExportScopeResult(Key, item.InternalId, provenance);
+                logger.Info("TVDB identity {0} (Emby {1}): observed={2}, resolved={3}, provenance={4}, method={5}, confidence={6:F3}",
+                    DescribeItem(item), item.InternalId, observedId ?? "(none)", id ?? "(none)", provenance, method, confidence);
+                return new ItemProcessResult { Successes = accepted ? 1 : 0 };
+            }
+            catch (Exception ex) when (!(ex is OperationCanceledException))
+            {
+                if (!string.IsNullOrWhiteSpace(observedId)) repository.MarkFetch(type + ":" + observedId, false, ex.Message);
+                if (!string.IsNullOrWhiteSpace(observedId) && ex is HttpException httpException && httpException.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    repository.SaveItemResolution(item.InternalId, type, observedId, observedId, "direct-unavailable", "tvdb-404", 0.0, 0,
+                        json.SerializeToString(new { evidence = "Emby has this TVDB id, but TVDB returned HTTP 404 for the entity endpoint. Human review recommended; Emby was not modified." }));
+                    repository.SetExportScopeResult(Key, item.InternalId, "direct-unavailable");
+                }
+                else repository.SetExportScopeResult(Key, item.InternalId, "failed");
+                logger.ErrorException("TVDB resolution/fetch failed for {0} (Emby {1})", ex, DescribeItem(item), item.InternalId);
+                return new ItemProcessResult { Failures = 1 };
+            }
+        }
+
+        private sealed class ItemProcessResult
+        {
+            public int Successes { get; set; }
+            public int Failures { get; set; }
+            public bool SkippedUnchanged { get; set; }
         }
 
         private async Task FetchEntity(string type, string id, CancellationToken ct)
@@ -181,8 +228,7 @@ namespace PersonCleaner.Tasks
             repository.SaveEntity(id, type, data, json.SerializeToString(data));
             repository.MarkFetch(key, true, null);
             if (type != "person")
-                foreach (var personId in (data.characters ?? new List<CharacterData>()).Where(TvdbScope.IsScreenCredit).Select(x => x.peopleId).Where(x => x > 0).Distinct())
-                    await FetchEntity("person", personId.ToString(CultureInfo.InvariantCulture), ct).ConfigureAwait(false);
+                await FetchPeople((data.characters ?? new List<CharacterData>()).Where(TvdbScope.IsScreenCredit).Select(x => x.peopleId), ct).ConfigureAwait(false);
             if (type == "series") await FetchSeriesEpisodes(id, ct).ConfigureAwait(false);
         }
 
@@ -198,13 +244,31 @@ namespace PersonCleaner.Tasks
                 receivedAnyPage = true;
                 repository.SaveEpisodeBatch(seriesId, response.data);
                 var regularEpisodeIds = new HashSet<int>((response.data.episodes ?? new List<EpisodeData>()).Where(x => x.seasonNumber >= 1).Select(x => x.id));
-                foreach (var personId in (response.data.characters ?? new List<CharacterData>()).Where(TvdbScope.IsScreenCredit).Where(x => x.episodeId.HasValue && regularEpisodeIds.Contains(x.episodeId.Value)).Select(x => x.peopleId).Where(x => x > 0).Distinct())
-                    await FetchEntity("person", personId.ToString(CultureInfo.InvariantCulture), ct).ConfigureAwait(false);
+                await FetchPeople((response.data.characters ?? new List<CharacterData>()).Where(TvdbScope.IsScreenCredit).Where(x => x.episodeId.HasValue && regularEpisodeIds.Contains(x.episodeId.Value)).Select(x => x.peopleId), ct).ConfigureAwait(false);
                 var count = response.data.episodes?.Count ?? 0;
                 if (count == 0 || response.links == null || count < response.links.page_size || string.IsNullOrEmpty(response.links.next)) break;
                 page++;
             }
             repository.MarkFetch(key, receivedAnyPage, receivedAnyPage ? null : "No official season-1+ episode feed returned");
+        }
+
+        private async Task FetchPeople(IEnumerable<int> personIds, CancellationToken ct)
+        {
+            var ids = personIds.Where(x => x > 0).Distinct().ToArray();
+            if (ids.Length == 0) return;
+            var next = -1;
+            var workerCount = Math.Min(ids.Length, Math.Max(1, Plugin.Instance.Configuration.PersonWorkerCount));
+            var workers = Enumerable.Range(0, workerCount).Select(async ignored =>
+            {
+                while (true)
+                {
+                    var index = Interlocked.Increment(ref next);
+                    if (index >= ids.Length) return;
+                    ct.ThrowIfCancellationRequested();
+                    await FetchEntity("person", ids[index].ToString(CultureInfo.InvariantCulture), ct).ConfigureAwait(false);
+                }
+            });
+            await Task.WhenAll(workers).ConfigureAwait(false);
         }
 
         private void SaveEmbyItem(BaseItem item)
@@ -216,6 +280,27 @@ namespace PersonCleaner.Tasks
         private static int TypeOrder(BaseItem x) => x is Series ? 0 : x is Movie ? 1 : x is Person ? 2 : 3;
         private static double Percent(int value, int total) => total == 0 ? 0 : value * 100.0 / total;
         private static string EntityType(BaseItem x) => x is Person ? "person" : x is Series ? "series" : x is Episode ? "episode" : "movie";
+
+        private static string DescribeItem(BaseItem item)
+        {
+            if (item is Person) return "person '" + DisplayName(item.Name) + "'";
+
+            if (item is Episode episode)
+            {
+                var season = episode.ParentIndexNumber.HasValue ? episode.ParentIndexNumber.Value.ToString("D2", CultureInfo.InvariantCulture) : "??";
+                var number = episode.IndexNumber.HasValue ? episode.IndexNumber.Value.ToString("D2", CultureInfo.InvariantCulture) : "??";
+                var series = episode.Series;
+                var showName = series == null ? "unknown show" : DisplayName(series.Name);
+                var showYear = series?.ProductionYear ?? episode.ProductionYear;
+                return "episode S" + season + "E" + number + " - " + DisplayName(episode.Name) + " - " + showName + " " + DisplayYear(showYear);
+            }
+
+            if (item is Series) return "show " + DisplayName(item.Name) + " " + DisplayYear(item.ProductionYear);
+            return "movie " + DisplayName(item.Name) + " " + DisplayYear(item.ProductionYear);
+        }
+
+        private static string DisplayName(string name) => string.IsNullOrWhiteSpace(name) ? "(unnamed)" : name;
+        private static string DisplayYear(int? year) => "(" + (year.HasValue ? year.Value.ToString(CultureInfo.InvariantCulture) : "year unknown") + ")";
     }
 
     public sealed class TvdbArchivePreviewTask : TvdbArchiveTaskBase

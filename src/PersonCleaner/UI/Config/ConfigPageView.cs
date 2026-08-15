@@ -145,9 +145,14 @@ namespace PersonCleaner.UI
                     config.EnablePlugin = incoming.EnablePlugin;
                     config.TvdbApiKey = incoming.TvdbApiKey?.Trim() ?? string.Empty;
                     config.TvdbSubscriberPin = incoming.TvdbSubscriberPin?.Trim() ?? string.Empty;
+                    config.TmdbApiKey = incoming.TmdbApiKey?.Trim() ?? string.Empty;
                     config.SuccessCacheDays = Math.Max(1, incoming.SuccessCacheDays);
                     config.FailureRetryMinutes = Math.Max(1, incoming.FailureRetryMinutes);
                     config.MinimumRequestIntervalMilliseconds = Math.Max(0, incoming.MinimumRequestIntervalMilliseconds);
+                    config.PersonWorkerCount = Math.Max(1, Math.Min(16, incoming.PersonWorkerCount));
+                    config.TvdbMaximumConcurrentRequests = Math.Max(1, Math.Min(8, incoming.TvdbMaximumConcurrentRequests));
+                    config.TmdbMaximumConcurrentRequests = Math.Max(1, Math.Min(16, incoming.TmdbMaximumConcurrentRequests));
+                    config.TmdbMinimumRequestIntervalMilliseconds = Math.Max(0, incoming.TmdbMinimumRequestIntervalMilliseconds);
                     config.PreviewItemLimit = Math.Max(1, incoming.PreviewItemLimit);
                     config.RequireSuccessfulPreview = incoming.RequireSuccessfulPreview;
                     config.ResolutionEvaluationItemsPerType = Math.Max(1, incoming.ResolutionEvaluationItemsPerType);
@@ -156,7 +161,7 @@ namespace PersonCleaner.UI
 
                     Plugin.Instance.SaveConfiguration();
 
-                    this.logger.Info("TVDB Archive configuration saved (API key present: {0})", !string.IsNullOrWhiteSpace(config.TvdbApiKey));
+                    this.logger.Info("Provider archive configuration saved (TVDB key present: {0}; TMDB key present: {1})", !string.IsNullOrWhiteSpace(config.TvdbApiKey), !string.IsNullOrWhiteSpace(config.TmdbApiKey));
                 }
             }
             catch (Exception ex)

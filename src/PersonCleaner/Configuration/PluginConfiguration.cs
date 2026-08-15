@@ -25,11 +25,21 @@ namespace PersonCleaner.Configuration
 
         public string TvdbSubscriberPin { get; set; } = string.Empty;
 
+        public string TmdbApiKey { get; set; } = string.Empty;
+
         public int SuccessCacheDays { get; set; } = 30;
 
         public int FailureRetryMinutes { get; set; } = 30;
 
         public int MinimumRequestIntervalMilliseconds { get; set; } = 100;
+
+        public int PersonWorkerCount { get; set; } = 4;
+
+        public int TvdbMaximumConcurrentRequests { get; set; } = 2;
+
+        public int TmdbMaximumConcurrentRequests { get; set; } = 4;
+
+        public int TmdbMinimumRequestIntervalMilliseconds { get; set; } = 30;
 
         public int PreviewItemLimit { get; set; } = 5;
 

@@ -135,6 +135,26 @@ namespace PersonCleaner.Storage
             { s.TryBind("@id", id); s.TryBind("@guid", guid); s.TryBind("@type", type); s.TryBind("@name", name); s.TryBind("@year", year); s.TryBind("@parent", parent); s.TryBind("@tvdb", tvdb); s.TryBind("@imdb", imdb); s.TryBind("@tmdb", tmdb); s.TryBind("@path", path); s.TryBind("@now", Now()); });
         }
 
+        public bool IsUnchangedCachedDirectPerson(long id, string guid, string name, int? year, long? parent, string tvdb, string imdb, string tmdb, string path)
+        {
+            if (string.IsNullOrWhiteSpace(tvdb)) return false;
+            lock (sync) using (var s = db.PrepareStatement(
+                "SELECT 1 FROM emby_item e JOIN item_resolution r ON r.emby_id=e.emby_id " +
+                "JOIN fetch_cache f ON f.cache_key='person:'||@tvdb " +
+                "WHERE e.emby_id=@id AND e.item_type='person' AND e.emby_guid IS @guid AND e.name IS @name " +
+                "AND e.production_year IS @year AND e.parent_emby_id IS @parent AND e.tvdb_id IS @tvdb " +
+                "AND e.imdb_id IS @imdb AND e.tmdb_id IS @tmdb AND e.path IS @path " +
+                "AND r.observed_tvdb_id=@tvdb AND r.resolved_tvdb_id=@tvdb AND r.provenance='direct' " +
+                "AND f.state='success' AND f.next_attempt_utc>@now LIMIT 1"))
+            {
+                s.TryBind("@id", id); s.TryBind("@guid", guid); s.TryBind("@name", name); s.TryBind("@year", year);
+                s.TryBind("@parent", parent); s.TryBind("@tvdb", tvdb); s.TryBind("@imdb", imdb); s.TryBind("@tmdb", tmdb);
+                s.TryBind("@path", path); s.TryBind("@now", Now());
+                foreach (var ignored in s.ExecuteQuery()) return true;
+            }
+            return false;
+        }
+
         public void SaveEntity(string id, string type, Tvdb.EntityData d, string raw)
         {
             lock (sync) db.RunInTransaction(x =>

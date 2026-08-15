@@ -21,12 +21,19 @@ namespace PersonCleaner.Tvdb
         private readonly ILogger logger;
         private readonly TvdbArchiveRepository repository;
         private readonly SemaphoreSlim gate = new SemaphoreSlim(1, 1);
+        private readonly SemaphoreSlim concurrencyGate;
         private string token;
         private DateTimeOffset tokenExpiresUtc;
         private DateTimeOffset nextRequestUtc;
 
         public TvdbApiClient(IHttpClient httpClient, IJsonSerializer json, ILogger logger, TvdbArchiveRepository repository)
-        { this.httpClient = httpClient; this.json = json; this.logger = logger; this.repository = repository; }
+        {
+            this.httpClient = httpClient;
+            this.json = json;
+            this.logger = logger;
+            this.repository = repository;
+            concurrencyGate = new SemaphoreSlim(Math.Max(1, Plugin.Instance.Configuration.TvdbMaximumConcurrentRequests));
+        }
 
         public async Task<EntityData> GetEntity(string kind, string id, CancellationToken ct)
         {
@@ -70,9 +77,10 @@ namespace PersonCleaner.Tvdb
             for (var attempt = 0; attempt < 5; attempt++)
             {
                 ct.ThrowIfCancellationRequested();
-                await Throttle(ct).ConfigureAwait(false);
+                await concurrencyGate.WaitAsync(ct).ConfigureAwait(false);
                 try
                 {
+                    await Throttle(ct).ConfigureAwait(false);
                     var options = new HttpRequestOptions { Url = BaseUrl + path, CancellationToken = ct, BufferContent = false };
                     options.RequestHeaders["Authorization"] = "Bearer " + token;
                     using (var response = await httpClient.SendAsync(options, "GET").ConfigureAwait(false))
@@ -89,11 +97,13 @@ namespace PersonCleaner.Tvdb
                 {
                     last = ex;
                     var delay = TimeSpan.FromSeconds(Math.Min(60, Math.Pow(2, attempt + 1)));
+                    if (ex.StatusCode == (HttpStatusCode)429) await ExtendProviderCooldown(delay, ct).ConfigureAwait(false);
                     logger.Warn("TVDB transient response on {0}; retry {1}/5 in {2}s", path, attempt + 1, delay.TotalSeconds);
                     await Task.Delay(delay, ct).ConfigureAwait(false);
                 }
                 catch (IOException ex) { last = ex; await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt + 1)), ct).ConfigureAwait(false); }
                 catch (TaskCanceledException ex) when (!ct.IsCancellationRequested) { last = ex; await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt + 1)), ct).ConfigureAwait(false); }
+                finally { concurrencyGate.Release(); }
             }
             throw last ?? new InvalidOperationException("TVDB request failed");
         }
@@ -128,6 +138,17 @@ namespace PersonCleaner.Tvdb
                 var delay = nextRequestUtc - DateTimeOffset.UtcNow;
                 if (delay > TimeSpan.Zero) await Task.Delay(delay, ct).ConfigureAwait(false);
                 nextRequestUtc = DateTimeOffset.UtcNow.AddMilliseconds(Math.Max(0, Plugin.Instance.Configuration.MinimumRequestIntervalMilliseconds));
+            }
+            finally { gate.Release(); }
+        }
+
+        private async Task ExtendProviderCooldown(TimeSpan delay, CancellationToken ct)
+        {
+            await gate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                var cooldownUntil = DateTimeOffset.UtcNow.Add(delay);
+                if (cooldownUntil > nextRequestUtc) nextRequestUtc = cooldownUntil;
             }
             finally { gate.Release(); }
         }
