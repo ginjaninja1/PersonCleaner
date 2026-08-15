@@ -39,7 +39,7 @@ namespace PersonCleaner.Tasks
             this.library = library; this.json = json; logger = logs.GetLogger("TVDB Archive");
             repository = new TvdbArchiveRepository(paths, logger); repository.Initialize();
             api = new TvdbApiClient(http, json, logger, repository);
-            resolver = new TvdbIdentityResolver(api, library);
+            resolver = new TvdbIdentityResolver(api, library, repository);
         }
 
         public IEnumerable<TaskTriggerInfo> GetDefaultTriggers() => Array.Empty<TaskTriggerInfo>();

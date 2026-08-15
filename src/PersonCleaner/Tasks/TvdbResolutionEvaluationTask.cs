@@ -31,7 +31,7 @@ namespace PersonCleaner.Tasks
         public string Description => "Withholds known-good TVDB IDs and measures resolver precision for in-scope movies, series, season-1+ episodes and screen-credit people.";
         public string Category => "GinjaNinja Tools";
         public TvdbResolutionEvaluationTask(ILibraryManager l, IHttpClient h, IJsonSerializer j, IApplicationPaths p, ILogManager m)
-        { library = l; json = j; logger = m.GetLogger("TVDB Archive"); repository = new TvdbArchiveRepository(p, logger); repository.Initialize(); resolver = new TvdbIdentityResolver(new TvdbApiClient(h, j, logger, repository), l); }
+        { library = l; json = j; logger = m.GetLogger("TVDB Archive"); repository = new TvdbArchiveRepository(p, logger); repository.Initialize(); resolver = new TvdbIdentityResolver(new TvdbApiClient(h, j, logger, repository), l, repository); }
         public IEnumerable<TaskTriggerInfo> GetDefaultTriggers() => Array.Empty<TaskTriggerInfo>();
 
         public async Task Execute(CancellationToken ct, IProgress<double> progress)

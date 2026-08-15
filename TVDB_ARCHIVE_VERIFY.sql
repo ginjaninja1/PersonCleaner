@@ -61,6 +61,50 @@ SELECT COUNT(*) AS cached_responses, MIN(fetched_utc) AS oldest_fetch,
        MAX(expires_utc) AS latest_expiry
 FROM api_response_cache;
 
+-- 6a. Responses displaced by a later refresh are retained permanently here.
+-- The current version remains in api_response_cache, so both tables together
+-- are the complete paid-for response history.
+SELECT 'current' AS storage, COUNT(*) AS responses FROM api_response_cache
+UNION ALL
+SELECT 'historical', COUNT(*) FROM api_response_archive;
+
+-- 6b. Evidence-first person acquisition: show which candidates were enriched
+-- and why. Weak candidates should overwhelmingly be recorded without a call.
+SELECT normalized_name_class, extended_fetched, extended_fetch_reason,
+       COUNT(*) AS candidates
+FROM candidate_evidence
+WHERE entity_type='person'
+GROUP BY normalized_name_class, extended_fetched, extended_fetch_reason
+ORDER BY normalized_name_class, extended_fetched DESC, candidates DESC;
+
+-- 6c. Discovery routes remain evidence, not an implicit assertion of truth.
+SELECT discovery_methods, COUNT(*) AS candidates
+FROM candidate_evidence
+WHERE entity_type='person'
+GROUP BY discovery_methods
+ORDER BY candidates DESC;
+
+-- 6e. Human-readable shared TVDB productions; this is the preferred evidence
+-- report instead of interpreting opaque keys such as series:342137.
+SELECT emby_person, candidate_name, production_title, production_type,
+       production_tvdb_id, first_aired
+FROM candidate_production_search
+WHERE is_shared=1
+ORDER BY emby_person, candidate_name, production_title;
+
+-- Search all candidate productions by person or title.
+SELECT *
+FROM candidate_production_search
+WHERE emby_person LIKE '%Gallagher%'
+   OR production_title LIKE '%Young Offenders%'
+ORDER BY emby_person, candidate_name, production_title;
+
+-- 6d. Old and new decisions remain distinguishable after the pivot.
+SELECT algorithm_version, entity_type, provenance, method, COUNT(*) AS decisions
+FROM resolution_decision_history
+GROUP BY algorithm_version, entity_type, provenance, method
+ORDER BY algorithm_version, entity_type, decisions DESC;
+
 -- 7. Items needing human review; these must not be mixed with accepted exports.
 SELECT *
 FROM identity_review_queue

@@ -56,13 +56,29 @@ namespace PersonCleaner.Storage
                 db.Execute("CREATE TABLE IF NOT EXISTS fetch_cache(cache_key TEXT PRIMARY KEY, state TEXT NOT NULL, http_status INTEGER, attempt_count INTEGER NOT NULL, fetched_utc TEXT, next_attempt_utc TEXT NOT NULL, error TEXT)");
                 db.Execute("CREATE TABLE IF NOT EXISTS api_response_cache(request_path TEXT PRIMARY KEY, response_json TEXT NOT NULL, fetched_utc TEXT NOT NULL, expires_utc TEXT NOT NULL)");
                 db.Execute("CREATE INDEX IF NOT EXISTS ix_api_response_expiry ON api_response_cache(expires_utc)");
+                db.Execute("CREATE TABLE IF NOT EXISTS api_response_archive(request_path TEXT NOT NULL, fetched_utc TEXT NOT NULL, response_json TEXT NOT NULL, PRIMARY KEY(request_path,fetched_utc))");
+                db.Execute("CREATE INDEX IF NOT EXISTS ix_api_response_archive_path ON api_response_archive(request_path)");
+                // Existing cache rows remain the current durable copy. SaveApiResponse
+                // moves the previous version into history immediately before replacement,
+                // avoiding a one-off duplication of the potentially very large cache.
                 db.Execute("CREATE TABLE IF NOT EXISTS run_state(task_key TEXT PRIMARY KEY, status TEXT NOT NULL, started_utc TEXT, updated_utc TEXT NOT NULL, finished_utc TEXT, total_items INTEGER NOT NULL, processed_items INTEGER NOT NULL, success_count INTEGER NOT NULL, failure_count INTEGER NOT NULL, last_emby_id INTEGER, message TEXT)");
                 db.Execute("CREATE TABLE IF NOT EXISTS export_scope(task_key TEXT NOT NULL, emby_id INTEGER NOT NULL, ordinal INTEGER NOT NULL, entity_type TEXT NOT NULL, id_area TEXT NOT NULL, result TEXT NOT NULL DEFAULT 'pending', updated_utc TEXT NOT NULL, PRIMARY KEY(task_key,emby_id))");
                 db.Execute("CREATE INDEX IF NOT EXISTS ix_export_scope_progress ON export_scope(task_key,entity_type,id_area,result)");
                 db.Execute("CREATE TABLE IF NOT EXISTS id_probe(direction TEXT NOT NULL, entity_type TEXT NOT NULL, input_id TEXT NOT NULL, tvdb_id TEXT, imdb_id TEXT, name TEXT, success INTEGER NOT NULL, checked_utc TEXT NOT NULL, raw_json TEXT, PRIMARY KEY(direction,entity_type,input_id,tvdb_id))");
                 db.Execute("CREATE TABLE IF NOT EXISTS resolution_evaluation(emby_id INTEGER NOT NULL, entity_type TEXT NOT NULL, emby_name TEXT, withheld_tvdb_id TEXT NOT NULL, predicted_tvdb_id TEXT, method TEXT NOT NULL, confidence REAL NOT NULL, candidate_count INTEGER NOT NULL, is_correct INTEGER NOT NULL, evidence_json TEXT, evaluated_utc TEXT NOT NULL, PRIMARY KEY(emby_id,method))");
                 db.Execute("CREATE TABLE IF NOT EXISTS item_resolution(emby_id INTEGER PRIMARY KEY, entity_type TEXT NOT NULL, observed_tvdb_id TEXT, resolved_tvdb_id TEXT, provenance TEXT NOT NULL, method TEXT NOT NULL, confidence REAL NOT NULL, candidate_count INTEGER NOT NULL, evidence_json TEXT, evaluated_utc TEXT NOT NULL)");
+                db.Execute("CREATE TABLE IF NOT EXISTS resolution_decision_history(emby_id INTEGER NOT NULL, evaluated_utc TEXT NOT NULL, algorithm_version TEXT NOT NULL, entity_type TEXT NOT NULL, observed_tvdb_id TEXT, resolved_tvdb_id TEXT, provenance TEXT NOT NULL, method TEXT NOT NULL, confidence REAL NOT NULL, candidate_count INTEGER NOT NULL, evidence_json TEXT, PRIMARY KEY(emby_id,evaluated_utc,algorithm_version))");
+                db.Execute("INSERT OR IGNORE INTO resolution_decision_history SELECT emby_id,evaluated_utc,'legacy-pre-evidence-first',entity_type,observed_tvdb_id,resolved_tvdb_id,provenance,method,confidence,candidate_count,evidence_json FROM item_resolution");
                 db.Execute("CREATE TABLE IF NOT EXISTS resolution_candidate(emby_id INTEGER NOT NULL, rank INTEGER NOT NULL, entity_type TEXT NOT NULL, tvdb_id TEXT, name TEXT, score REAL NOT NULL, external_ids_json TEXT, filmography_ids_json TEXT, evidence TEXT, evaluated_utc TEXT NOT NULL, PRIMARY KEY(emby_id,rank))");
+                db.Execute("CREATE TABLE IF NOT EXISTS candidate_evidence(emby_id INTEGER NOT NULL, tvdb_id TEXT NOT NULL, entity_type TEXT NOT NULL, search_rank INTEGER, final_rank INTEGER, name TEXT, normalized_name_class TEXT NOT NULL, discovery_methods TEXT NOT NULL, extended_fetched INTEGER NOT NULL, extended_fetch_reason TEXT, score REAL NOT NULL, external_ids_json TEXT, filmography_ids_json TEXT, evidence TEXT, evaluated_utc TEXT NOT NULL, PRIMARY KEY(emby_id,tvdb_id))");
+                db.Execute("CREATE INDEX IF NOT EXISTS ix_candidate_evidence_tvdb ON candidate_evidence(tvdb_id,entity_type)");
+                db.Execute("CREATE INDEX IF NOT EXISTS ix_candidate_evidence_signal ON candidate_evidence(entity_type,normalized_name_class,extended_fetched)");
+                db.Execute("INSERT OR IGNORE INTO candidate_evidence SELECT emby_id,COALESCE(tvdb_id,''),entity_type,NULL,rank,name,'legacy-unknown','legacy-name-search',CASE WHEN evidence LIKE '%tvdb_productions=%' THEN 1 ELSE 0 END,'legacy-pre-pivot',score,external_ids_json,filmography_ids_json,evidence,evaluated_utc FROM resolution_candidate WHERE tvdb_id IS NOT NULL AND trim(tvdb_id)<>''");
+                db.Execute("CREATE TABLE IF NOT EXISTS person_local_production(emby_id INTEGER NOT NULL,production_key TEXT NOT NULL,production_type TEXT NOT NULL,production_tvdb_id TEXT NOT NULL,PRIMARY KEY(emby_id,production_key))");
+                db.Execute("CREATE TABLE IF NOT EXISTS candidate_tvdb_production(emby_id INTEGER NOT NULL,candidate_tvdb_id TEXT NOT NULL,production_key TEXT NOT NULL,production_type TEXT NOT NULL,production_tvdb_id TEXT NOT NULL,is_shared INTEGER NOT NULL,PRIMARY KEY(emby_id,candidate_tvdb_id,production_key))");
+                db.Execute("CREATE INDEX IF NOT EXISTS ix_candidate_tvdb_production_title ON candidate_tvdb_production(production_type,production_tvdb_id)");
+                db.Execute("CREATE VIEW IF NOT EXISTS person_local_production_search AS SELECT p.emby_id,e.name AS emby_person,p.production_key,p.production_type,p.production_tvdb_id,t.name AS production_title,t.first_aired FROM person_local_production p JOIN emby_item e ON e.emby_id=p.emby_id LEFT JOIN tvdb_entity t ON t.entity_type=p.production_type AND t.tvdb_id=p.production_tvdb_id");
+                db.Execute("CREATE VIEW IF NOT EXISTS candidate_production_search AS SELECT p.emby_id,e.name AS emby_person,p.candidate_tvdb_id,c.name AS candidate_name,p.production_key,p.production_type,p.production_tvdb_id,t.name AS production_title,t.first_aired,p.is_shared FROM candidate_tvdb_production p JOIN emby_item e ON e.emby_id=p.emby_id LEFT JOIN candidate_evidence c ON c.emby_id=p.emby_id AND c.tvdb_id=p.candidate_tvdb_id LEFT JOIN tvdb_entity t ON t.entity_type=p.production_type AND t.tvdb_id=p.production_tvdb_id");
                 db.Execute("CREATE INDEX IF NOT EXISTS ix_resolution_candidate_tvdb ON resolution_candidate(tvdb_id,entity_type)");
                 db.Execute("CREATE INDEX IF NOT EXISTS ix_item_resolution_tvdb ON item_resolution(resolved_tvdb_id,entity_type)");
                 db.Execute("CREATE INDEX IF NOT EXISTS ix_item_resolution_provenance ON item_resolution(provenance,entity_type,confidence)");
@@ -105,7 +121,12 @@ namespace PersonCleaner.Storage
         public void SaveApiResponse(string requestPath, string responseJson)
         {
             var expires = DateTimeOffset.UtcNow.AddDays(Math.Max(1, Plugin.Instance.Configuration.SuccessCacheDays));
-            Execute("INSERT OR REPLACE INTO api_response_cache VALUES(@path,@json,@now,@expires)", s => { s.TryBind("@path", requestPath); s.TryBind("@json", responseJson); s.TryBind("@now", Now()); s.TryBind("@expires", expires.ToString("O")); });
+            var now = Now();
+            lock (sync) db.RunInTransaction(x =>
+            {
+                Statement(x, "INSERT OR IGNORE INTO api_response_archive(request_path,fetched_utc,response_json) SELECT request_path,fetched_utc,response_json FROM api_response_cache WHERE request_path=@path", s => s.TryBind("@path", requestPath));
+                Statement(x, "INSERT OR REPLACE INTO api_response_cache VALUES(@path,@json,@now,@expires)", s => { s.TryBind("@path", requestPath); s.TryBind("@json", responseJson); s.TryBind("@now", now); s.TryBind("@expires", expires.ToString("O")); });
+            }, TransactionMode.Immediate);
         }
 
         public void SaveEmby(long id, string guid, string type, string name, int? year, long? parent, string tvdb, string imdb, string tmdb, string path)
@@ -258,7 +279,12 @@ namespace PersonCleaner.Storage
 
         public void SaveItemResolution(long embyId, string type, string observed, string resolved, string provenance, string method, double confidence, int candidates, string evidence)
         {
-            Execute("INSERT OR REPLACE INTO item_resolution VALUES(@emby,@type,@observed,@resolved,@provenance,@method,@confidence,@candidates,@evidence,@now)", s => { s.TryBind("@emby", embyId); s.TryBind("@type", type); s.TryBind("@observed", observed); s.TryBind("@resolved", resolved); s.TryBind("@provenance", provenance); s.TryBind("@method", method); s.TryBind("@confidence", confidence); s.TryBind("@candidates", candidates); s.TryBind("@evidence", evidence); s.TryBind("@now", Now()); });
+            var now = Now();
+            lock (sync) db.RunInTransaction(x =>
+            {
+                Statement(x, "INSERT OR REPLACE INTO item_resolution VALUES(@emby,@type,@observed,@resolved,@provenance,@method,@confidence,@candidates,@evidence,@now)", s => { s.TryBind("@emby", embyId); s.TryBind("@type", type); s.TryBind("@observed", observed); s.TryBind("@resolved", resolved); s.TryBind("@provenance", provenance); s.TryBind("@method", method); s.TryBind("@confidence", confidence); s.TryBind("@candidates", candidates); s.TryBind("@evidence", evidence); s.TryBind("@now", now); });
+                Statement(x, "INSERT OR IGNORE INTO resolution_decision_history VALUES(@emby,@now,'tvdb-evidence-first-v2',@type,@observed,@resolved,@provenance,@method,@confidence,@candidates,@evidence)", s => { s.TryBind("@emby", embyId); s.TryBind("@now", now); s.TryBind("@type", type); s.TryBind("@observed", observed); s.TryBind("@resolved", resolved); s.TryBind("@provenance", provenance); s.TryBind("@method", method); s.TryBind("@confidence", confidence); s.TryBind("@candidates", candidates); s.TryBind("@evidence", evidence); });
+            }, TransactionMode.Immediate);
         }
 
         public void SaveResolutionCandidates(long embyId, IEnumerable<Tvdb.ResolutionCandidate> candidates, Func<object, string> serialize)
@@ -266,9 +292,51 @@ namespace PersonCleaner.Storage
             lock (sync) db.RunInTransaction(x =>
             {
                 Statement(x, "DELETE FROM resolution_candidate WHERE emby_id=@emby", s => s.TryBind("@emby", embyId));
-                foreach (var c in candidates ?? Enumerable.Empty<Tvdb.ResolutionCandidate>())
+                Statement(x, "DELETE FROM candidate_evidence WHERE emby_id=@emby", s => s.TryBind("@emby", embyId));
+                Statement(x, "DELETE FROM person_local_production WHERE emby_id=@emby", s => s.TryBind("@emby", embyId));
+                Statement(x, "DELETE FROM candidate_tvdb_production WHERE emby_id=@emby", s => s.TryBind("@emby", embyId));
+                var materialized = (candidates ?? Enumerable.Empty<Tvdb.ResolutionCandidate>()).ToList();
+                foreach (var key in materialized.SelectMany(c => c.LocalFilmographyIds ?? new List<string>()).Distinct())
+                    SaveProductionKey(x, "person_local_production", embyId, null, key, false);
+                foreach (var c in materialized)
+                {
                     Statement(x, "INSERT INTO resolution_candidate VALUES(@emby,@rank,@type,@tvdb,@name,@score,@external,@filmography,@evidence,@now)", s => { s.TryBind("@emby", embyId); s.TryBind("@rank", c.Rank); s.TryBind("@type", c.EntityType); s.TryBind("@tvdb", c.TvdbId); s.TryBind("@name", c.Name); s.TryBind("@score", c.Score); s.TryBind("@external", serialize(c.ExternalIds)); s.TryBind("@filmography", serialize(c.FilmographyIds)); s.TryBind("@evidence", c.Evidence); s.TryBind("@now", Now()); });
+                    Statement(x, "INSERT OR REPLACE INTO candidate_evidence VALUES(@emby,@tvdb,@type,@searchRank,@finalRank,@name,@nameClass,@methods,@extended,@reason,@score,@external,@filmography,@evidence,@now)", s => { s.TryBind("@emby", embyId); s.TryBind("@tvdb", c.TvdbId); s.TryBind("@type", c.EntityType); s.TryBind("@searchRank", c.SearchRank); s.TryBind("@finalRank", c.Rank); s.TryBind("@name", c.Name); s.TryBind("@nameClass", c.NameClass ?? "unknown"); s.TryBind("@methods", c.DiscoveryMethods ?? "name-search"); s.TryBind("@extended", c.ExtendedFetched ? 1 : 0); s.TryBind("@reason", c.ExtendedFetchReason); s.TryBind("@score", c.Score); s.TryBind("@external", serialize(c.ExternalIds)); s.TryBind("@filmography", serialize(c.FilmographyIds)); s.TryBind("@evidence", c.Evidence); s.TryBind("@now", Now()); });
+                    var overlaps = new HashSet<string>(c.OverlapIds ?? new List<string>());
+                    foreach (var key in c.FilmographyIds ?? new List<string>()) SaveProductionKey(x, "candidate_tvdb_production", embyId, c.TvdbId, key, overlaps.Contains(key));
+                }
             }, TransactionMode.Immediate);
+        }
+
+        public string DescribeProduction(string productionKey)
+        {
+            if (!TrySplitProductionKey(productionKey, out var type, out var id)) return productionKey;
+            lock (sync) using (var s = db.PrepareStatement("SELECT name FROM tvdb_entity WHERE entity_type=@type AND tvdb_id=@id LIMIT 1"))
+            {
+                s.TryBind("@type", type); s.TryBind("@id", id);
+                foreach (var row in s.ExecuteQuery())
+                {
+                    var name = row.IsDBNull(0) ? null : row.GetString(0);
+                    if (!string.IsNullOrWhiteSpace(name)) return name + " (" + type + ", TVDB " + id + ")";
+                }
+            }
+            return productionKey;
+        }
+
+        private static void SaveProductionKey(IDatabaseConnection x, string table, long embyId, string candidateTvdbId, string key, bool shared)
+        {
+            if (!TrySplitProductionKey(key, out var type, out var id)) return;
+            if (table == "person_local_production")
+                Statement(x, "INSERT OR IGNORE INTO person_local_production VALUES(@emby,@key,@type,@id)", s => { s.TryBind("@emby", embyId); s.TryBind("@key", key); s.TryBind("@type", type); s.TryBind("@id", id); });
+            else
+                Statement(x, "INSERT OR REPLACE INTO candidate_tvdb_production VALUES(@emby,@candidate,@key,@type,@id,@shared)", s => { s.TryBind("@emby", embyId); s.TryBind("@candidate", candidateTvdbId); s.TryBind("@key", key); s.TryBind("@type", type); s.TryBind("@id", id); s.TryBind("@shared", shared ? 1 : 0); });
+        }
+
+        private static bool TrySplitProductionKey(string key, out string type, out string id)
+        {
+            var separator = (key ?? string.Empty).IndexOf(':');
+            if (separator <= 0 || separator == key.Length - 1) { type = null; id = null; return false; }
+            type = key.Substring(0, separator); id = key.Substring(separator + 1); return true;
         }
 
         private int Scalar(string sql) { using (var s = db.PrepareStatement(sql)) foreach (var row in s.ExecuteQuery()) return row.GetInt(0); return 0; }
