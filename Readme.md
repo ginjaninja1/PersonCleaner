@@ -49,8 +49,12 @@ The main tables are `emby_item`, `tvdb_entity`, `remote_id`, `credit`, `fetch_ca
 `direct`, `inferred`, `rejected`, and `unresolved` results. Use `resolution_inventory` for counts and
 `direct-unavailable` identifies an Emby TVDB ID whose TVDB entity endpoint returned 404. Use
 `identity_review_queue` for human review and `resolved_searchable_media` for identity-aware searches.
-Raw successful entity JSON is retained in `tvdb_entity.raw_json`; overviews are not
-modeled into searchable columns.
+Raw successful entity JSON is retained in `tvdb_entity.raw_json`; overviews are not modeled into
+searchable columns.
+
+TVDB/TMDB schema equivalences and intentional provider-specific differences are documented in
+`PROVIDER_SCHEMA.md`. Prefer the `provider_entity`, `provider_external_id`, `provider_alias`, and
+`provider_credit_observation` views when comparing equivalent provider-native observations.
 
 ---
 

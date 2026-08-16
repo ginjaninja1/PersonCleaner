@@ -32,8 +32,10 @@ namespace PersonCleaner.Tvdb
         public string originalCountry { get; set; }
         public string originalLanguage { get; set; }
         public List<RemoteIdData> remoteIds { get; set; }
+        public List<AliasData> aliases { get; set; }
         public List<CharacterData> characters { get; set; }
     }
+    internal sealed class AliasData { public string language { get; set; } public string name { get; set; } }
     internal sealed class EpisodeData
     {
         public int id { get; set; }

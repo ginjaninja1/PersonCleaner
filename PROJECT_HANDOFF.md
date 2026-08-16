@@ -286,3 +286,14 @@ ORDER BY CASE entity_type WHEN 'series' THEN 1 WHEN 'movie' THEN 2
 - `provider_identity_signals` provides a first side-by-side answer for TMDB versus TVDB by Emby ID.
 - `TMDB_ARCHIVE_VERIFY.sql` contains inspection queries, including the Coco/Eliot Sumner case.
 - This capture does not modify Emby metadata or feed TMDB evidence into TVDB confidence thresholds.
+- Added normalized `tvdb_alias` and `tvdb_credit_observation` tables to mirror functionally equivalent
+  TMDB concepts. Rebuild/backfill must be an explicit scheduled operation over cached responses,
+  never repository initialization; scanning the multi-GB cache during task construction blocks Emby
+  startup. Legacy normalized credits may be explicitly marked `legacy-normalized` where their
+  original endpoint route can no longer be reconstructed.
+- Added provider-neutral `provider_entity`, `provider_external_id`, `provider_alias`, and
+  `provider_credit_observation` views. See `PROVIDER_SCHEMA.md` for field mappings and intentional
+  differences that preserve each API's own semantics.
+- Removed the ineffective TMDB person `alternative_names` append while retaining cache-key
+  compatibility: unexpired responses stored under the old request path are reused, and the leaner
+  path is fetched only when refresh is due.

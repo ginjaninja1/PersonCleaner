@@ -49,9 +49,14 @@ namespace PersonCleaner.Storage
                 db.Execute("CREATE INDEX IF NOT EXISTS ix_tvdb_entity_name ON tvdb_entity(name,entity_type)");
                 db.Execute("CREATE TABLE IF NOT EXISTS remote_id(tvdb_id TEXT NOT NULL, entity_type TEXT NOT NULL, source_name TEXT NOT NULL, remote_id TEXT NOT NULL, source_type INTEGER, PRIMARY KEY(tvdb_id,entity_type,source_name,remote_id))");
                 db.Execute("CREATE INDEX IF NOT EXISTS ix_remote_id_value ON remote_id(remote_id,source_name,entity_type)");
+                db.Execute("CREATE TABLE IF NOT EXISTS tvdb_alias(tvdb_id TEXT NOT NULL,entity_type TEXT NOT NULL,alias TEXT NOT NULL,language TEXT NOT NULL DEFAULT '',alias_type TEXT NOT NULL DEFAULT '',PRIMARY KEY(tvdb_id,entity_type,alias,language,alias_type))");
+                db.Execute("CREATE INDEX IF NOT EXISTS ix_tvdb_alias_value ON tvdb_alias(alias,entity_type)");
                 db.Execute("CREATE TABLE IF NOT EXISTS credit(subject_tvdb_id TEXT NOT NULL, subject_type TEXT NOT NULL, person_tvdb_id TEXT NOT NULL, character_id INTEGER NOT NULL, episode_tvdb_id TEXT, person_name TEXT, role_name TEXT, credit_type TEXT, sort_order INTEGER, is_featured INTEGER, PRIMARY KEY(subject_tvdb_id,subject_type,person_tvdb_id,character_id))");
                 db.Execute("CREATE INDEX IF NOT EXISTS ix_credit_person ON credit(person_tvdb_id,subject_type)");
                 db.Execute("CREATE INDEX IF NOT EXISTS ix_credit_episode ON credit(episode_tvdb_id)");
+                db.Execute("CREATE TABLE IF NOT EXISTS tvdb_credit_observation(source_entity_type TEXT NOT NULL,source_tvdb_id TEXT NOT NULL,person_tvdb_id TEXT NOT NULL,production_tvdb_id TEXT NOT NULL,production_type TEXT NOT NULL,character_id INTEGER NOT NULL,episode_tvdb_id TEXT NOT NULL DEFAULT '',person_name TEXT,role_name TEXT,credit_type TEXT,sort_order INTEGER,is_featured INTEGER,observed_utc TEXT NOT NULL,PRIMARY KEY(source_entity_type,source_tvdb_id,person_tvdb_id,production_tvdb_id,production_type,character_id,episode_tvdb_id))");
+                db.Execute("CREATE INDEX IF NOT EXISTS ix_tvdb_credit_observation_person ON tvdb_credit_observation(person_tvdb_id,source_entity_type)");
+                db.Execute("CREATE INDEX IF NOT EXISTS ix_tvdb_credit_observation_production ON tvdb_credit_observation(production_tvdb_id,production_type,source_entity_type)");
                 db.Execute("DELETE FROM credit WHERE credit_type IS NULL OR credit_type NOT IN ('Actor','Guest Star','Director','Writer','Screenplay','Producer','Executive Producer','Creator','Showrunner')");
                 db.Execute("CREATE TABLE IF NOT EXISTS fetch_cache(cache_key TEXT PRIMARY KEY, state TEXT NOT NULL, http_status INTEGER, attempt_count INTEGER NOT NULL, fetched_utc TEXT, next_attempt_utc TEXT NOT NULL, error TEXT)");
                 db.Execute("CREATE TABLE IF NOT EXISTS api_response_cache(request_path TEXT PRIMARY KEY, response_json TEXT NOT NULL, fetched_utc TEXT NOT NULL, expires_utc TEXT NOT NULL)");
@@ -164,6 +169,9 @@ namespace PersonCleaner.Storage
                 x.Execute("DELETE FROM remote_id WHERE tvdb_id='" + id.Replace("'", "''") + "' AND entity_type='" + type.Replace("'", "''") + "'");
                 foreach (var r in d.remoteIds ?? new System.Collections.Generic.List<Tvdb.RemoteIdData>())
                     Statement(x, "INSERT OR REPLACE INTO remote_id VALUES(@id,@type,@source,@remote,@stype)", s => { s.TryBind("@id", id); s.TryBind("@type", type); s.TryBind("@source", r.sourceName ?? "unknown"); s.TryBind("@remote", r.id); s.TryBind("@stype", r.type); });
+                Statement(x, "DELETE FROM tvdb_alias WHERE tvdb_id=@id AND entity_type=@type", s => { s.TryBind("@id", id); s.TryBind("@type", type); });
+                foreach (var alias in d.aliases ?? new List<Tvdb.AliasData>())
+                    if (!string.IsNullOrWhiteSpace(alias.name)) Statement(x, "INSERT OR REPLACE INTO tvdb_alias VALUES(@id,@type,@alias,@language,'alias')", s => { s.TryBind("@id", id); s.TryBind("@type", type); s.TryBind("@alias", alias.name); s.TryBind("@language", alias.language ?? ""); });
                 SaveCredits(x, id, type, d.characters);
             }, TransactionMode.Immediate);
         }
@@ -188,6 +196,7 @@ namespace PersonCleaner.Storage
 
         private static void SaveCredits(IDatabaseConnection x, string subject, string type, System.Collections.Generic.List<Tvdb.CharacterData> credits)
         {
+            Statement(x, "DELETE FROM tvdb_credit_observation WHERE source_entity_type=@type AND source_tvdb_id=@subject", s => { s.TryBind("@type", type); s.TryBind("@subject", subject); });
             foreach (var c in (credits ?? new System.Collections.Generic.List<Tvdb.CharacterData>()).Where(Tvdb.TvdbScope.IsScreenCredit))
             {
                 var productionId = subject;
@@ -201,6 +210,7 @@ namespace PersonCleaner.Storage
                     else if (c.seriesId.HasValue) { productionId = c.seriesId.Value.ToString(CultureInfo.InvariantCulture); productionType = "series"; }
                 }
                 Statement(x, "INSERT OR REPLACE INTO credit VALUES(@subject,@type,@person,@character,@episode,@pname,@role,@ctype,@sort,@featured)", s => { s.TryBind("@subject", productionId); s.TryBind("@type", productionType); s.TryBind("@person", personId); s.TryBind("@character", c.id); s.TryBind("@episode", c.episodeId?.ToString(CultureInfo.InvariantCulture)); s.TryBind("@pname", c.personName); s.TryBind("@role", c.name); s.TryBind("@ctype", c.peopleType); s.TryBind("@sort", c.sort); s.TryBind("@featured", c.isFeatured ? 1 : 0); });
+                Statement(x, "INSERT OR REPLACE INTO tvdb_credit_observation VALUES(@sourceType,@sourceId,@person,@production,@ptype,@character,@episode,@pname,@role,@ctype,@sort,@featured,@now)", s => { s.TryBind("@sourceType", type); s.TryBind("@sourceId", subject); s.TryBind("@person", personId); s.TryBind("@production", productionId); s.TryBind("@ptype", productionType); s.TryBind("@character", c.id); s.TryBind("@episode", c.episodeId?.ToString(CultureInfo.InvariantCulture) ?? ""); s.TryBind("@pname", c.personName); s.TryBind("@role", c.name); s.TryBind("@ctype", c.peopleType); s.TryBind("@sort", c.sort); s.TryBind("@featured", c.isFeatured ? 1 : 0); s.TryBind("@now", Now()); });
             }
         }
 

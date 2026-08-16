@@ -37,6 +37,9 @@ namespace PersonCleaner.Storage
                 db.Execute("CREATE TABLE IF NOT EXISTS tmdb_alias(tmdb_id TEXT NOT NULL,entity_type TEXT NOT NULL,alias TEXT NOT NULL,country TEXT NOT NULL DEFAULT '',alias_type TEXT NOT NULL DEFAULT '',PRIMARY KEY(tmdb_id,entity_type,alias,country,alias_type))");
                 db.Execute("CREATE TABLE IF NOT EXISTS tmdb_credit(person_tmdb_id TEXT NOT NULL,production_tmdb_id TEXT NOT NULL,production_type TEXT NOT NULL,credit_id TEXT NOT NULL DEFAULT '',credit_kind TEXT NOT NULL,job_or_character TEXT NOT NULL DEFAULT '',department TEXT,episode_count INTEGER,production_name TEXT,first_date TEXT,PRIMARY KEY(person_tmdb_id,production_tmdb_id,production_type,credit_id,credit_kind,job_or_character))");
                 db.Execute("CREATE INDEX IF NOT EXISTS ix_tmdb_credit_production ON tmdb_credit(production_tmdb_id,production_type)");
+                db.Execute("CREATE TABLE IF NOT EXISTS tmdb_credit_observation(source_entity_type TEXT NOT NULL,source_tmdb_id TEXT NOT NULL,person_tmdb_id TEXT NOT NULL,production_tmdb_id TEXT NOT NULL,production_type TEXT NOT NULL,credit_id TEXT NOT NULL DEFAULT '',credit_kind TEXT NOT NULL,job_or_character TEXT NOT NULL DEFAULT '',department TEXT,episode_count INTEGER,production_name TEXT,first_date TEXT,observed_utc TEXT NOT NULL,PRIMARY KEY(source_entity_type,source_tmdb_id,person_tmdb_id,production_tmdb_id,production_type,credit_id,credit_kind,job_or_character))");
+                db.Execute("CREATE INDEX IF NOT EXISTS ix_tmdb_credit_observation_person ON tmdb_credit_observation(person_tmdb_id,source_entity_type)");
+                db.Execute("CREATE INDEX IF NOT EXISTS ix_tmdb_credit_observation_production ON tmdb_credit_observation(production_tmdb_id,production_type,source_entity_type)");
                 db.Execute("CREATE TABLE IF NOT EXISTS tmdb_item_resolution(emby_id INTEGER PRIMARY KEY,entity_type TEXT NOT NULL,observed_tmdb_id TEXT,resolved_tmdb_id TEXT,provenance TEXT NOT NULL,method TEXT NOT NULL,candidate_count INTEGER NOT NULL,evidence_json TEXT,evaluated_utc TEXT NOT NULL)");
                 db.Execute("CREATE TABLE IF NOT EXISTS tmdb_resolution_candidate(emby_id INTEGER NOT NULL,rank INTEGER NOT NULL,entity_type TEXT NOT NULL,tmdb_id TEXT,name TEXT,source_external_id TEXT,raw_json TEXT,evaluated_utc TEXT NOT NULL,PRIMARY KEY(emby_id,rank))");
                 db.Execute("CREATE TABLE IF NOT EXISTS tmdb_api_response_cache(request_path TEXT PRIMARY KEY,response_json TEXT NOT NULL,fetched_utc TEXT NOT NULL,expires_utc TEXT NOT NULL)");
@@ -44,6 +47,14 @@ namespace PersonCleaner.Storage
                 db.Execute("CREATE TABLE IF NOT EXISTS tmdb_fetch_cache(cache_key TEXT PRIMARY KEY,state TEXT NOT NULL,attempt_count INTEGER NOT NULL,fetched_utc TEXT,next_attempt_utc TEXT NOT NULL,error TEXT)");
                 db.Execute("CREATE TABLE IF NOT EXISTS tmdb_run_state(task_key TEXT PRIMARY KEY,status TEXT NOT NULL,started_utc TEXT,updated_utc TEXT NOT NULL,finished_utc TEXT,total_items INTEGER NOT NULL,processed_items INTEGER NOT NULL,success_count INTEGER NOT NULL,failure_count INTEGER NOT NULL,last_emby_id INTEGER,message TEXT)");
                 db.Execute("CREATE VIEW IF NOT EXISTS provider_identity_signals AS SELECT e.emby_id,e.item_type,e.name AS emby_name,e.imdb_id,e.tvdb_id AS emby_tvdb_id,e.tmdb_id AS emby_tmdb_id,r.resolved_tvdb_id,r.provenance AS tvdb_provenance,tr.resolved_tmdb_id,tr.provenance AS tmdb_provenance,te.name AS tvdb_name,me.name AS tmdb_name FROM emby_item e LEFT JOIN item_resolution r ON r.emby_id=e.emby_id LEFT JOIN tvdb_entity te ON te.tvdb_id=r.resolved_tvdb_id AND te.entity_type=e.item_type LEFT JOIN tmdb_item_resolution tr ON tr.emby_id=e.emby_id LEFT JOIN tmdb_entity me ON me.tmdb_id=tr.resolved_tmdb_id AND me.entity_type=e.item_type");
+                db.Execute("DROP VIEW IF EXISTS provider_entity");
+                db.Execute("CREATE VIEW provider_entity AS SELECT 'tvdb' AS provider,tvdb_id AS provider_id,entity_type,name,name AS original_name,birth_date,death_date,birth_place,first_aired AS first_date,fetched_utc FROM tvdb_entity UNION ALL SELECT 'tmdb',tmdb_id,entity_type,name,original_name,birth_date,death_date,birth_place,first_date,fetched_utc FROM tmdb_entity");
+                db.Execute("DROP VIEW IF EXISTS provider_external_id");
+                db.Execute("CREATE VIEW provider_external_id AS SELECT 'tvdb' AS provider,tvdb_id AS provider_id,entity_type,source_name,remote_id AS external_id,source_type FROM remote_id UNION ALL SELECT 'tmdb',tmdb_id,entity_type,source_name,external_id,NULL FROM tmdb_external_id");
+                db.Execute("DROP VIEW IF EXISTS provider_alias");
+                db.Execute("CREATE VIEW provider_alias AS SELECT 'tvdb' AS provider,tvdb_id AS provider_id,entity_type,alias,language AS locale,alias_type FROM tvdb_alias UNION ALL SELECT 'tmdb',tmdb_id,entity_type,alias,country,alias_type FROM tmdb_alias");
+                db.Execute("DROP VIEW IF EXISTS provider_credit_observation");
+                db.Execute("CREATE VIEW provider_credit_observation AS SELECT 'tvdb' AS provider,source_entity_type,source_tvdb_id AS source_provider_id,person_tvdb_id AS person_provider_id,production_tvdb_id AS production_provider_id,production_type,CAST(character_id AS TEXT) AS credit_id,CASE WHEN credit_type IN ('Actor','Guest Star') THEN 'cast' ELSE 'crew' END AS credit_kind,role_name AS job_or_character,credit_type AS department,NULL AS episode_count,observed_utc FROM tvdb_credit_observation UNION ALL SELECT 'tmdb',source_entity_type,source_tmdb_id,person_tmdb_id,production_tmdb_id,production_type,credit_id,credit_kind,job_or_character,department,episode_count,observed_utc FROM tmdb_credit_observation");
                 logger.Info("TMDB archive schema initialized at {0}", DatabasePath);
             }
         }
@@ -93,6 +104,8 @@ namespace PersonCleaner.Storage
                     .Concat(entity.alternative_titles?.results ?? new List<TmdbAlias>())
                     .Concat(entity.alternative_titles?.titles ?? new List<TmdbAlias>()))
                     Statement(x, "INSERT OR IGNORE INTO tmdb_alias VALUES(@id,@type,@alias,@country,@atype)", s => { s.TryBind("@id", id); s.TryBind("@type", type); s.TryBind("@alias", alias.name ?? alias.title); s.TryBind("@country", alias.iso_3166_1 ?? ""); s.TryBind("@atype", alias.type ?? ""); });
+                foreach (var alias in entity.also_known_as ?? new List<string>())
+                    if (!string.IsNullOrWhiteSpace(alias)) Statement(x, "INSERT OR IGNORE INTO tmdb_alias VALUES(@id,@type,@alias,'','also_known_as')", s => { s.TryBind("@id", id); s.TryBind("@type", type); s.TryBind("@alias", alias); });
                 SaveCredits(x, id, type, entity.combined_credits ?? entity.aggregate_credits ?? entity.credits);
             }, TransactionMode.Immediate);
         }
@@ -103,6 +116,7 @@ namespace PersonCleaner.Storage
         private static void SaveCredits(IDatabaseConnection x, string subjectId, string subjectType, TmdbCredits credits)
         {
             if (credits == null) return;
+            Statement(x, "DELETE FROM tmdb_credit_observation WHERE source_entity_type=@type AND source_tmdb_id=@id", s => { s.TryBind("@type", subjectType); s.TryBind("@id", subjectId); });
             if (subjectType == "person") Statement(x, "DELETE FROM tmdb_credit WHERE person_tmdb_id=@id", s => s.TryBind("@id", subjectId));
             else Statement(x, "DELETE FROM tmdb_credit WHERE production_tmdb_id=@id AND production_type=@type", s => { s.TryBind("@id", subjectId); s.TryBind("@type", subjectType); });
             foreach (var c in credits.cast ?? new List<TmdbCredit>()) SaveCredit(x, subjectId, subjectType, c, "cast", c.character);
@@ -117,8 +131,12 @@ namespace PersonCleaner.Storage
             var productionName = subjectType == "person" ? c.name ?? c.title : null;
             var first = c.first_air_date ?? c.release_date;
             var roles = kind != "cast" ? Enumerable.Empty<Tuple<string, string, int?>>() : c.roles != null && c.roles.Count > 0 ? c.roles.Select(r => Tuple.Create(r.credit_id, r.character, r.episode_count)) : new[] { Tuple.Create(c.credit_id, role, c.episode_count) };
-            var jobs = kind == "crew" && c.jobs != null && c.jobs.Count > 0 ? c.jobs.Select(j => Tuple.Create(j.credit_id, j.job, j.episode_count)) : Enumerable.Empty<Tuple<string, string, int?>>();
-            foreach (var value in roles.Concat(jobs)) Statement(x, "INSERT OR REPLACE INTO tmdb_credit VALUES(@person,@production,@ptype,@credit,@kind,@role,@department,@episodes,@name,@first)", s => { s.TryBind("@person", personId); s.TryBind("@production", productionId); s.TryBind("@ptype", productionType); s.TryBind("@credit", value.Item1 ?? ""); s.TryBind("@kind", kind); s.TryBind("@role", value.Item2 ?? ""); s.TryBind("@department", c.department); s.TryBind("@episodes", value.Item3); s.TryBind("@name", productionName); s.TryBind("@first", first); });
+            var jobs = kind != "crew" ? Enumerable.Empty<Tuple<string, string, int?>>() : c.jobs != null && c.jobs.Count > 0 ? c.jobs.Select(j => Tuple.Create(j.credit_id, j.job, j.episode_count)) : new[] { Tuple.Create(c.credit_id, role, c.episode_count) };
+            foreach (var value in roles.Concat(jobs))
+            {
+                Statement(x, "INSERT OR REPLACE INTO tmdb_credit VALUES(@person,@production,@ptype,@credit,@kind,@role,@department,@episodes,@name,@first)", s => { s.TryBind("@person", personId); s.TryBind("@production", productionId); s.TryBind("@ptype", productionType); s.TryBind("@credit", value.Item1 ?? ""); s.TryBind("@kind", kind); s.TryBind("@role", value.Item2 ?? ""); s.TryBind("@department", c.department); s.TryBind("@episodes", value.Item3); s.TryBind("@name", productionName); s.TryBind("@first", first); });
+                Statement(x, "INSERT OR REPLACE INTO tmdb_credit_observation VALUES(@sourceType,@sourceId,@person,@production,@ptype,@credit,@kind,@role,@department,@episodes,@name,@first,@now)", s => { s.TryBind("@sourceType", subjectType); s.TryBind("@sourceId", subjectId); s.TryBind("@person", personId); s.TryBind("@production", productionId); s.TryBind("@ptype", productionType); s.TryBind("@credit", value.Item1 ?? ""); s.TryBind("@kind", kind); s.TryBind("@role", value.Item2 ?? ""); s.TryBind("@department", c.department); s.TryBind("@episodes", value.Item3); s.TryBind("@name", productionName); s.TryBind("@first", first); s.TryBind("@now", Now()); });
+            }
         }
 
         public void SaveResolution(long embyId, string type, string observed, string resolved, string provenance, string method, int candidateCount, string evidence)

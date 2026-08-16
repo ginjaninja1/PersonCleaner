@@ -64,6 +64,7 @@ namespace PersonCleaner.Tasks
 
             var checkpoint = IsPreview ? Tuple.Create(0, 0, 0) : repository.GetCheckpoint(Key, items.Count);
             var done = Math.Min(checkpoint.Item1, items.Count); var successes = checkpoint.Item2; var failures = checkpoint.Item3;
+            var lastCheckpointDone = done;
             repository.SetRun(Key, "running", items.Count, done, successes, failures, done > 0 ? (long?)items[done - 1].InternalId : null, "Starting or resuming");
             try
             {
@@ -74,7 +75,11 @@ namespace PersonCleaner.Tasks
                     var results = await Task.WhenAll(items.Skip(done).Take(batchSize).Select(x => Process(x, ct))).ConfigureAwait(false);
                     done += results.Length; successes += results.Count(x => x); failures += results.Count(x => !x);
                     progress.Report(items.Count == 0 ? 100 : done * 100.0 / items.Count);
-                    if (!(items[done - 1] is Person) || done % 250 == 0) repository.SetRun(Key, "running", items.Count, done, successes, failures, items[done - 1].InternalId, items[done - 1].Name);
+                    if (!(items[done - 1] is Person) || done - lastCheckpointDone >= 250)
+                    {
+                        repository.SetRun(Key, "running", items.Count, done, successes, failures, items[done - 1].InternalId, items[done - 1].Name);
+                        lastCheckpointDone = done;
+                    }
                 }
                 repository.SetRun(Key, "completed", items.Count, done, successes, failures, done > 0 ? (long?)items[done - 1].InternalId : null, "Finished");
                 logger.Info("TMDB Archive {0}: {1} processed, {2} archived, {3} unresolved/failed. Database: {4}", IsPreview ? "preview" : "export", done, successes, failures, repository.DatabasePath);

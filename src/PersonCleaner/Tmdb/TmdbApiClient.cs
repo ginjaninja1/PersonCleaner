@@ -28,15 +28,22 @@ namespace PersonCleaner.Tmdb
             concurrencyGate = new SemaphoreSlim(Math.Max(1, Plugin.Instance.Configuration.TmdbMaximumConcurrentRequests));
         }
 
-        public Task<TmdbEntity> GetPerson(string id, CancellationToken ct) => Get<TmdbEntity>("/person/" + id + "?append_to_response=external_ids,combined_credits,alternative_names", ct);
+        public Task<TmdbEntity> GetPerson(string id, CancellationToken ct) => Get<TmdbEntity>(
+            "/person/" + id + "?append_to_response=external_ids,combined_credits", ct,
+            "/person/" + id + "?append_to_response=external_ids,combined_credits,alternative_names");
         public Task<TmdbEntity> GetMovie(string id, CancellationToken ct) => Get<TmdbEntity>("/movie/" + id + "?append_to_response=external_ids,credits,alternative_titles", ct);
         public Task<TmdbEntity> GetSeries(string id, CancellationToken ct) => Get<TmdbEntity>("/tv/" + id + "?append_to_response=external_ids,aggregate_credits,alternative_titles", ct);
         public Task<TmdbEntity> GetEpisode(string seriesId, int season, int episode, CancellationToken ct) => Get<TmdbEntity>("/tv/" + seriesId + "/season/" + season + "/episode/" + episode + "?append_to_response=external_ids,credits", ct);
         public Task<TmdbFindResponse> FindImdb(string imdbId, CancellationToken ct) => Get<TmdbFindResponse>("/find/" + Uri.EscapeDataString(imdbId) + "?external_source=imdb_id", ct);
 
-        private async Task<T> Get<T>(string path, CancellationToken ct)
+        private async Task<T> Get<T>(string path, CancellationToken ct, string legacyCachePath = null)
         {
             if (repository.TryGetApiResponse(path, out var cached)) return json.DeserializeFromString<T>(cached);
+            if (!string.IsNullOrWhiteSpace(legacyCachePath) && repository.TryGetApiResponse(legacyCachePath, out cached))
+            {
+                logger.Debug("TMDB Archive using compatible legacy cache entry: {0}", legacyCachePath);
+                return json.DeserializeFromString<T>(cached);
+            }
             var apiKey = Plugin.Instance.Configuration.TmdbApiKey;
             if (string.IsNullOrWhiteSpace(apiKey)) throw new InvalidOperationException("TMDB API key is not configured.");
             Exception last = null;

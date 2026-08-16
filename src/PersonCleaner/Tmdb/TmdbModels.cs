@@ -13,6 +13,7 @@ namespace PersonCleaner.Tmdb
         public string birthday { get; set; }
         public string deathday { get; set; }
         public string place_of_birth { get; set; }
+        public List<string> also_known_as { get; set; } = new List<string>();
         public string first_air_date { get; set; }
         public string release_date { get; set; }
         public string air_date { get; set; }
