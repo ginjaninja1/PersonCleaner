@@ -33,21 +33,11 @@ namespace PersonCleaner.Configuration
 
         public int MinimumRequestIntervalMilliseconds { get; set; } = 100;
 
-        public int PersonWorkerCount { get; set; } = 4;
-
         public int TvdbMaximumConcurrentRequests { get; set; } = 2;
 
         public int TmdbMaximumConcurrentRequests { get; set; } = 4;
 
         public int TmdbMinimumRequestIntervalMilliseconds { get; set; } = 30;
-
-        public int PreviewItemLimit { get; set; } = 5;
-
-        public bool RequireSuccessfulPreview { get; set; } = true;
-
-        public int ResolutionEvaluationItemsPerType { get; set; } = 25;
-
-        public double AutoResolutionMinimumConfidence { get; set; } = 0.95;
 
         /// <summary>
         /// The real, persisted library/path filter data.

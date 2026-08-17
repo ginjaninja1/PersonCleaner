@@ -10,6 +10,20 @@ using System.Linq;
 
 namespace PersonCleaner.Storage
 {
+    internal sealed class EmbyArchiveItem
+    {
+        public long Id { get; set; }
+        public string Guid { get; set; }
+        public string Type { get; set; }
+        public string Name { get; set; }
+        public int? Year { get; set; }
+        public long? Parent { get; set; }
+        public string Tvdb { get; set; }
+        public string Imdb { get; set; }
+        public string Tmdb { get; set; }
+        public string Path { get; set; }
+    }
+
     internal sealed class TvdbArchiveRepository : IDisposable
     {
         private readonly ILogger logger;
@@ -20,7 +34,7 @@ namespace PersonCleaner.Storage
         public TvdbArchiveRepository(IApplicationPaths paths, ILogger logger)
         {
             this.logger = logger;
-            DatabasePath = Path.Combine(paths.DataPath, "tvdb-archive.db");
+            DatabasePath = ArchiveDatabase.ResolvePath(paths);
         }
 
         public void Initialize()
@@ -36,6 +50,7 @@ namespace PersonCleaner.Storage
                     new Dictionary<Tuple<string, int>, Action<IReadOnlyList<sqlite3_value>, sqlite3_context>>(),
                     true,
                     false);
+                db.Execute("PRAGMA busy_timeout=30000");
                 db.Execute("PRAGMA journal_mode=WAL");
                 db.Execute("PRAGMA synchronous=NORMAL");
                 db.Execute("PRAGMA foreign_keys=ON");
@@ -59,6 +74,7 @@ namespace PersonCleaner.Storage
                 db.Execute("CREATE INDEX IF NOT EXISTS ix_tvdb_credit_observation_production ON tvdb_credit_observation(production_tvdb_id,production_type,source_entity_type)");
                 db.Execute("DELETE FROM credit WHERE credit_type IS NULL OR credit_type NOT IN ('Actor','Guest Star','Director','Writer','Screenplay','Producer','Executive Producer','Creator','Showrunner')");
                 db.Execute("CREATE TABLE IF NOT EXISTS fetch_cache(cache_key TEXT PRIMARY KEY, state TEXT NOT NULL, http_status INTEGER, attempt_count INTEGER NOT NULL, fetched_utc TEXT, next_attempt_utc TEXT NOT NULL, error TEXT)");
+                db.Execute("UPDATE fetch_cache SET state='not-found',http_status=404,next_attempt_utc=datetime('now','+30 days') WHERE state='failed' AND lower(COALESCE(error,'')) LIKE '%notfound%'");
                 db.Execute("CREATE TABLE IF NOT EXISTS api_response_cache(request_path TEXT PRIMARY KEY, response_json TEXT NOT NULL, fetched_utc TEXT NOT NULL, expires_utc TEXT NOT NULL)");
                 db.Execute("CREATE INDEX IF NOT EXISTS ix_api_response_expiry ON api_response_cache(expires_utc)");
                 db.Execute("CREATE TABLE IF NOT EXISTS api_response_archive(request_path TEXT NOT NULL, fetched_utc TEXT NOT NULL, response_json TEXT NOT NULL, PRIMARY KEY(request_path,fetched_utc))");
@@ -102,8 +118,56 @@ namespace PersonCleaner.Storage
                 // fetch-cache row rather than the intended direct-unavailable classification.
                 db.Execute("UPDATE item_resolution SET provenance='direct-unavailable',method='tvdb-404',confidence=0.0,evidence_json='{\"evidence\":\"Emby has this TVDB id, but TVDB returned HTTP 404. Human review recommended; Emby was not modified.\"}',evaluated_utc=datetime('now') WHERE observed_tvdb_id IS NOT NULL AND EXISTS(SELECT 1 FROM fetch_cache f WHERE f.cache_key=item_resolution.entity_type||':'||item_resolution.observed_tvdb_id AND f.state='failed' AND lower(f.error) LIKE '%notfound%')");
                 db.Execute("UPDATE export_scope SET result='direct-unavailable',updated_utc=datetime('now') WHERE EXISTS(SELECT 1 FROM item_resolution r WHERE r.emby_id=export_scope.emby_id AND r.provenance='direct-unavailable')");
-                logger.Info("TVDB Archive database initialized at {0}", DatabasePath);
+                InitializeEntityResolutionSchema();
+                logger.Info("PersonCleaner archive database initialized at {0}", DatabasePath);
             }
+        }
+
+        private void InitializeEntityResolutionSchema()
+        {
+            db.RunInTransaction(x =>
+            {
+                x.Execute("CREATE TABLE IF NOT EXISTS archive_schema_migration(version INTEGER PRIMARY KEY,applied_utc TEXT NOT NULL,description TEXT NOT NULL)");
+                var needsInitialSeed = !HasMigration(x, 1);
+                x.Execute("CREATE TABLE IF NOT EXISTS emby_observation(observation_id INTEGER PRIMARY KEY AUTOINCREMENT,emby_id INTEGER NOT NULL,emby_guid TEXT,item_type TEXT NOT NULL,name TEXT,production_year INTEGER,parent_emby_id INTEGER,tvdb_id TEXT,imdb_id TEXT,tmdb_id TEXT,path TEXT,observed_utc TEXT NOT NULL)");
+                x.Execute("CREATE INDEX IF NOT EXISTS ix_emby_observation_item ON emby_observation(emby_id,observation_id)");
+                x.Execute("CREATE TABLE IF NOT EXISTS truth(truth_id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,parent_truth_id INTEGER,created_utc TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('draft','frozen','retired')),description TEXT,FOREIGN KEY(parent_truth_id) REFERENCES truth(truth_id))");
+                x.Execute("CREATE TABLE IF NOT EXISTS truth_entity(truth_id INTEGER NOT NULL,truth_entity_id TEXT NOT NULL,entity_type TEXT NOT NULL,preferred_name TEXT,production_year INTEGER,desired_emby_id INTEGER,disposition TEXT NOT NULL DEFAULT 'retain' CHECK(disposition IN ('retain','create','update','remove')),PRIMARY KEY(truth_id,truth_entity_id),FOREIGN KEY(truth_id) REFERENCES truth(truth_id))");
+                x.Execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_truth_desired_emby ON truth_entity(truth_id,desired_emby_id) WHERE desired_emby_id IS NOT NULL");
+                x.Execute("CREATE TABLE IF NOT EXISTS truth_external_identity(truth_id INTEGER NOT NULL,truth_entity_id TEXT NOT NULL,provider TEXT NOT NULL,external_id TEXT NOT NULL,provenance_type TEXT NOT NULL,provenance_reference TEXT,PRIMARY KEY(truth_id,truth_entity_id,provider),FOREIGN KEY(truth_id,truth_entity_id) REFERENCES truth_entity(truth_id,truth_entity_id))");
+                x.Execute("CREATE TABLE IF NOT EXISTS truth_entity_lineage(truth_id INTEGER NOT NULL,truth_entity_id TEXT NOT NULL,source_emby_id INTEGER NOT NULL,contribution TEXT NOT NULL CHECK(contribution IN ('retained','merged','split')),PRIMARY KEY(truth_id,truth_entity_id,source_emby_id),FOREIGN KEY(truth_id,truth_entity_id) REFERENCES truth_entity(truth_id,truth_entity_id))");
+                x.Execute("CREATE INDEX IF NOT EXISTS ix_truth_lineage_source ON truth_entity_lineage(truth_id,source_emby_id)");
+                x.Execute("CREATE TABLE IF NOT EXISTS truth_relationship(truth_id INTEGER NOT NULL,relationship_id TEXT NOT NULL,subject_truth_entity_id TEXT NOT NULL,object_truth_entity_id TEXT NOT NULL,relationship_type TEXT NOT NULL,role TEXT,character_name TEXT,provenance_type TEXT NOT NULL,provenance_reference TEXT,PRIMARY KEY(truth_id,relationship_id),FOREIGN KEY(truth_id,subject_truth_entity_id) REFERENCES truth_entity(truth_id,truth_entity_id),FOREIGN KEY(truth_id,object_truth_entity_id) REFERENCES truth_entity(truth_id,truth_entity_id))");
+                x.Execute("CREATE TABLE IF NOT EXISTS algorithm(algorithm_id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,version TEXT NOT NULL,code_hash TEXT,configuration_json TEXT,UNIQUE(name,version,code_hash))");
+                x.Execute("CREATE TABLE IF NOT EXISTS experiment_run(run_id INTEGER PRIMARY KEY AUTOINCREMENT,algorithm_id INTEGER NOT NULL,truth_id INTEGER NOT NULL,observation_cutoff_utc TEXT NOT NULL,mask_policy_json TEXT,random_seed INTEGER,started_utc TEXT NOT NULL,completed_utc TEXT,status TEXT NOT NULL,FOREIGN KEY(algorithm_id) REFERENCES algorithm(algorithm_id),FOREIGN KEY(truth_id) REFERENCES truth(truth_id))");
+                x.Execute("CREATE TABLE IF NOT EXISTS resolution_proposal(proposal_id INTEGER PRIMARY KEY AUTOINCREMENT,run_id INTEGER,base_truth_id INTEGER NOT NULL,operation TEXT NOT NULL CHECK(operation IN ('merge','split','change_identity','move_relationship','create','remove','update')),payload_json TEXT NOT NULL,confidence REAL,review_status TEXT NOT NULL DEFAULT 'pending' CHECK(review_status IN ('pending','accepted','rejected')),reviewed_utc TEXT,reviewed_by TEXT,review_note TEXT,created_utc TEXT NOT NULL,FOREIGN KEY(run_id) REFERENCES experiment_run(run_id),FOREIGN KEY(base_truth_id) REFERENCES truth(truth_id))");
+                x.Execute("CREATE TABLE IF NOT EXISTS experiment_prediction(run_id INTEGER NOT NULL,subject_truth_entity_id TEXT NOT NULL,provider TEXT NOT NULL,predicted_external_id TEXT,rank INTEGER NOT NULL,score REAL,confidence REAL,abstained INTEGER NOT NULL DEFAULT 0,evidence_json TEXT,PRIMARY KEY(run_id,subject_truth_entity_id,provider,rank),FOREIGN KEY(run_id) REFERENCES experiment_run(run_id))");
+                x.Execute("CREATE TABLE IF NOT EXISTS experiment_metric(run_id INTEGER NOT NULL,entity_type TEXT NOT NULL DEFAULT '',cohort TEXT NOT NULL DEFAULT '',metric_name TEXT NOT NULL,metric_value REAL NOT NULL,PRIMARY KEY(run_id,entity_type,cohort,metric_name),FOREIGN KEY(run_id) REFERENCES experiment_run(run_id))");
+                if (needsInitialSeed)
+                {
+                    x.Execute("INSERT OR IGNORE INTO truth(truth_id,name,parent_truth_id,created_utc,status,description) VALUES(1,'Emby baseline',NULL,datetime('now'),'draft','New Emby objects are seeded here once; later observations cannot overwrite this truth')");
+                    x.Execute("INSERT INTO emby_observation(emby_id,emby_guid,item_type,name,production_year,parent_emby_id,tvdb_id,imdb_id,tmdb_id,path,observed_utc) SELECT e.emby_id,e.emby_guid,e.item_type,e.name,e.production_year,e.parent_emby_id,e.tvdb_id,e.imdb_id,e.tmdb_id,e.path,e.discovered_utc FROM emby_item e WHERE NOT EXISTS(SELECT 1 FROM emby_observation o WHERE o.emby_id=e.emby_id)");
+                    x.Execute("INSERT OR IGNORE INTO truth_entity(truth_id,truth_entity_id,entity_type,preferred_name,production_year,desired_emby_id,disposition) SELECT 1,'emby:'||emby_id,item_type,name,production_year,emby_id,'retain' FROM emby_item");
+                    x.Execute("INSERT OR IGNORE INTO truth_entity_lineage(truth_id,truth_entity_id,source_emby_id,contribution) SELECT 1,'emby:'||emby_id,emby_id,'retained' FROM emby_item");
+                    x.Execute("INSERT OR IGNORE INTO truth_external_identity SELECT 1,'emby:'||emby_id,'emby',CAST(emby_id AS TEXT),'initial-emby-import','emby:'||emby_id FROM emby_item");
+                    x.Execute("INSERT OR IGNORE INTO truth_external_identity SELECT 1,'emby:'||emby_id,'tvdb',tvdb_id,'initial-emby-import','emby:'||emby_id FROM emby_item WHERE tvdb_id IS NOT NULL AND trim(tvdb_id)<>''");
+                    x.Execute("INSERT OR IGNORE INTO truth_external_identity SELECT 1,'emby:'||emby_id,'imdb',imdb_id,'initial-emby-import','emby:'||emby_id FROM emby_item WHERE imdb_id IS NOT NULL AND trim(imdb_id)<>''");
+                    x.Execute("INSERT OR IGNORE INTO truth_external_identity SELECT 1,'emby:'||emby_id,'tmdb',tmdb_id,'initial-emby-import','emby:'||emby_id FROM emby_item WHERE tmdb_id IS NOT NULL AND trim(tmdb_id)<>''");
+                    x.Execute("INSERT INTO archive_schema_migration VALUES(1,datetime('now'),'Append-only Emby observations and versioned desired-state truth graph')");
+                }
+                x.Execute("CREATE VIEW IF NOT EXISTS truth_merge_candidates AS SELECT truth_id,truth_entity_id,COUNT(*) AS source_count FROM truth_entity_lineage GROUP BY truth_id,truth_entity_id HAVING COUNT(*)>1");
+                x.Execute("CREATE VIEW IF NOT EXISTS truth_split_candidates AS SELECT truth_id,source_emby_id,COUNT(*) AS truth_entity_count FROM truth_entity_lineage GROUP BY truth_id,source_emby_id HAVING COUNT(*)>1");
+            }, TransactionMode.Immediate);
+        }
+
+        private static bool HasMigration(IDatabaseConnection connection, int version)
+        {
+            using (var s = connection.PrepareStatement("SELECT 1 FROM archive_schema_migration WHERE version=@version LIMIT 1"))
+            {
+                s.TryBind("@version", version);
+                foreach (var ignored in s.ExecuteQuery()) return true;
+            }
+            return false;
         }
 
         public bool IsDue(string key)
@@ -136,8 +200,72 @@ namespace PersonCleaner.Storage
 
         public void SaveEmby(long id, string guid, string type, string name, int? year, long? parent, string tvdb, string imdb, string tmdb, string path)
         {
-            Execute("REPLACE INTO emby_item VALUES(@id,@guid,@type,@name,@year,@parent,@tvdb,@imdb,@tmdb,@path,@now)", s =>
-            { s.TryBind("@id", id); s.TryBind("@guid", guid); s.TryBind("@type", type); s.TryBind("@name", name); s.TryBind("@year", year); s.TryBind("@parent", parent); s.TryBind("@tvdb", tvdb); s.TryBind("@imdb", imdb); s.TryBind("@tmdb", tmdb); s.TryBind("@path", path); s.TryBind("@now", Now()); });
+            lock (sync) db.RunInTransaction(x =>
+            {
+                SaveEmbyRow(x, new EmbyArchiveItem { Id = id, Guid = guid, Type = type, Name = name, Year = year, Parent = parent, Tvdb = tvdb, Imdb = imdb, Tmdb = tmdb, Path = path }, Now());
+            }, TransactionMode.Immediate);
+        }
+
+        public void SaveEmbyBatch(IEnumerable<EmbyArchiveItem> items)
+        {
+            var batch = (items ?? Enumerable.Empty<EmbyArchiveItem>()).ToList();
+            if (batch.Count == 0) return;
+            var now = Now();
+            lock (sync) db.RunInTransaction(x =>
+            {
+                foreach (var item in batch) SaveEmbyRow(x, item, now);
+            }, TransactionMode.Immediate);
+        }
+
+        private static void SaveEmbyRow(IDatabaseConnection x, EmbyArchiveItem item, string now)
+        {
+            var truthEntityId = "emby:" + item.Id.ToString(CultureInfo.InvariantCulture);
+            if (!IsSameEmbyRow(x, item))
+            {
+                Statement(x, "INSERT INTO emby_observation(emby_id,emby_guid,item_type,name,production_year,parent_emby_id,tvdb_id,imdb_id,tmdb_id,path,observed_utc) VALUES(@id,@guid,@type,@name,@year,@parent,@tvdb,@imdb,@tmdb,@path,@now)", s => BindEmby(s, item.Id, item.Guid, item.Type, item.Name, item.Year, item.Parent, item.Tvdb, item.Imdb, item.Tmdb, item.Path, now));
+                Statement(x, "REPLACE INTO emby_item VALUES(@id,@guid,@type,@name,@year,@parent,@tvdb,@imdb,@tmdb,@path,@now)", s => BindEmby(s, item.Id, item.Guid, item.Type, item.Name, item.Year, item.Parent, item.Tvdb, item.Imdb, item.Tmdb, item.Path, now));
+            }
+            foreach (var truthId in DraftTruthsWithoutSource(x, item.Id))
+            {
+                Statement(x, "INSERT INTO truth_entity(truth_id,truth_entity_id,entity_type,preferred_name,production_year,desired_emby_id,disposition) VALUES(@truth,@entity,@type,@name,@year,@id,'retain')", s => { s.TryBind("@truth", truthId); s.TryBind("@entity", truthEntityId); s.TryBind("@type", item.Type); s.TryBind("@name", item.Name); s.TryBind("@year", item.Year); s.TryBind("@id", item.Id); });
+                Statement(x, "INSERT INTO truth_entity_lineage VALUES(@truth,@entity,@id,'retained')", s => { s.TryBind("@truth", truthId); s.TryBind("@entity", truthEntityId); s.TryBind("@id", item.Id); });
+                SeedIdentity(x, truthId, truthEntityId, "emby", item.Id.ToString(CultureInfo.InvariantCulture));
+                SeedIdentity(x, truthId, truthEntityId, "tvdb", item.Tvdb);
+                SeedIdentity(x, truthId, truthEntityId, "imdb", item.Imdb);
+                SeedIdentity(x, truthId, truthEntityId, "tmdb", item.Tmdb);
+            }
+        }
+
+        private static bool IsSameEmbyRow(IDatabaseConnection x, EmbyArchiveItem item)
+        {
+            using (var s = x.PrepareStatement("SELECT 1 FROM emby_item WHERE emby_id=@id AND emby_guid IS @guid AND item_type=@type AND name IS @name AND production_year IS @year AND parent_emby_id IS @parent AND tvdb_id IS @tvdb AND imdb_id IS @imdb AND tmdb_id IS @tmdb AND path IS @path LIMIT 1"))
+            {
+                BindEmby(s, item.Id, item.Guid, item.Type, item.Name, item.Year, item.Parent, item.Tvdb, item.Imdb, item.Tmdb, item.Path, Now());
+                foreach (var ignored in s.ExecuteQuery()) return true;
+            }
+            return false;
+        }
+
+        private static List<int> DraftTruthsWithoutSource(IDatabaseConnection x, long embyId)
+        {
+            var result = new List<int>();
+            using (var s = x.PrepareStatement("SELECT t.truth_id FROM truth t WHERE t.status='draft' AND NOT EXISTS(SELECT 1 FROM truth_entity_lineage l WHERE l.truth_id=t.truth_id AND l.source_emby_id=@id) ORDER BY t.truth_id"))
+            {
+                s.TryBind("@id", embyId);
+                foreach (var row in s.ExecuteQuery()) result.Add(row.GetInt(0));
+            }
+            return result;
+        }
+
+        private static void BindEmby(IStatement s, long id, string guid, string type, string name, int? year, long? parent, string tvdb, string imdb, string tmdb, string path, string now)
+        {
+            s.TryBind("@id", id); s.TryBind("@guid", guid); s.TryBind("@type", type); s.TryBind("@name", name); s.TryBind("@year", year); s.TryBind("@parent", parent); s.TryBind("@tvdb", tvdb); s.TryBind("@imdb", imdb); s.TryBind("@tmdb", tmdb); s.TryBind("@path", path); s.TryBind("@now", now);
+        }
+
+        private static void SeedIdentity(IDatabaseConnection x, int truthId, string truthEntityId, string provider, string externalId)
+        {
+            if (string.IsNullOrWhiteSpace(externalId)) return;
+            Statement(x, "INSERT INTO truth_external_identity(truth_id,truth_entity_id,provider,external_id,provenance_type,provenance_reference) VALUES(@truth,@entity,@provider,@external,'initial-emby-import',@entity)", s => { s.TryBind("@truth", truthId); s.TryBind("@entity", truthEntityId); s.TryBind("@provider", provider); s.TryBind("@external", externalId); });
         }
 
         public bool IsUnchangedCachedDirectPerson(long id, string guid, string name, int? year, long? parent, string tvdb, string imdb, string tmdb, string path)
@@ -221,6 +349,12 @@ namespace PersonCleaner.Storage
             Execute("INSERT OR REPLACE INTO fetch_cache VALUES(@key,@state,NULL,COALESCE((SELECT attempt_count+1 FROM fetch_cache WHERE cache_key=@key),1),@now,@next,@error)", s => { s.TryBind("@key", key); s.TryBind("@state", success ? "success" : "failed"); s.TryBind("@now", Now()); s.TryBind("@next", next.ToString("O")); s.TryBind("@error", error); });
         }
 
+        public void MarkNotFound(string key, string error)
+        {
+            var next = DateTimeOffset.UtcNow.AddDays(Math.Max(1, Plugin.Instance.Configuration.SuccessCacheDays));
+            Execute("INSERT OR REPLACE INTO fetch_cache VALUES(@key,'not-found',404,COALESCE((SELECT attempt_count+1 FROM fetch_cache WHERE cache_key=@key),1),@now,@next,@error)", s => { s.TryBind("@key", key); s.TryBind("@now", Now()); s.TryBind("@next", next.ToString("O")); s.TryBind("@error", error); });
+        }
+
         public void SetRun(string key, string status, int total, int processed, int successes, int failures, long? lastId, string message)
         {
             Execute("INSERT OR REPLACE INTO run_state VALUES(@key,@status,COALESCE((SELECT started_utc FROM run_state WHERE task_key=@key),@now),@now,CASE WHEN @status IN ('completed','cancelled','failed') THEN @now ELSE NULL END,@total,@processed,@success,@failure,@last,@message)", s => { s.TryBind("@key", key); s.TryBind("@status", status); s.TryBind("@now", Now()); s.TryBind("@total", total); s.TryBind("@processed", processed); s.TryBind("@success", successes); s.TryBind("@failure", failures); s.TryBind("@last", lastId); s.TryBind("@message", message); });
@@ -270,12 +404,6 @@ namespace PersonCleaner.Storage
                 foreach (var row in s.ExecuteQuery()) return row.IsDBNull(0) ? null : row.GetString(0);
             }
             return null;
-        }
-
-        public bool HasSuccessfulPreview()
-        {
-            lock (sync) using (var s = db.PrepareStatement("SELECT 1 FROM run_state WHERE task_key='TvdbArchivePreview' AND status='completed' LIMIT 1")) foreach (var ignored in s.ExecuteQuery()) return true;
-            return false;
         }
 
         public Tuple<int, int, int> GetCastIdCoverage()

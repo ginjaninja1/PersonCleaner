@@ -48,7 +48,7 @@ namespace PersonCleaner
 
 
         public override string Description =>
-            "Archives TVDB and TMDB identities, external IDs and credits to a human-searchable SQLite database.";
+            "Archives Emby and provider observations and supports versioned entity-resolution truths without changing live Emby.";
 
 
         public override Guid Id =>
@@ -56,7 +56,7 @@ namespace PersonCleaner
 
 
         public override string Name =>
-            "TVDB / TMDB Archive";
+            "PersonCleaner Entity Resolution";
 
 
         public ImageFormat ThumbImageFormat =>

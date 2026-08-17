@@ -1,88 +1,78 @@
-# TVDB / TMDB Archive for Emby 4.10
+# PersonCleaner provider archive and entity-resolution truth
 
-This Emby scheduled-task plugin archives TVDB v4 identity, cast and filmography data into
-`tvdb-archive.db` under Emby's data directory. It uses the SQLite assemblies already shipped by
-Emby 4.10; no SQLite DLL is deployed alongside the plugin.
+PersonCleaner is an Emby 4.10 scheduled-task plugin. It snapshots the in-scope Emby graph, archives
+TVDB v4 and TMDB observations in SQLite, and maintains versioned write-once truths for later entity
+resolution. It does not change live Emby names, provider IDs, people, or relationships.
 
-TMDB-native identity, aliases, external IDs and credits can be archived independently in the same
-database. TMDB observations use their own `tmdb_*` tables and cache namespace; they do not change
-TVDB resolutions or Emby provider IDs.
+The database is `personcleaner-archive.db` under Emby's data directory. The plugin uses the SQLite
+assemblies shipped with Emby and does not deploy another SQLite native library.
 
-## Safe first run
+## Scheduled task
 
-1. Install `PersonCleaner.dll`, restart Emby, and open the **TVDB Archive** plugin settings.
-2. Enter a TVDB v4 API key (and subscriber PIN only if the key requires one). The supplied UUID-style
-   credential is consistent with a TVDB key, not a TMDB bearer token; the key is deliberately not in source.
-3. Run **TVDB Archive - Probe IMDb/TVDB mappings**. Results are written to `id_probe`.
-4. Run **TVDB Archive - Preview first items**. By default this processes five Emby rows of each type.
-5. Inspect the SQLite views/tables and Emby log, then run **TVDB Archive - Full resumable export**.
+Configure both API keys in the plugin settings and run:
 
-For TMDB, enter a v3 API key, run **TMDB Archive - Preview first items**, inspect
-`TMDB_ARCHIVE_VERIFY.sql`, and then run **TMDB Archive - Full resumable export**. The
-`provider_identity_signals` view compares the independently recorded TVDB and TMDB answers for an
-Emby ID.
+**PersonCleaner - Update Emby and provider archive**
 
-Stopping a task is safe. Each response is committed independently and `run_state` records status,
-counts and the last Emby id. Successful fetches are cached for 30 days by default; failures and
-timeouts are retried after 30 minutes. HTTP 429 and server failures also use exponential backoff.
+Each run:
+
+1. Enumerates in-scope series, movies, regular episodes, and their scoped people once.
+2. Records changed Emby entity and credit-relationship observations.
+3. Imports unseen Emby entities and relationships into every draft truth exactly once.
+4. Runs configured TVDB and TMDB pipelines concurrently under separate request limits.
+5. Records a durable outcome for every Emby/provider work item.
+
+One missing provider key does not prevent the snapshot or the other provider from completing. With
+neither key, the task still updates Emby observations and truth coverage. Successful responses are
+cached for 30 days by default; failures have a shorter retry time. Cancellation retains all committed
+observations, work outcomes, raw responses, and normalized data.
+
+## Scope and identity policy
+
+- Media: series, movies, and episodes from season 1 onwards.
+- People: Actor, Guest Star, Director, Writer, and Producer relationships on in-scope media.
+- TVDB acquisition uses an Emby TVDB ID or a previously accepted archived resolution. It does not
+  infer and accept a new TVDB identity during extraction.
+- TMDB acquisition uses direct IDs, episode coordinates, and unique IMDb `/find` results. Ambiguous
+  results remain evidence.
+- Provider 404s, missing identities, candidates, and contradictions are retained; Emby is not changed.
+- Resolution experiments and proposals remain separate from provider acquisition.
+
+The former TVDB/TMDB preview and full exports, ID probe, resolver evaluation, and diagnostic probe
+tasks are retired from scheduled-task registration. Their historical database rows and source remain
+available for provenance.
+
+## Main tables
+
+- `emby_item`, `emby_relationship`: rebuildable current Emby projections.
+- `emby_observation`, `emby_relationship_observation`: append-only changed observations.
+- `provider_update_run`, `provider_work`: unified task and per-provider work position.
+- `tvdb_entity`, `remote_id`, `tvdb_alias`, `tvdb_credit_observation`: TVDB indexes.
+- `tmdb_entity`, `tmdb_external_id`, `tmdb_alias`, `tmdb_credit_observation`: TMDB indexes.
+- `item_resolution`, `tmdb_item_resolution`: current provider identity answers.
+- `truth`, `truth_entity`, `truth_external_identity`, `truth_entity_lineage`, and
+  `truth_relationship`: versioned desired Emby graphs.
+
+Provider equivalences are in `PROVIDER_SCHEMA.md`; truth semantics are in
+`ENTITY_RESOLUTION_SCHEMA.md`; current operational notes are in `PROJECT_HANDOFF.md`.
+Use `PROVIDER_UPDATE_VERIFY.sql` for the unified run audit; the provider-specific verification files
+remain useful for historical and detailed archive inspection.
 
 ## Useful SQL
 
 ```sql
--- Find a show by Emby id, TVDB id, IMDb id, or name
-SELECT * FROM searchable_media
-WHERE emby_id = 123 OR tvdb_id = '121361' OR imdb_id = 'tt0944947'
-   OR emby_name LIKE '%Game of Thrones%';
+SELECT * FROM provider_update_run ORDER BY run_id DESC LIMIT 1;
 
--- A person's archived filmography
-SELECT c.*, e.name AS production_name
-FROM credit c LEFT JOIN tvdb_entity e
-  ON e.tvdb_id=c.subject_tvdb_id AND e.entity_type=c.subject_type
-WHERE c.person_tvdb_id='12345';
+SELECT provider,entity_type,state,outcome,COUNT(*) AS items
+FROM provider_work
+WHERE last_run_id=(SELECT MAX(run_id) FROM provider_update_run)
+GROUP BY provider,entity_type,state,outcome;
 
--- Latest task checkpoint
-SELECT * FROM run_state ORDER BY updated_utc DESC;
+SELECT * FROM provider_identity_signals WHERE emby_id=173844;
+SELECT * FROM truth_relationship WHERE truth_id=1 LIMIT 100;
 ```
 
-The main tables are `emby_item`, `tvdb_entity`, `remote_id`, `credit`, `fetch_cache`, `run_state`,
-`id_probe`, `item_resolution`, and `api_response_cache`. `item_resolution.provenance` distinguishes
-`direct`, `inferred`, `rejected`, and `unresolved` results. Use `resolution_inventory` for counts and
-`direct-unavailable` identifies an Emby TVDB ID whose TVDB entity endpoint returned 404. Use
-`identity_review_queue` for human review and `resolved_searchable_media` for identity-aware searches.
-Raw successful entity JSON is retained in `tvdb_entity.raw_json`; overviews are not modeled into
-searchable columns.
+## Build
 
-TVDB/TMDB schema equivalences and intentional provider-specific differences are documented in
-`PROVIDER_SCHEMA.md`. Prefer the `provider_entity`, `provider_external_id`, `provider_alias`, and
-`provider_credit_observation` views when comparing equivalent provider-native observations.
-
----
-
-# Original template notes
-
-A standardized, automation-ready repository template for rapidly scaffolding Emby Server plugins. 
-
-## Features
-* **Zero-Configuration Scaffolding**: Uses automated GitHub Actions to rename namespaces, solution files, and projects instantly upon repository creation.
-* **.gitignore prepopulated**: To ensure obj, bin and .vs folders are excluded from repository
-* **setup.bat**: instantiates a pre-commit in `.git/hooks/` so any commit with "[bump]" at the END of description increases the the version number in .csproj.
-* **Working Plugin with thumbnail**: Ready to compile plugin with thumbnail, pluginui configuration page with autopostback (autosave) and task.
-* **launchSettings.json**: Ready to launch Emby with breakpoints for debugging
-* **Post Build Event**: Ready to copy compiled code to Emby plugins folder in current users %appdata%.
-* **Supress dependency file**: No value in copying this into plugins folder.
-
-## How to Instantiate a New Plugin
-
-This template is completely automated via the cloud. You do not need to use `dotnet new` or run local renaming commands.
-
-1. Click the green **Use this template** button at the top of this GitHub page.
-2. Select **Create a new repository**.
-3. Name your repository using your new plugin's name (e.g., `MyNewPlugin`).
-4. Click **Create repository**.
-
-### What happens in the background:
-GitHub will instantly spin up a cloud action, read your repository name, and automatically update your folder paths, `.csproj`/`.slnx` filenames, and C# namespaces to match perfectly.
-
-5. Open **GitHub Desktop** and clone your brand new repository down to your computer.
-6. Run \repositoryroot\setup.bat to instantiate the [bump] pre-commit hook.
-7. Launch the solution file inside `src/` and start coding immediately!
+```powershell
+dotnet build src/PersonCleaner/PersonCleaner.csproj -c Release --no-restore -p:SkipPluginDeploy=true
+```

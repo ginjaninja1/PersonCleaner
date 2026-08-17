@@ -30,7 +30,7 @@ namespace PersonCleaner.UI.Config
         {
             // 1. Interrogate the task manager registry using your explicit task string Key
             var myTaskWorker = taskManager.ScheduledTasks
-                .FirstOrDefault(t => string.Equals(t.ScheduledTask.Key, "TvdbArchivePreview", StringComparison.Ordinal));
+                .FirstOrDefault(t => string.Equals(t.ScheduledTask.Key, "PersonCleanerProviderUpdate", StringComparison.Ordinal));
 
             // 2. Build the router fragment location using the dynamically discovered worker ID
             string hyperlinkUrl = myTaskWorker != null
@@ -47,14 +47,9 @@ namespace PersonCleaner.UI.Config
                 SuccessCacheDays = persistedConfig.SuccessCacheDays,
                 FailureRetryMinutes = persistedConfig.FailureRetryMinutes,
                 MinimumRequestIntervalMilliseconds = persistedConfig.MinimumRequestIntervalMilliseconds,
-                PersonWorkerCount = persistedConfig.PersonWorkerCount,
                 TvdbMaximumConcurrentRequests = persistedConfig.TvdbMaximumConcurrentRequests,
                 TmdbMaximumConcurrentRequests = persistedConfig.TmdbMaximumConcurrentRequests,
                 TmdbMinimumRequestIntervalMilliseconds = persistedConfig.TmdbMinimumRequestIntervalMilliseconds,
-                PreviewItemLimit = persistedConfig.PreviewItemLimit,
-                RequireSuccessfulPreview = persistedConfig.RequireSuccessfulPreview,
-                ResolutionEvaluationItemsPerType = persistedConfig.ResolutionEvaluationItemsPerType,
-                AutoResolutionMinimumConfidence = persistedConfig.AutoResolutionMinimumConfidence,
                 LibraryPaths = persistedConfig.LibraryPaths,
 
                 // 3. Construct the list item element object hierarchy inside instantiation block

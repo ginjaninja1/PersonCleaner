@@ -1,4 +1,4 @@
--- Open tvdb-archive.db read-only in DB Browser for SQLite and run each section.
+-- Open personcleaner-archive.db read-only in DB Browser for SQLite and run each section.
 -- A running Emby task writes in WAL mode, so read-only inspection does not block it.
 
 -- 1. Current task status and genuine resume checkpoint.

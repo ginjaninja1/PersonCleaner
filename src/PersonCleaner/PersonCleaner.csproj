@@ -25,6 +25,7 @@
 	<ItemGroup>
 	  <None Remove="Handover.md" />
 	  <None Remove="Readme.md" />
+	  <Compile Remove="Tasks\PersonCleanerDiagnosticsTask.cs" />
 	</ItemGroup>
 	
   <ItemGroup>

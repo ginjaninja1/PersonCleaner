@@ -1,5 +1,15 @@
 # Provider archive schema
 
+## Unified acquisition
+
+`PersonCleanerProviderUpdate` is the only registered archive task. It snapshots Emby once and then
+runs TVDB and TMDB workers concurrently. Each provider retains its own throttle, concurrency limit,
+response cache, retry state, and normalized tables. `provider_update_run` records task status;
+`provider_work` records the latest route and outcome for every provider/Emby pair.
+
+The manifest is provider-neutral orchestration, not provider-neutral evidence. Exact responses and
+provider-native normalized data remain separate.
+
 The archive keeps TVDB and TMDB observations separate. Functionally equivalent concepts have
 provider-specific storage plus provider-neutral read views. Provider-specific API details are not
 discarded merely to make the schemas look identical.
@@ -44,3 +54,7 @@ repository initialization because Emby constructs scheduled tasks while the serv
 Existing TVDB credits predate endpoint-level provenance. An explicit offline rebuild may mark those
 rows `source_entity_type='legacy-normalized'` where the original route cannot be reconstructed;
 future refreshed TVDB responses record their real source entity type and source TVDB ID.
+
+Provider acquisition does not create new accepted TVDB inferences. It may reuse an already accepted
+archived TVDB resolution. TMDB unique IMDb `/find` results retain `external-id` provenance and
+ambiguous results remain candidates. Neither path writes to Emby or automatically changes a truth.

@@ -18,7 +18,7 @@ namespace PersonCleaner.Storage
         private IDatabaseConnection db;
         public string DatabasePath { get; }
 
-        public TmdbArchiveRepository(IApplicationPaths paths, ILogger logger) { this.logger = logger; DatabasePath = Path.Combine(paths.DataPath, "tvdb-archive.db"); }
+        public TmdbArchiveRepository(IApplicationPaths paths, ILogger logger) { this.logger = logger; DatabasePath = ArchiveDatabase.ResolvePath(paths); }
 
         public void Initialize()
         {
@@ -27,6 +27,7 @@ namespace PersonCleaner.Storage
                 if (db != null) return;
                 db = SQLite3.Open(DatabasePath, ConnectionFlags.Create | ConnectionFlags.ReadWrite | ConnectionFlags.PrivateCache | ConnectionFlags.NoMutex, null,
                     new Dictionary<string, delegate_collation>(), new Dictionary<Tuple<string, int>, Action<IReadOnlyList<sqlite3_value>, sqlite3_context>>(), true, false);
+                db.Execute("PRAGMA busy_timeout=30000");
                 db.Execute("PRAGMA journal_mode=WAL"); db.Execute("PRAGMA synchronous=NORMAL");
                 db.Execute("CREATE TABLE IF NOT EXISTS tmdb_schema_info(version INTEGER NOT NULL)");
                 db.Execute("INSERT INTO tmdb_schema_info(version) SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM tmdb_schema_info)");
@@ -45,6 +46,7 @@ namespace PersonCleaner.Storage
                 db.Execute("CREATE TABLE IF NOT EXISTS tmdb_api_response_cache(request_path TEXT PRIMARY KEY,response_json TEXT NOT NULL,fetched_utc TEXT NOT NULL,expires_utc TEXT NOT NULL)");
                 db.Execute("CREATE TABLE IF NOT EXISTS tmdb_api_response_archive(request_path TEXT NOT NULL,fetched_utc TEXT NOT NULL,response_json TEXT NOT NULL,PRIMARY KEY(request_path,fetched_utc))");
                 db.Execute("CREATE TABLE IF NOT EXISTS tmdb_fetch_cache(cache_key TEXT PRIMARY KEY,state TEXT NOT NULL,attempt_count INTEGER NOT NULL,fetched_utc TEXT,next_attempt_utc TEXT NOT NULL,error TEXT)");
+                db.Execute("UPDATE tmdb_fetch_cache SET state='not-found',next_attempt_utc=datetime('now','+30 days') WHERE state='failed' AND lower(COALESCE(error,'')) LIKE '%notfound%'");
                 db.Execute("CREATE TABLE IF NOT EXISTS tmdb_run_state(task_key TEXT PRIMARY KEY,status TEXT NOT NULL,started_utc TEXT,updated_utc TEXT NOT NULL,finished_utc TEXT,total_items INTEGER NOT NULL,processed_items INTEGER NOT NULL,success_count INTEGER NOT NULL,failure_count INTEGER NOT NULL,last_emby_id INTEGER,message TEXT)");
                 db.Execute("CREATE VIEW IF NOT EXISTS provider_identity_signals AS SELECT e.emby_id,e.item_type,e.name AS emby_name,e.imdb_id,e.tvdb_id AS emby_tvdb_id,e.tmdb_id AS emby_tmdb_id,r.resolved_tvdb_id,r.provenance AS tvdb_provenance,tr.resolved_tmdb_id,tr.provenance AS tmdb_provenance,te.name AS tvdb_name,me.name AS tmdb_name FROM emby_item e LEFT JOIN item_resolution r ON r.emby_id=e.emby_id LEFT JOIN tvdb_entity te ON te.tvdb_id=r.resolved_tvdb_id AND te.entity_type=e.item_type LEFT JOIN tmdb_item_resolution tr ON tr.emby_id=e.emby_id LEFT JOIN tmdb_entity me ON me.tmdb_id=tr.resolved_tmdb_id AND me.entity_type=e.item_type");
                 db.Execute("DROP VIEW IF EXISTS provider_entity");
@@ -87,6 +89,12 @@ namespace PersonCleaner.Storage
         {
             var next = DateTimeOffset.UtcNow.Add(success ? TimeSpan.FromDays(Math.Max(1, Plugin.Instance.Configuration.SuccessCacheDays)) : TimeSpan.FromMinutes(Math.Max(1, Plugin.Instance.Configuration.FailureRetryMinutes)));
             Execute("INSERT OR REPLACE INTO tmdb_fetch_cache VALUES(@key,@state,COALESCE((SELECT attempt_count+1 FROM tmdb_fetch_cache WHERE cache_key=@key),1),@now,@next,@error)", s => { s.TryBind("@key", key); s.TryBind("@state", success ? "success" : "failed"); s.TryBind("@now", Now()); s.TryBind("@next", next.ToString("O")); s.TryBind("@error", error); });
+        }
+
+        public void MarkNotFound(string key, string error)
+        {
+            var next = DateTimeOffset.UtcNow.AddDays(Math.Max(1, Plugin.Instance.Configuration.SuccessCacheDays));
+            Execute("INSERT OR REPLACE INTO tmdb_fetch_cache VALUES(@key,'not-found',COALESCE((SELECT attempt_count+1 FROM tmdb_fetch_cache WHERE cache_key=@key),1),@now,@next,@error)", s => { s.TryBind("@key", key); s.TryBind("@now", Now()); s.TryBind("@next", next.ToString("O")); s.TryBind("@error", error); });
         }
 
         public void SaveEntity(string id, string type, TmdbEntity entity, string raw)
@@ -161,7 +169,6 @@ namespace PersonCleaner.Storage
         public void SetRun(string key, string status, int total, int done, int success, int failure, long? last, string message)
         { Execute("INSERT OR REPLACE INTO tmdb_run_state VALUES(@key,@status,COALESCE((SELECT started_utc FROM tmdb_run_state WHERE task_key=@key),@now),@now,CASE WHEN @status IN ('completed','cancelled','failed') THEN @now ELSE NULL END,@total,@done,@success,@failure,@last,@message)", s => { s.TryBind("@key", key); s.TryBind("@status", status); s.TryBind("@now", Now()); s.TryBind("@total", total); s.TryBind("@done", done); s.TryBind("@success", success); s.TryBind("@failure", failure); s.TryBind("@last", last); s.TryBind("@message", message); }); }
 
-        public bool HasPreview() { lock (sync) using (var s = db.PrepareStatement("SELECT 1 FROM tmdb_run_state WHERE task_key='TmdbArchivePreview' AND status='completed'")) foreach (var ignored in s.ExecuteQuery()) return true; return false; }
         private void Execute(string sql, Action<IStatement> bind) { lock (sync) Statement(db, sql, bind); }
         private static void Statement(IDatabaseConnection connection, string sql, Action<IStatement> bind) { using (var s = connection.PrepareStatement(sql)) { bind(s); s.MoveNext(); } }
         private static string Now() => DateTimeOffset.UtcNow.ToString("O");

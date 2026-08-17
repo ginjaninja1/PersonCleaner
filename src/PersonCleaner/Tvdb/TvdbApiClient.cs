@@ -25,6 +25,10 @@ namespace PersonCleaner.Tvdb
         private string token;
         private DateTimeOffset tokenExpiresUtc;
         private DateTimeOffset nextRequestUtc;
+        private long cacheHits;
+        private long cacheMisses;
+        public long CacheHits => Interlocked.Read(ref cacheHits);
+        public long CacheMisses => Interlocked.Read(ref cacheMisses);
 
         public TvdbApiClient(IHttpClient httpClient, IJsonSerializer json, ILogger logger, TvdbArchiveRepository repository)
         {
@@ -69,9 +73,11 @@ namespace PersonCleaner.Tvdb
         {
             if (repository.TryGetApiResponse(path, out var cachedJson))
             {
+                Interlocked.Increment(ref cacheHits);
                 logger.Debug("TVDB Archive API cache hit: {0}", path);
                 return json.DeserializeFromString<T>(cachedJson);
             }
+            Interlocked.Increment(ref cacheMisses);
             await EnsureToken(ct).ConfigureAwait(false);
             Exception last = null;
             for (var attempt = 0; attempt < 5; attempt++)

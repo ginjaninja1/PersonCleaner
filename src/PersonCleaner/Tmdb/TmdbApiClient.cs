@@ -21,6 +21,10 @@ namespace PersonCleaner.Tmdb
         private readonly SemaphoreSlim throttleGate = new SemaphoreSlim(1, 1);
         private readonly SemaphoreSlim concurrencyGate;
         private DateTimeOffset nextRequestUtc;
+        private long cacheHits;
+        private long cacheMisses;
+        public long CacheHits => Interlocked.Read(ref cacheHits);
+        public long CacheMisses => Interlocked.Read(ref cacheMisses);
 
         public TmdbApiClient(IHttpClient http, IJsonSerializer json, ILogger logger, TmdbArchiveRepository repository)
         {
@@ -38,12 +42,14 @@ namespace PersonCleaner.Tmdb
 
         private async Task<T> Get<T>(string path, CancellationToken ct, string legacyCachePath = null)
         {
-            if (repository.TryGetApiResponse(path, out var cached)) return json.DeserializeFromString<T>(cached);
+            if (repository.TryGetApiResponse(path, out var cached)) { Interlocked.Increment(ref cacheHits); return json.DeserializeFromString<T>(cached); }
             if (!string.IsNullOrWhiteSpace(legacyCachePath) && repository.TryGetApiResponse(legacyCachePath, out cached))
             {
+                Interlocked.Increment(ref cacheHits);
                 logger.Debug("TMDB Archive using compatible legacy cache entry: {0}", legacyCachePath);
                 return json.DeserializeFromString<T>(cached);
             }
+            Interlocked.Increment(ref cacheMisses);
             var apiKey = Plugin.Instance.Configuration.TmdbApiKey;
             if (string.IsNullOrWhiteSpace(apiKey)) throw new InvalidOperationException("TMDB API key is not configured.");
             Exception last = null;

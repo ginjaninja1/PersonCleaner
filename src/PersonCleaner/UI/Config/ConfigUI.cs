@@ -9,10 +9,10 @@ namespace PersonCleaner.UI.Config
 {
     public class ConfigUI : EditableOptionsBase
     {
-        public override string EditorTitle => "TVDB Archive - Configuration";
+        public override string EditorTitle => "PersonCleaner Archive - Configuration";
 
         public override string EditorDescription =>
-            "Archives TVDB identity and filmography data to tvdb-archive.db in Emby's data directory.";
+            "Archives Emby, TVDB and TMDB observations and entity-resolution truths to personcleaner-archive.db in Emby's data directory.";
 
         public CaptionItem GeneralHeading { get; set; } = new CaptionItem("General");
 
@@ -41,10 +41,6 @@ namespace PersonCleaner.UI.Config
         [DisplayName("Minimum request interval (milliseconds)")]
         public int MinimumRequestIntervalMilliseconds { get; set; } = 100;
 
-        [DisplayName("Concurrent person workers")]
-        [Description("Shared ceiling for person enrichment work across metadata providers. Changes apply when the task is restarted.")]
-        public int PersonWorkerCount { get; set; } = 4;
-
         [DisplayName("TVDB maximum concurrent requests")]
         [Description("TVDB does not publish a numeric concurrency allowance; 2 is the conservative default. Changes apply when the task is restarted.")]
         public int TvdbMaximumConcurrentRequests { get; set; } = 2;
@@ -56,20 +52,6 @@ namespace PersonCleaner.UI.Config
         [DisplayName("TMDB minimum request interval (milliseconds)")]
         [Description("Minimum delay between direct TMDB request starts.")]
         public int TmdbMinimumRequestIntervalMilliseconds { get; set; } = 30;
-
-        [DisplayName("Preview items per media type")]
-        public int PreviewItemLimit { get; set; } = 5;
-
-        [DisplayName("Require preview before full export")]
-        public bool RequireSuccessfulPreview { get; set; } = true;
-
-        [DisplayName("Resolution evaluation items per type")]
-        [Description("Known-good TVDB IDs are withheld from this many movies, series, episodes and in-scope people to measure resolver accuracy.")]
-        public int ResolutionEvaluationItemsPerType { get; set; } = 25;
-
-        [DisplayName("Automatic resolution minimum confidence")]
-        [Description("Used after evaluation; 0.95 means only predictions scoring at least 95% may be treated as inferred TVDB identities.")]
-        public double AutoResolutionMinimumConfidence { get; set; } = 0.95;
 
         public CaptionItem LibraryFilterHeading { get; set; } =
             new CaptionItem("Library / Path Filter");

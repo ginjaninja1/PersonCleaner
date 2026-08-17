@@ -1,0 +1,52 @@
+# Entity-resolution truth model
+
+`personcleaner-archive.db` deliberately separates observations, provider evidence, and desired truth.
+
+## Emby observations
+
+The unified update task snapshots Emby before provider requests.
+
+- `emby_item` and `emby_relationship` are current-state projections.
+- `emby_observation` receives a row only when an Emby entity representation changes.
+- `emby_relationship_observation` receives a row when a scoped person/media/role relationship is
+  first seen or changes.
+
+The relationship key includes media ID, person ID, person type, and role/character. This retains local
+production and role evidence for provider-credit comparison without querying live Emby.
+
+## Write-once truths
+
+`truth` names a complete desired Emby graph. Truth 1 is the baseline seeded from Emby.
+
+An Emby entity is imported into a draft truth only when its source Emby ID has never contributed to
+that truth. Its initial name, year, and Emby/TVDB/TMDB/IMDb identities are write-once. Later Emby
+changes create observations but cannot overwrite truth metadata or identities.
+
+Relationships follow the same rule. They are inserted after both endpoint entities are seeded, and
+duplicate snapshots cannot rewrite them. Frozen truths receive neither new entities nor relationships.
+
+The graph is stored in `truth_entity`, `truth_external_identity`, `truth_entity_lineage`, and
+`truth_relationship`. Lineage is many-to-many: multiple sources for one truth entity represent a
+merge, while one source contributing to multiple truth entities represents a split. The
+`truth_merge_candidates` and `truth_split_candidates` views expose those cases.
+
+## Provider evidence and algorithms
+
+TVDB and TMDB caches, entities, aliases, external IDs, credits, candidates, and resolutions are
+observations. Acquisition may refresh them but does not apply them to a truth or live Emby.
+
+Algorithms operate against a truth and observation cutoff. `experiment_run`, `experiment_prediction`,
+and `experiment_metric` retain immutable results. `resolution_proposal` stores proposed graph changes;
+review and creation of a derived truth are separate operations.
+
+## Migrations and database filename
+
+`archive_schema_migration` records additive migrations:
+
+1. Append-only Emby entity observations and versioned truth graph.
+2. Unified provider work/run state plus relationship observations and write-once relationship seeding.
+3. Live running-work state and exact per-run provider response-cache counters.
+4. Source-first lineage index supporting set-based relationship seeding.
+
+The plugin prefers `personcleaner-archive.db`. If only historic `tvdb-archive.db` exists, it continues
+using that file. It never moves a live database or WAL/SHM sidecars during construction.

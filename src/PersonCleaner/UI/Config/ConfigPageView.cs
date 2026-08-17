@@ -149,14 +149,9 @@ namespace PersonCleaner.UI
                     config.SuccessCacheDays = Math.Max(1, incoming.SuccessCacheDays);
                     config.FailureRetryMinutes = Math.Max(1, incoming.FailureRetryMinutes);
                     config.MinimumRequestIntervalMilliseconds = Math.Max(0, incoming.MinimumRequestIntervalMilliseconds);
-                    config.PersonWorkerCount = Math.Max(1, Math.Min(16, incoming.PersonWorkerCount));
                     config.TvdbMaximumConcurrentRequests = Math.Max(1, Math.Min(8, incoming.TvdbMaximumConcurrentRequests));
                     config.TmdbMaximumConcurrentRequests = Math.Max(1, Math.Min(16, incoming.TmdbMaximumConcurrentRequests));
                     config.TmdbMinimumRequestIntervalMilliseconds = Math.Max(0, incoming.TmdbMinimumRequestIntervalMilliseconds);
-                    config.PreviewItemLimit = Math.Max(1, incoming.PreviewItemLimit);
-                    config.RequireSuccessfulPreview = incoming.RequireSuccessfulPreview;
-                    config.ResolutionEvaluationItemsPerType = Math.Max(1, incoming.ResolutionEvaluationItemsPerType);
-                    config.AutoResolutionMinimumConfidence = Math.Max(0.5, Math.Min(1.0, incoming.AutoResolutionMinimumConfidence));
                     config.LibraryPaths = incoming.LibraryPaths ?? new List<LibraryPathFilterItem>();
 
                     Plugin.Instance.SaveConfiguration();
