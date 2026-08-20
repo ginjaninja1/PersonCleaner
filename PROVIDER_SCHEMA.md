@@ -51,6 +51,12 @@ Exact responses in the provider cache/archive tables are the durable source of t
 tables are rebuildable indexes. Potentially large transformations must never run during plugin or
 repository initialization because Emby constructs scheduled tasks while the server is starting.
 
+Repository initialization is validation-only. The plugin must not create or alter persistent
+tables, indexes, views, migration records, or historical data at Emby startup. It opens the existing
+archive, verifies TVDB/TMDB schema version 1 and archive migrations 1-4, and fails with an explicit
+offline-migration error when anything is missing or incompatible. Schema preparation, migrations,
+repairs, and rebuilds are performed offline while Emby is stopped.
+
 Existing TVDB credits predate endpoint-level provenance. An explicit offline rebuild may mark those
 rows `source_entity_type='legacy-normalized'` where the original route cannot be reconstructed;
 future refreshed TVDB responses record their real source entity type and source TVDB ID.

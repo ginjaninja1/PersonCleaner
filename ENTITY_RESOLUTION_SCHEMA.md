@@ -39,14 +39,26 @@ Algorithms operate against a truth and observation cutoff. `experiment_run`, `ex
 and `experiment_metric` retain immutable results. `resolution_proposal` stores proposed graph changes;
 review and creation of a derived truth are separate operations.
 
+Person-housekeeping algorithm version `normalized-v2` uses the migration-5 tables
+`housekeeping_run`, `housekeeping_signal`, and `housekeeping_recommendation`. Operational fields are
+normalized and indexed rather than hidden in JSON. Runs commit bounded phases and persist progress,
+heartbeat, cancellation, and failure state. Derived housekeeping truths are parent-relative deltas in
+`truth_entity_delta`, `truth_identity_delta`, and `truth_relationship_delta`; the 1.28-million-row
+baseline graph is never copied for an experiment.
+
 ## Migrations and database filename
 
-`archive_schema_migration` records additive migrations:
+`archive_schema_migration` records additive migrations. Migration 6 adds
+`provider_identity_issue`, a persistent reviewed ledger for provider-side person splits,
+conflations, bad credits, and bad names. Run-specific candidate/media observations remain in
+`housekeeping_signal`; recommendations do not replace or erase those observations.
 
 1. Append-only Emby entity observations and versioned truth graph.
 2. Unified provider work/run state plus relationship observations and write-once relationship seeding.
 3. Live running-work state and exact per-run provider response-cache counters.
 4. Source-first lineage index supporting set-based relationship seeding.
+5. Normalized housekeeping evidence/recommendations, resumable run state, and delta truths.
+6. Persistent reviewed provider identity issues, separate from library recommendations.
 
 The plugin prefers `personcleaner-archive.db`. If only historic `tvdb-archive.db` exists, it continues
 using that file. It never moves a live database or WAL/SHM sidecars during construction.

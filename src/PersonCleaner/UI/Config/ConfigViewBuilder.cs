@@ -50,6 +50,7 @@ namespace PersonCleaner.UI.Config
                 TvdbMaximumConcurrentRequests = persistedConfig.TvdbMaximumConcurrentRequests,
                 TmdbMaximumConcurrentRequests = persistedConfig.TmdbMaximumConcurrentRequests,
                 TmdbMinimumRequestIntervalMilliseconds = persistedConfig.TmdbMinimumRequestIntervalMilliseconds,
+                GivenNameEquivalences = persistedConfig.GivenNameEquivalences,
                 LibraryPaths = persistedConfig.LibraryPaths,
 
                 // 3. Construct the list item element object hierarchy inside instantiation block

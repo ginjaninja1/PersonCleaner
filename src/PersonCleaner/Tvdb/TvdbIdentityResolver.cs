@@ -50,20 +50,20 @@ namespace PersonCleaner.Tvdb
         private readonly TvdbArchiveRepository repository;
         public TvdbIdentityResolver(TvdbApiClient api, ILibraryManager library, TvdbArchiveRepository repository) { this.api = api; this.library = library; this.repository = repository; }
 
-        public async Task<ResolutionResult> Resolve(BaseItem item, CancellationToken ct, string resolvedSeriesTvdbId = null)
+        public async Task<ResolutionResult> Resolve(BaseItem item, CancellationToken ct, string resolvedSeriesTvdbId = null, string corroboratedPersonImdbId = null)
         {
             var type = TypeOf(item);
             if (item is Person)
             {
-                // Establish the TVDB-native name/filmography evidence first. IMDb
-                // and TMDB reverse lookups are retained only as later candidate
-                // discovery evidence; neither can short-circuit person resolution.
-                var native = await ResolveName(item, type, ct).ConfigureAwait(false);
+                // Strong remote IDs nominate candidates before the looser name search.
+                // TVDB-native filmography is still required by the caller before a
+                // candidate can be accepted.
                 var remoteEvidence = new List<ResolutionResult>();
-                var personImdb = item.GetProviderId(MetadataProviders.Imdb);
+                var personImdb = item.GetProviderId(MetadataProviders.Imdb) ?? corroboratedPersonImdbId;
                 if (!string.IsNullOrWhiteSpace(personImdb))
                 {
-                    var result = await ResolveRemote(item, personImdb, type, "imdb-remote", 0.995, ct).ConfigureAwait(false);
+                    var method = item.GetProviderId(MetadataProviders.Imdb) == null ? "supported-tmdb-imdb-remote" : "imdb-remote";
+                    var result = await ResolveRemote(item, personImdb, type, method, 0.995, ct).ConfigureAwait(false);
                     if (result != null) remoteEvidence.Add(result);
                 }
                 var personTmdb = item.GetProviderId(MetadataProviders.Tmdb);
@@ -72,8 +72,10 @@ namespace PersonCleaner.Tvdb
                     var result = await ResolveRemote(item, personTmdb, type, "tmdb-remote", 0.990, ct).ConfigureAwait(false);
                     if (result != null) remoteEvidence.Add(result);
                 }
+                var native = await ResolveName(item, type, ct).ConfigureAwait(false);
                 MergeRemoteEvidence(native, remoteEvidence);
-                native.Evidence = "evidence_first=true; TVDB-native evidence evaluated before remote lookups; remote lookups are non-authoritative candidate evidence; " + native.Evidence;
+                await EnrichRemotePersonCandidates(item as Person, native, ct).ConfigureAwait(false);
+                native.Evidence = "evidence_first=true; supported remote IDs nominated before name fallback; remote lookups are non-authoritative candidate evidence; TVDB-native media support remains mandatory; " + native.Evidence;
                 return native;
             }
             var rejected = new List<string>();
@@ -290,6 +292,29 @@ namespace PersonCleaner.Tvdb
                     existing.DiscoveryMethods = string.Join(",", methods.OrderBy(x => x));
                     existing.Evidence = (existing.Evidence ?? string.Empty) + "; remote_evidence=" + remote.Method + "[" + remote.Evidence + "]";
                 }
+            }
+        }
+
+        private async Task EnrichRemotePersonCandidates(Person person, ResolutionResult result, CancellationToken ct)
+        {
+            var localFilmography = GetLocalPersonProductionIds(person, ct);
+            foreach (var candidate in result.Candidates.Where(x => !x.ExtendedFetched && (x.DiscoveryMethods ?? string.Empty).IndexOf("remote", StringComparison.OrdinalIgnoreCase) >= 0))
+            {
+                var detail = await api.GetEntity("people", candidate.TvdbId, ct).ConfigureAwait(false);
+                var remoteFilmography = new HashSet<string>();
+                foreach (var credit in detail.characters ?? new List<CharacterData>())
+                {
+                    if (credit.episodeId.HasValue) remoteFilmography.Add("episode:" + credit.episodeId.Value);
+                    if (credit.movieId.HasValue) remoteFilmography.Add("movie:" + credit.movieId.Value);
+                    if (credit.seriesId.HasValue) remoteFilmography.Add("series:" + credit.seriesId.Value);
+                }
+                candidate.ExternalIds = detail.remoteIds ?? new List<RemoteIdData>();
+                candidate.FilmographyIds = remoteFilmography.OrderBy(x => x).ToList();
+                candidate.LocalFilmographyIds = localFilmography.OrderBy(x => x).ToList();
+                candidate.OverlapIds = localFilmography.Where(remoteFilmography.Contains).OrderBy(x => x).ToList();
+                candidate.ExtendedFetched = true;
+                candidate.ExtendedFetchReason = "strong-remote-id-candidate";
+                candidate.Evidence = (candidate.Evidence ?? string.Empty) + "; TVDB person filmography fetched for provider-native acceptance; overlap_ids=[" + string.Join(",", candidate.OverlapIds) + "]";
             }
         }
 

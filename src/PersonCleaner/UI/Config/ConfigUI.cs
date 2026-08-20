@@ -53,6 +53,12 @@ namespace PersonCleaner.UI.Config
         [Description("Minimum delay between direct TMDB request starts.")]
         public int TmdbMinimumRequestIntervalMilliseconds { get; set; } = 30;
 
+        public CaptionItem NameMatchingHeading { get; set; } = new CaptionItem("Person Name Matching");
+
+        [DisplayName("Given-name equivalences")]
+        [Description("Editable semicolon-separated pairs such as Don=Donald;Bill=William. These pairs only corroborate name compatibility when surnames and provider-native media evidence agree; they never establish identity, merge, split, replacement or removal by themselves.")]
+        public string GivenNameEquivalences { get; set; }
+
         public CaptionItem LibraryFilterHeading { get; set; } =
             new CaptionItem("Library / Path Filter");
 

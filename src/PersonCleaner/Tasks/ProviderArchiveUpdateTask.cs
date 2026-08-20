@@ -22,7 +22,7 @@ using System.Diagnostics;
 
 namespace PersonCleaner.Tasks
 {
-    public sealed class ProviderArchiveUpdateTask : IScheduledTask
+    public sealed class ProviderArchiveUpdateTask : IScheduledTask, IDisposable
     {
         private static readonly PersonType[] ScreenRoles = { PersonType.Actor, PersonType.GuestStar, PersonType.Director, PersonType.Writer, PersonType.Producer };
         private readonly ILibraryManager library;
@@ -45,6 +45,7 @@ namespace PersonCleaner.Tasks
             tvdbRepository = new TvdbArchiveRepository(paths, logger); tvdbRepository.Initialize();
             tmdbRepository = new TmdbArchiveRepository(paths, logger); tmdbRepository.Initialize();
             unifiedRepository = new UnifiedArchiveRepository(paths); unifiedRepository.Initialize();
+            logger.Info("Provider archive opened and schema validated without changes at {0}", tvdbRepository.DatabasePath);
             tvdbApi = new TvdbApiClient(http, json, logger, tvdbRepository);
             tmdbApi = new TmdbApiClient(http, json, logger, tmdbRepository);
         }
@@ -202,7 +203,7 @@ namespace PersonCleaner.Tasks
                 tvdbRepository.SaveItemResolution(item.InternalId, type, observed, accepted, provenance, string.IsNullOrWhiteSpace(observed) ? "existing-resolution" : "emby-tvdb-id", string.IsNullOrWhiteSpace(observed) ? 0.95 : 1.0, 1, json.SerializeToString(new { evidence = "Provider update used an existing accepted identity and did not run inference." }));
                 return WorkResult.Ok(provenance);
             }
-            catch (HttpException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+            catch (Exception ex) when (IsProviderNotFound(ex))
             {
                 tvdbRepository.MarkNotFound(type + ":" + accepted, "TVDB confirmed HTTP 404: " + ex.Message);
                 logger.Info("TVDB confirms that {0} is not available at TVDB identity {1}; this absence is cached.", DescribeItem(item), accepted);
@@ -289,7 +290,7 @@ namespace PersonCleaner.Tasks
                 tmdbRepository.SaveEntity(entity.id.ToString(CultureInfo.InvariantCulture), type, entity, json.SerializeToString(entity)); tmdbRepository.MarkFetch(retryKey, true, null);
                 return WorkResult.Ok(provenance);
             }
-            catch (HttpException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+            catch (Exception ex) when (IsProviderNotFound(ex))
             {
                 tmdbRepository.MarkNotFound(retryKey, "TMDB confirmed HTTP 404: " + ex.Message);
                 var provenance = string.IsNullOrWhiteSpace(observed) ? "coordinate-unavailable" : "direct-unavailable";
@@ -298,6 +299,15 @@ namespace PersonCleaner.Tasks
                 return WorkResult.Ok("provider-confirmed-absent");
             }
             catch (Exception ex) when (!(ex is OperationCanceledException)) { SafeMarkTmdbFailure(retryKey, ex); return WorkResult.Fail("failed", ex.Message); }
+        }
+
+        private static bool IsProviderNotFound(Exception error)
+        {
+            if (error == null) return false;
+            if (error is HttpException http && http.StatusCode == System.Net.HttpStatusCode.NotFound) return true;
+            if (error is AggregateException aggregate && aggregate.Flatten().InnerExceptions.Any(IsProviderNotFound)) return true;
+            if (error.InnerException != null && IsProviderNotFound(error.InnerException)) return true;
+            return string.Equals(error.Message, "NotFound", StringComparison.OrdinalIgnoreCase);
         }
 
         private void SafeMarkTvdbFailure(string key, Exception original)
@@ -360,6 +370,12 @@ namespace PersonCleaner.Tasks
             var kind = item is Person ? "person" : item is Series ? "show" : "movie";
             var year = item.ProductionYear.HasValue ? " (" + item.ProductionYear.Value.ToString(CultureInfo.InvariantCulture) + ")" : "";
             return kind + " '" + (item.Name ?? "(unnamed)") + "'" + year + " (Emby " + item.InternalId.ToString(CultureInfo.InvariantCulture) + ")";
+        }
+        public void Dispose()
+        {
+            tvdbRepository.Dispose();
+            tmdbRepository.Dispose();
+            unifiedRepository.Dispose();
         }
         private sealed class SnapshotResult { public List<BaseItem> Items { get; set; } }
         private sealed class WorkResult

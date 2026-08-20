@@ -43,28 +43,16 @@ namespace PersonCleaner.Storage
             lock (sync)
             {
                 if (db != null) return;
-                db = SQLite3.Open(DatabasePath, ConnectionFlags.Create | ConnectionFlags.ReadWrite | ConnectionFlags.PrivateCache | ConnectionFlags.NoMutex, null,
-                    new Dictionary<string, delegate_collation>(), new Dictionary<Tuple<string, int>, Action<IReadOnlyList<sqlite3_value>, sqlite3_context>>(), true, false);
-                db.Execute("PRAGMA busy_timeout=30000");
-                db.Execute("PRAGMA journal_mode=WAL");
-                db.Execute("PRAGMA synchronous=NORMAL");
-                db.RunInTransaction(x =>
+                ArchiveDatabase.RequireExisting(DatabasePath);
+                try
                 {
-                    x.Execute("CREATE TABLE IF NOT EXISTS archive_schema_migration(version INTEGER PRIMARY KEY,applied_utc TEXT NOT NULL,description TEXT NOT NULL)");
-                    x.Execute("CREATE TABLE IF NOT EXISTS emby_relationship(relationship_key TEXT PRIMARY KEY,person_emby_id INTEGER NOT NULL,media_emby_id INTEGER NOT NULL,media_type TEXT NOT NULL,person_type TEXT NOT NULL,role TEXT,observed_utc TEXT NOT NULL)");
-                    x.Execute("CREATE INDEX IF NOT EXISTS ix_emby_relationship_person ON emby_relationship(person_emby_id,media_emby_id)");
-                    x.Execute("CREATE TABLE IF NOT EXISTS emby_relationship_observation(observation_id INTEGER PRIMARY KEY AUTOINCREMENT,relationship_key TEXT NOT NULL,person_emby_id INTEGER NOT NULL,media_emby_id INTEGER NOT NULL,media_type TEXT NOT NULL,person_type TEXT NOT NULL,role TEXT,observed_utc TEXT NOT NULL)");
-                    x.Execute("CREATE INDEX IF NOT EXISTS ix_emby_relationship_observation_key ON emby_relationship_observation(relationship_key,observation_id)");
-                    x.Execute("CREATE TABLE IF NOT EXISTS provider_update_run(run_id INTEGER PRIMARY KEY AUTOINCREMENT,status TEXT NOT NULL,started_utc TEXT NOT NULL,updated_utc TEXT NOT NULL,finished_utc TEXT,total_items INTEGER NOT NULL DEFAULT 0,total_work INTEGER NOT NULL DEFAULT 0,completed_work INTEGER NOT NULL DEFAULT 0,success_count INTEGER NOT NULL DEFAULT 0,failure_count INTEGER NOT NULL DEFAULT 0,message TEXT)");
-                    x.Execute("CREATE TABLE IF NOT EXISTS provider_work(provider TEXT NOT NULL,emby_id INTEGER NOT NULL,entity_type TEXT NOT NULL,route TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',attempt_count INTEGER NOT NULL DEFAULT 0,last_run_id INTEGER,outcome TEXT,error TEXT,updated_utc TEXT NOT NULL,PRIMARY KEY(provider,emby_id))");
-                    x.Execute("CREATE INDEX IF NOT EXISTS ix_provider_work_state ON provider_work(last_run_id,provider,state,entity_type)");
-                    x.Execute("CREATE TABLE IF NOT EXISTS provider_run_cache(run_id INTEGER NOT NULL,provider TEXT NOT NULL,cache_hits INTEGER NOT NULL DEFAULT 0,cache_misses INTEGER NOT NULL DEFAULT 0,updated_utc TEXT NOT NULL,PRIMARY KEY(run_id,provider))");
-                    x.Execute("CREATE TABLE IF NOT EXISTS provider_snapshot_progress(run_id INTEGER PRIMARY KEY,phase TEXT NOT NULL,expected_entities INTEGER NOT NULL,processed_entities INTEGER NOT NULL,expected_relationships INTEGER NOT NULL,processed_relationships INTEGER NOT NULL,updated_utc TEXT NOT NULL)");
-                    x.Execute("CREATE INDEX IF NOT EXISTS ix_truth_lineage_source_first ON truth_entity_lineage(source_emby_id,truth_id,truth_entity_id)");
-                    x.Execute("INSERT OR IGNORE INTO archive_schema_migration VALUES(2,datetime('now'),'Unified provider update manifest and write-once Emby relationship observations')");
-                    x.Execute("INSERT OR IGNORE INTO archive_schema_migration VALUES(3,datetime('now'),'Live provider work state and per-run response-cache counters')");
-                    x.Execute("INSERT OR IGNORE INTO archive_schema_migration VALUES(4,datetime('now'),'Source-first truth lineage index for set-based relationship seeding')");
-                }, TransactionMode.Immediate);
+                    db = SQLite3.Open(DatabasePath, ConnectionFlags.ReadWrite | ConnectionFlags.PrivateCache | ConnectionFlags.NoMutex, null,
+                        new Dictionary<string, delegate_collation>(), new Dictionary<Tuple<string, int>, Action<IReadOnlyList<sqlite3_value>, sqlite3_context>>(), true, false);
+                    db.Execute("PRAGMA busy_timeout=30000"); db.Execute("PRAGMA synchronous=NORMAL");
+                    ArchiveDatabase.ValidateObjects(db, "unified archive", "archive_schema_migration", "emby_relationship", "emby_relationship_observation", "provider_update_run", "provider_work", "provider_run_cache", "provider_snapshot_progress", "truth_entity_lineage", "truth_relationship");
+                    ArchiveDatabase.ValidateMigrations(db, 4);
+                }
+                catch { db?.Dispose(); db = null; throw; }
             }
         }
 

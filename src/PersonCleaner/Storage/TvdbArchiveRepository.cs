@@ -42,132 +42,18 @@ namespace PersonCleaner.Storage
             lock (sync)
             {
                 if (db != null) return;
-                db = SQLite3.Open(
-                    DatabasePath,
-                    ConnectionFlags.Create | ConnectionFlags.ReadWrite | ConnectionFlags.PrivateCache | ConnectionFlags.NoMutex,
-                    null,
-                    new Dictionary<string, delegate_collation>(),
-                    new Dictionary<Tuple<string, int>, Action<IReadOnlyList<sqlite3_value>, sqlite3_context>>(),
-                    true,
-                    false);
-                db.Execute("PRAGMA busy_timeout=30000");
-                db.Execute("PRAGMA journal_mode=WAL");
-                db.Execute("PRAGMA synchronous=NORMAL");
-                db.Execute("PRAGMA foreign_keys=ON");
-                db.Execute("CREATE TABLE IF NOT EXISTS schema_info(version INTEGER NOT NULL)");
-                db.Execute("INSERT INTO schema_info(version) SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM schema_info)");
-                db.Execute("CREATE TABLE IF NOT EXISTS emby_item(emby_id INTEGER PRIMARY KEY, emby_guid TEXT, item_type TEXT NOT NULL, name TEXT, production_year INTEGER, parent_emby_id INTEGER, tvdb_id TEXT, imdb_id TEXT, tmdb_id TEXT, path TEXT, discovered_utc TEXT NOT NULL)");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_emby_item_tvdb ON emby_item(tvdb_id,item_type)");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_emby_item_imdb ON emby_item(imdb_id,item_type)");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_emby_item_name ON emby_item(name,item_type)");
-                db.Execute("CREATE TABLE IF NOT EXISTS tvdb_entity(tvdb_id TEXT NOT NULL, entity_type TEXT NOT NULL, name TEXT, slug TEXT, birth_date TEXT, death_date TEXT, birth_place TEXT, first_aired TEXT, last_aired TEXT, country TEXT, language TEXT, raw_json TEXT, fetched_utc TEXT NOT NULL, PRIMARY KEY(tvdb_id,entity_type))");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_tvdb_entity_name ON tvdb_entity(name,entity_type)");
-                db.Execute("CREATE TABLE IF NOT EXISTS remote_id(tvdb_id TEXT NOT NULL, entity_type TEXT NOT NULL, source_name TEXT NOT NULL, remote_id TEXT NOT NULL, source_type INTEGER, PRIMARY KEY(tvdb_id,entity_type,source_name,remote_id))");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_remote_id_value ON remote_id(remote_id,source_name,entity_type)");
-                db.Execute("CREATE TABLE IF NOT EXISTS tvdb_alias(tvdb_id TEXT NOT NULL,entity_type TEXT NOT NULL,alias TEXT NOT NULL,language TEXT NOT NULL DEFAULT '',alias_type TEXT NOT NULL DEFAULT '',PRIMARY KEY(tvdb_id,entity_type,alias,language,alias_type))");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_tvdb_alias_value ON tvdb_alias(alias,entity_type)");
-                db.Execute("CREATE TABLE IF NOT EXISTS credit(subject_tvdb_id TEXT NOT NULL, subject_type TEXT NOT NULL, person_tvdb_id TEXT NOT NULL, character_id INTEGER NOT NULL, episode_tvdb_id TEXT, person_name TEXT, role_name TEXT, credit_type TEXT, sort_order INTEGER, is_featured INTEGER, PRIMARY KEY(subject_tvdb_id,subject_type,person_tvdb_id,character_id))");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_credit_person ON credit(person_tvdb_id,subject_type)");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_credit_episode ON credit(episode_tvdb_id)");
-                db.Execute("CREATE TABLE IF NOT EXISTS tvdb_credit_observation(source_entity_type TEXT NOT NULL,source_tvdb_id TEXT NOT NULL,person_tvdb_id TEXT NOT NULL,production_tvdb_id TEXT NOT NULL,production_type TEXT NOT NULL,character_id INTEGER NOT NULL,episode_tvdb_id TEXT NOT NULL DEFAULT '',person_name TEXT,role_name TEXT,credit_type TEXT,sort_order INTEGER,is_featured INTEGER,observed_utc TEXT NOT NULL,PRIMARY KEY(source_entity_type,source_tvdb_id,person_tvdb_id,production_tvdb_id,production_type,character_id,episode_tvdb_id))");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_tvdb_credit_observation_person ON tvdb_credit_observation(person_tvdb_id,source_entity_type)");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_tvdb_credit_observation_production ON tvdb_credit_observation(production_tvdb_id,production_type,source_entity_type)");
-                db.Execute("DELETE FROM credit WHERE credit_type IS NULL OR credit_type NOT IN ('Actor','Guest Star','Director','Writer','Screenplay','Producer','Executive Producer','Creator','Showrunner')");
-                db.Execute("CREATE TABLE IF NOT EXISTS fetch_cache(cache_key TEXT PRIMARY KEY, state TEXT NOT NULL, http_status INTEGER, attempt_count INTEGER NOT NULL, fetched_utc TEXT, next_attempt_utc TEXT NOT NULL, error TEXT)");
-                db.Execute("UPDATE fetch_cache SET state='not-found',http_status=404,next_attempt_utc=datetime('now','+30 days') WHERE state='failed' AND lower(COALESCE(error,'')) LIKE '%notfound%'");
-                db.Execute("CREATE TABLE IF NOT EXISTS api_response_cache(request_path TEXT PRIMARY KEY, response_json TEXT NOT NULL, fetched_utc TEXT NOT NULL, expires_utc TEXT NOT NULL)");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_api_response_expiry ON api_response_cache(expires_utc)");
-                db.Execute("CREATE TABLE IF NOT EXISTS api_response_archive(request_path TEXT NOT NULL, fetched_utc TEXT NOT NULL, response_json TEXT NOT NULL, PRIMARY KEY(request_path,fetched_utc))");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_api_response_archive_path ON api_response_archive(request_path)");
-                // Existing cache rows remain the current durable copy. SaveApiResponse
-                // moves the previous version into history immediately before replacement,
-                // avoiding a one-off duplication of the potentially very large cache.
-                db.Execute("CREATE TABLE IF NOT EXISTS run_state(task_key TEXT PRIMARY KEY, status TEXT NOT NULL, started_utc TEXT, updated_utc TEXT NOT NULL, finished_utc TEXT, total_items INTEGER NOT NULL, processed_items INTEGER NOT NULL, success_count INTEGER NOT NULL, failure_count INTEGER NOT NULL, last_emby_id INTEGER, message TEXT)");
-                db.Execute("CREATE TABLE IF NOT EXISTS export_scope(task_key TEXT NOT NULL, emby_id INTEGER NOT NULL, ordinal INTEGER NOT NULL, entity_type TEXT NOT NULL, id_area TEXT NOT NULL, result TEXT NOT NULL DEFAULT 'pending', updated_utc TEXT NOT NULL, PRIMARY KEY(task_key,emby_id))");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_export_scope_progress ON export_scope(task_key,entity_type,id_area,result)");
-                db.Execute("CREATE TABLE IF NOT EXISTS id_probe(direction TEXT NOT NULL, entity_type TEXT NOT NULL, input_id TEXT NOT NULL, tvdb_id TEXT, imdb_id TEXT, name TEXT, success INTEGER NOT NULL, checked_utc TEXT NOT NULL, raw_json TEXT, PRIMARY KEY(direction,entity_type,input_id,tvdb_id))");
-                db.Execute("CREATE TABLE IF NOT EXISTS resolution_evaluation(emby_id INTEGER NOT NULL, entity_type TEXT NOT NULL, emby_name TEXT, withheld_tvdb_id TEXT NOT NULL, predicted_tvdb_id TEXT, method TEXT NOT NULL, confidence REAL NOT NULL, candidate_count INTEGER NOT NULL, is_correct INTEGER NOT NULL, evidence_json TEXT, evaluated_utc TEXT NOT NULL, PRIMARY KEY(emby_id,method))");
-                db.Execute("CREATE TABLE IF NOT EXISTS item_resolution(emby_id INTEGER PRIMARY KEY, entity_type TEXT NOT NULL, observed_tvdb_id TEXT, resolved_tvdb_id TEXT, provenance TEXT NOT NULL, method TEXT NOT NULL, confidence REAL NOT NULL, candidate_count INTEGER NOT NULL, evidence_json TEXT, evaluated_utc TEXT NOT NULL)");
-                db.Execute("CREATE TABLE IF NOT EXISTS resolution_decision_history(emby_id INTEGER NOT NULL, evaluated_utc TEXT NOT NULL, algorithm_version TEXT NOT NULL, entity_type TEXT NOT NULL, observed_tvdb_id TEXT, resolved_tvdb_id TEXT, provenance TEXT NOT NULL, method TEXT NOT NULL, confidence REAL NOT NULL, candidate_count INTEGER NOT NULL, evidence_json TEXT, PRIMARY KEY(emby_id,evaluated_utc,algorithm_version))");
-                db.Execute("INSERT OR IGNORE INTO resolution_decision_history SELECT emby_id,evaluated_utc,'legacy-pre-evidence-first',entity_type,observed_tvdb_id,resolved_tvdb_id,provenance,method,confidence,candidate_count,evidence_json FROM item_resolution");
-                db.Execute("CREATE TABLE IF NOT EXISTS resolution_candidate(emby_id INTEGER NOT NULL, rank INTEGER NOT NULL, entity_type TEXT NOT NULL, tvdb_id TEXT, name TEXT, score REAL NOT NULL, external_ids_json TEXT, filmography_ids_json TEXT, evidence TEXT, evaluated_utc TEXT NOT NULL, PRIMARY KEY(emby_id,rank))");
-                db.Execute("CREATE TABLE IF NOT EXISTS candidate_evidence(emby_id INTEGER NOT NULL, tvdb_id TEXT NOT NULL, entity_type TEXT NOT NULL, search_rank INTEGER, final_rank INTEGER, name TEXT, normalized_name_class TEXT NOT NULL, discovery_methods TEXT NOT NULL, extended_fetched INTEGER NOT NULL, extended_fetch_reason TEXT, score REAL NOT NULL, external_ids_json TEXT, filmography_ids_json TEXT, evidence TEXT, evaluated_utc TEXT NOT NULL, PRIMARY KEY(emby_id,tvdb_id))");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_candidate_evidence_tvdb ON candidate_evidence(tvdb_id,entity_type)");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_candidate_evidence_signal ON candidate_evidence(entity_type,normalized_name_class,extended_fetched)");
-                db.Execute("INSERT OR IGNORE INTO candidate_evidence SELECT emby_id,COALESCE(tvdb_id,''),entity_type,NULL,rank,name,'legacy-unknown','legacy-name-search',CASE WHEN evidence LIKE '%tvdb_productions=%' THEN 1 ELSE 0 END,'legacy-pre-pivot',score,external_ids_json,filmography_ids_json,evidence,evaluated_utc FROM resolution_candidate WHERE tvdb_id IS NOT NULL AND trim(tvdb_id)<>''");
-                db.Execute("CREATE TABLE IF NOT EXISTS person_local_production(emby_id INTEGER NOT NULL,production_key TEXT NOT NULL,production_type TEXT NOT NULL,production_tvdb_id TEXT NOT NULL,PRIMARY KEY(emby_id,production_key))");
-                db.Execute("CREATE TABLE IF NOT EXISTS candidate_tvdb_production(emby_id INTEGER NOT NULL,candidate_tvdb_id TEXT NOT NULL,production_key TEXT NOT NULL,production_type TEXT NOT NULL,production_tvdb_id TEXT NOT NULL,is_shared INTEGER NOT NULL,PRIMARY KEY(emby_id,candidate_tvdb_id,production_key))");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_candidate_tvdb_production_title ON candidate_tvdb_production(production_type,production_tvdb_id)");
-                db.Execute("CREATE VIEW IF NOT EXISTS person_local_production_search AS SELECT p.emby_id,e.name AS emby_person,p.production_key,p.production_type,p.production_tvdb_id,t.name AS production_title,t.first_aired FROM person_local_production p JOIN emby_item e ON e.emby_id=p.emby_id LEFT JOIN tvdb_entity t ON t.entity_type=p.production_type AND t.tvdb_id=p.production_tvdb_id");
-                db.Execute("CREATE VIEW IF NOT EXISTS candidate_production_search AS SELECT p.emby_id,e.name AS emby_person,p.candidate_tvdb_id,c.name AS candidate_name,p.production_key,p.production_type,p.production_tvdb_id,t.name AS production_title,t.first_aired,p.is_shared FROM candidate_tvdb_production p JOIN emby_item e ON e.emby_id=p.emby_id LEFT JOIN candidate_evidence c ON c.emby_id=p.emby_id AND c.tvdb_id=p.candidate_tvdb_id LEFT JOIN tvdb_entity t ON t.entity_type=p.production_type AND t.tvdb_id=p.production_tvdb_id");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_resolution_candidate_tvdb ON resolution_candidate(tvdb_id,entity_type)");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_item_resolution_tvdb ON item_resolution(resolved_tvdb_id,entity_type)");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_item_resolution_provenance ON item_resolution(provenance,entity_type,confidence)");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_resolution_eval_result ON resolution_evaluation(entity_type,is_correct,confidence)");
-                db.Execute("CREATE VIEW IF NOT EXISTS resolution_evaluation_summary AS SELECT entity_type,method,COUNT(*) AS evaluated,SUM(is_correct) AS correct,ROUND(100.0*SUM(is_correct)/COUNT(*),2) AS precision_percent,ROUND(AVG(confidence),4) AS average_confidence FROM resolution_evaluation GROUP BY entity_type,method");
-                db.Execute("CREATE VIEW IF NOT EXISTS resolution_inventory AS SELECT r.provenance,r.entity_type,COUNT(*) AS item_count,ROUND(AVG(r.confidence),4) AS average_confidence FROM item_resolution r GROUP BY r.provenance,r.entity_type");
-                db.Execute("CREATE VIEW IF NOT EXISTS resolved_searchable_media AS SELECT e.emby_id,e.emby_guid,e.item_type,e.name AS emby_name,e.production_year,e.imdb_id,e.tmdb_id,r.observed_tvdb_id,r.resolved_tvdb_id,r.provenance,r.method,r.confidence,r.candidate_count,t.name AS tvdb_name FROM emby_item e JOIN item_resolution r ON r.emby_id=e.emby_id LEFT JOIN tvdb_entity t ON t.tvdb_id=r.resolved_tvdb_id AND t.entity_type=r.entity_type");
-                db.Execute("CREATE VIEW IF NOT EXISTS identity_review_queue AS SELECT e.emby_id,e.item_type,e.name AS emby_name,e.production_year,e.imdb_id,e.tmdb_id,r.observed_tvdb_id,r.resolved_tvdb_id,r.provenance,r.method,r.confidence,r.candidate_count,r.evidence_json,r.evaluated_utc FROM emby_item e JOIN item_resolution r ON r.emby_id=e.emby_id WHERE r.provenance IN ('direct-unavailable','rejected','unresolved','conflict')");
-                db.Execute("CREATE VIEW IF NOT EXISTS export_area_progress AS SELECT task_key,entity_type,id_area,COUNT(*) AS total_items,SUM(CASE WHEN result<>'pending' THEN 1 ELSE 0 END) AS examined_items,SUM(CASE WHEN result IN ('direct','inferred') THEN 1 ELSE 0 END) AS accepted_dumps,SUM(CASE WHEN result IN ('rejected','unresolved','direct-unavailable','conflict') THEN 1 ELSE 0 END) AS review_items,SUM(CASE WHEN result='failed' THEN 1 ELSE 0 END) AS failed_items,ROUND(100.0*SUM(CASE WHEN result<>'pending' THEN 1 ELSE 0 END)/COUNT(*),2) AS percent_examined FROM export_scope GROUP BY task_key,entity_type,id_area");
-                // Versions before 0.0.0.2 could write a successful reverse probe with a NULL
-                // TVDB id. NULLs are distinct in SQLite composite keys, so those rows were not
-                // replaced by the corrected probe result. They contain no useful mapping.
-                db.Execute("DELETE FROM id_probe WHERE direction='imdb-to-tvdb' AND (tvdb_id IS NULL OR trim(tvdb_id)='')");
-                db.Execute("CREATE VIEW IF NOT EXISTS searchable_media AS SELECT e.emby_id,e.emby_guid,e.item_type,e.name AS emby_name,e.production_year,e.tvdb_id,e.imdb_id,e.tmdb_id,t.name AS tvdb_name,t.fetched_utc FROM emby_item e LEFT JOIN tvdb_entity t ON t.tvdb_id=e.tvdb_id AND t.entity_type=e.item_type");
-                // Older builds wrapped entity 404s in AggregateException, leaving a failed
-                // fetch-cache row rather than the intended direct-unavailable classification.
-                db.Execute("UPDATE item_resolution SET provenance='direct-unavailable',method='tvdb-404',confidence=0.0,evidence_json='{\"evidence\":\"Emby has this TVDB id, but TVDB returned HTTP 404. Human review recommended; Emby was not modified.\"}',evaluated_utc=datetime('now') WHERE observed_tvdb_id IS NOT NULL AND EXISTS(SELECT 1 FROM fetch_cache f WHERE f.cache_key=item_resolution.entity_type||':'||item_resolution.observed_tvdb_id AND f.state='failed' AND lower(f.error) LIKE '%notfound%')");
-                db.Execute("UPDATE export_scope SET result='direct-unavailable',updated_utc=datetime('now') WHERE EXISTS(SELECT 1 FROM item_resolution r WHERE r.emby_id=export_scope.emby_id AND r.provenance='direct-unavailable')");
-                InitializeEntityResolutionSchema();
-                logger.Info("PersonCleaner archive database initialized at {0}", DatabasePath);
-            }
-        }
-
-        private void InitializeEntityResolutionSchema()
-        {
-            db.RunInTransaction(x =>
-            {
-                x.Execute("CREATE TABLE IF NOT EXISTS archive_schema_migration(version INTEGER PRIMARY KEY,applied_utc TEXT NOT NULL,description TEXT NOT NULL)");
-                var needsInitialSeed = !HasMigration(x, 1);
-                x.Execute("CREATE TABLE IF NOT EXISTS emby_observation(observation_id INTEGER PRIMARY KEY AUTOINCREMENT,emby_id INTEGER NOT NULL,emby_guid TEXT,item_type TEXT NOT NULL,name TEXT,production_year INTEGER,parent_emby_id INTEGER,tvdb_id TEXT,imdb_id TEXT,tmdb_id TEXT,path TEXT,observed_utc TEXT NOT NULL)");
-                x.Execute("CREATE INDEX IF NOT EXISTS ix_emby_observation_item ON emby_observation(emby_id,observation_id)");
-                x.Execute("CREATE TABLE IF NOT EXISTS truth(truth_id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,parent_truth_id INTEGER,created_utc TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('draft','frozen','retired')),description TEXT,FOREIGN KEY(parent_truth_id) REFERENCES truth(truth_id))");
-                x.Execute("CREATE TABLE IF NOT EXISTS truth_entity(truth_id INTEGER NOT NULL,truth_entity_id TEXT NOT NULL,entity_type TEXT NOT NULL,preferred_name TEXT,production_year INTEGER,desired_emby_id INTEGER,disposition TEXT NOT NULL DEFAULT 'retain' CHECK(disposition IN ('retain','create','update','remove')),PRIMARY KEY(truth_id,truth_entity_id),FOREIGN KEY(truth_id) REFERENCES truth(truth_id))");
-                x.Execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_truth_desired_emby ON truth_entity(truth_id,desired_emby_id) WHERE desired_emby_id IS NOT NULL");
-                x.Execute("CREATE TABLE IF NOT EXISTS truth_external_identity(truth_id INTEGER NOT NULL,truth_entity_id TEXT NOT NULL,provider TEXT NOT NULL,external_id TEXT NOT NULL,provenance_type TEXT NOT NULL,provenance_reference TEXT,PRIMARY KEY(truth_id,truth_entity_id,provider),FOREIGN KEY(truth_id,truth_entity_id) REFERENCES truth_entity(truth_id,truth_entity_id))");
-                x.Execute("CREATE TABLE IF NOT EXISTS truth_entity_lineage(truth_id INTEGER NOT NULL,truth_entity_id TEXT NOT NULL,source_emby_id INTEGER NOT NULL,contribution TEXT NOT NULL CHECK(contribution IN ('retained','merged','split')),PRIMARY KEY(truth_id,truth_entity_id,source_emby_id),FOREIGN KEY(truth_id,truth_entity_id) REFERENCES truth_entity(truth_id,truth_entity_id))");
-                x.Execute("CREATE INDEX IF NOT EXISTS ix_truth_lineage_source ON truth_entity_lineage(truth_id,source_emby_id)");
-                x.Execute("CREATE TABLE IF NOT EXISTS truth_relationship(truth_id INTEGER NOT NULL,relationship_id TEXT NOT NULL,subject_truth_entity_id TEXT NOT NULL,object_truth_entity_id TEXT NOT NULL,relationship_type TEXT NOT NULL,role TEXT,character_name TEXT,provenance_type TEXT NOT NULL,provenance_reference TEXT,PRIMARY KEY(truth_id,relationship_id),FOREIGN KEY(truth_id,subject_truth_entity_id) REFERENCES truth_entity(truth_id,truth_entity_id),FOREIGN KEY(truth_id,object_truth_entity_id) REFERENCES truth_entity(truth_id,truth_entity_id))");
-                x.Execute("CREATE TABLE IF NOT EXISTS algorithm(algorithm_id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,version TEXT NOT NULL,code_hash TEXT,configuration_json TEXT,UNIQUE(name,version,code_hash))");
-                x.Execute("CREATE TABLE IF NOT EXISTS experiment_run(run_id INTEGER PRIMARY KEY AUTOINCREMENT,algorithm_id INTEGER NOT NULL,truth_id INTEGER NOT NULL,observation_cutoff_utc TEXT NOT NULL,mask_policy_json TEXT,random_seed INTEGER,started_utc TEXT NOT NULL,completed_utc TEXT,status TEXT NOT NULL,FOREIGN KEY(algorithm_id) REFERENCES algorithm(algorithm_id),FOREIGN KEY(truth_id) REFERENCES truth(truth_id))");
-                x.Execute("CREATE TABLE IF NOT EXISTS resolution_proposal(proposal_id INTEGER PRIMARY KEY AUTOINCREMENT,run_id INTEGER,base_truth_id INTEGER NOT NULL,operation TEXT NOT NULL CHECK(operation IN ('merge','split','change_identity','move_relationship','create','remove','update')),payload_json TEXT NOT NULL,confidence REAL,review_status TEXT NOT NULL DEFAULT 'pending' CHECK(review_status IN ('pending','accepted','rejected')),reviewed_utc TEXT,reviewed_by TEXT,review_note TEXT,created_utc TEXT NOT NULL,FOREIGN KEY(run_id) REFERENCES experiment_run(run_id),FOREIGN KEY(base_truth_id) REFERENCES truth(truth_id))");
-                x.Execute("CREATE TABLE IF NOT EXISTS experiment_prediction(run_id INTEGER NOT NULL,subject_truth_entity_id TEXT NOT NULL,provider TEXT NOT NULL,predicted_external_id TEXT,rank INTEGER NOT NULL,score REAL,confidence REAL,abstained INTEGER NOT NULL DEFAULT 0,evidence_json TEXT,PRIMARY KEY(run_id,subject_truth_entity_id,provider,rank),FOREIGN KEY(run_id) REFERENCES experiment_run(run_id))");
-                x.Execute("CREATE TABLE IF NOT EXISTS experiment_metric(run_id INTEGER NOT NULL,entity_type TEXT NOT NULL DEFAULT '',cohort TEXT NOT NULL DEFAULT '',metric_name TEXT NOT NULL,metric_value REAL NOT NULL,PRIMARY KEY(run_id,entity_type,cohort,metric_name),FOREIGN KEY(run_id) REFERENCES experiment_run(run_id))");
-                if (needsInitialSeed)
+                ArchiveDatabase.RequireExisting(DatabasePath);
+                try
                 {
-                    x.Execute("INSERT OR IGNORE INTO truth(truth_id,name,parent_truth_id,created_utc,status,description) VALUES(1,'Emby baseline',NULL,datetime('now'),'draft','New Emby objects are seeded here once; later observations cannot overwrite this truth')");
-                    x.Execute("INSERT INTO emby_observation(emby_id,emby_guid,item_type,name,production_year,parent_emby_id,tvdb_id,imdb_id,tmdb_id,path,observed_utc) SELECT e.emby_id,e.emby_guid,e.item_type,e.name,e.production_year,e.parent_emby_id,e.tvdb_id,e.imdb_id,e.tmdb_id,e.path,e.discovered_utc FROM emby_item e WHERE NOT EXISTS(SELECT 1 FROM emby_observation o WHERE o.emby_id=e.emby_id)");
-                    x.Execute("INSERT OR IGNORE INTO truth_entity(truth_id,truth_entity_id,entity_type,preferred_name,production_year,desired_emby_id,disposition) SELECT 1,'emby:'||emby_id,item_type,name,production_year,emby_id,'retain' FROM emby_item");
-                    x.Execute("INSERT OR IGNORE INTO truth_entity_lineage(truth_id,truth_entity_id,source_emby_id,contribution) SELECT 1,'emby:'||emby_id,emby_id,'retained' FROM emby_item");
-                    x.Execute("INSERT OR IGNORE INTO truth_external_identity SELECT 1,'emby:'||emby_id,'emby',CAST(emby_id AS TEXT),'initial-emby-import','emby:'||emby_id FROM emby_item");
-                    x.Execute("INSERT OR IGNORE INTO truth_external_identity SELECT 1,'emby:'||emby_id,'tvdb',tvdb_id,'initial-emby-import','emby:'||emby_id FROM emby_item WHERE tvdb_id IS NOT NULL AND trim(tvdb_id)<>''");
-                    x.Execute("INSERT OR IGNORE INTO truth_external_identity SELECT 1,'emby:'||emby_id,'imdb',imdb_id,'initial-emby-import','emby:'||emby_id FROM emby_item WHERE imdb_id IS NOT NULL AND trim(imdb_id)<>''");
-                    x.Execute("INSERT OR IGNORE INTO truth_external_identity SELECT 1,'emby:'||emby_id,'tmdb',tmdb_id,'initial-emby-import','emby:'||emby_id FROM emby_item WHERE tmdb_id IS NOT NULL AND trim(tmdb_id)<>''");
-                    x.Execute("INSERT INTO archive_schema_migration VALUES(1,datetime('now'),'Append-only Emby observations and versioned desired-state truth graph')");
+                    db = SQLite3.Open(DatabasePath, ConnectionFlags.ReadWrite | ConnectionFlags.PrivateCache | ConnectionFlags.NoMutex, null,
+                        new Dictionary<string, delegate_collation>(), new Dictionary<Tuple<string, int>, Action<IReadOnlyList<sqlite3_value>, sqlite3_context>>(), true, false);
+                    db.Execute("PRAGMA busy_timeout=30000"); db.Execute("PRAGMA synchronous=NORMAL"); db.Execute("PRAGMA foreign_keys=ON");
+                    ArchiveDatabase.ValidateObjects(db, "TVDB", "schema_info", "emby_item", "tvdb_entity", "remote_id", "tvdb_alias", "credit", "tvdb_credit_observation", "fetch_cache", "api_response_cache", "api_response_archive", "item_resolution", "resolution_decision_history", "resolution_candidate", "candidate_evidence", "person_local_production", "candidate_tvdb_production", "emby_observation", "truth", "truth_entity", "truth_external_identity", "truth_entity_lineage", "truth_relationship", "algorithm", "experiment_run", "resolution_proposal", "experiment_prediction", "experiment_metric", "archive_schema_migration");
+                    ArchiveDatabase.ValidateVersion(db, "TVDB", "schema_info", 1);
+                    ArchiveDatabase.ValidateMigrations(db, 4);
                 }
-                x.Execute("CREATE VIEW IF NOT EXISTS truth_merge_candidates AS SELECT truth_id,truth_entity_id,COUNT(*) AS source_count FROM truth_entity_lineage GROUP BY truth_id,truth_entity_id HAVING COUNT(*)>1");
-                x.Execute("CREATE VIEW IF NOT EXISTS truth_split_candidates AS SELECT truth_id,source_emby_id,COUNT(*) AS truth_entity_count FROM truth_entity_lineage GROUP BY truth_id,source_emby_id HAVING COUNT(*)>1");
-            }, TransactionMode.Immediate);
-        }
-
-        private static bool HasMigration(IDatabaseConnection connection, int version)
-        {
-            using (var s = connection.PrepareStatement("SELECT 1 FROM archive_schema_migration WHERE version=@version LIMIT 1"))
-            {
-                s.TryBind("@version", version);
-                foreach (var ignored in s.ExecuteQuery()) return true;
+                catch { db?.Dispose(); db = null; throw; }
             }
-            return false;
         }
 
         public bool IsDue(string key)
@@ -175,6 +61,11 @@ namespace PersonCleaner.Storage
             lock (sync) using (var s = db.PrepareStatement("SELECT next_attempt_utc FROM fetch_cache WHERE cache_key=@key"))
             { s.TryBind("@key", key); foreach (var row in s.ExecuteQuery()) return DateTimeOffset.Parse(row.GetString(0), CultureInfo.InvariantCulture) <= DateTimeOffset.UtcNow; }
             return true;
+        }
+
+        public bool IsNotFoundCached(string key)
+        {
+            lock(sync) using(var s=db.PrepareStatement("SELECT 1 FROM fetch_cache WHERE cache_key=@key AND state='not-found' AND next_attempt_utc>@now LIMIT 1")){s.TryBind("@key",key);s.TryBind("@now",Now());foreach(var row in s.ExecuteQuery())return true;}return false;
         }
 
         public bool TryGetApiResponse(string requestPath, out string responseJson)
@@ -464,6 +355,43 @@ namespace PersonCleaner.Storage
                     foreach (var key in c.FilmographyIds ?? new List<string>()) SaveProductionKey(x, "candidate_tvdb_production", embyId, c.TvdbId, key, overlaps.Contains(key));
                 }
             }, TransactionMode.Immediate);
+        }
+        public List<long> GetPersonEvidenceGapIds()
+        {
+            var frozen=new List<long>();lock(sync)
+            {
+                using(var seed=db.PrepareStatement("INSERT OR IGNORE INTO fetch_cache(cache_key,state,http_status,attempt_count,fetched_utc,next_attempt_utc,error) SELECT 'evidence-cohort:tvdb:'||substr(cache_key,length('person-evidence-audit:')+1),'cohort-active',NULL,1,@now,'9999-12-31T23:59:59Z','Frozen evaluation cohort reconstructed from earliest audited people' FROM fetch_cache WHERE cache_key LIKE 'person-evidence-audit:%' ORDER BY fetched_utc,cache_key LIMIT 1000")){seed.TryBind("@now",Now());seed.MoveNext();}
+                using(var cohort=db.PrepareStatement("SELECT cast(substr(cache_key,length('evidence-cohort:tvdb:')+1) AS integer) FROM fetch_cache WHERE cache_key LIKE 'evidence-cohort:tvdb:%' AND state IN('cohort-active','success') ORDER BY cast(substr(cache_key,length('evidence-cohort:tvdb:')+1) AS integer)"))foreach(var r in cohort.ExecuteQuery())frozen.Add(r.GetInt64(0));
+            }
+            if(frozen.Count>0)return frozen;
+            var result=new List<long>(); lock(sync) using(var s=db.PrepareStatement(@"WITH linked AS (SELECT person_emby_id,count(DISTINCT media_emby_id) linked FROM emby_relationship GROUP BY person_emby_id), duplicates AS (SELECT tvdb_id FROM emby_item WHERE item_type='person' AND tvdb_id IS NOT NULL GROUP BY tvdb_id HAVING count(*)>1), supported AS (SELECT p.emby_id,count(DISTINCT er.media_emby_id) media FROM emby_item p JOIN emby_relationship er ON er.person_emby_id=p.emby_id JOIN emby_item m ON m.emby_id=er.media_emby_id LEFT JOIN item_resolution mr ON mr.emby_id=m.emby_id JOIN credit c ON c.subject_tvdb_id=coalesce(m.tvdb_id,mr.resolved_tvdb_id) AND c.subject_type=m.item_type AND c.person_tvdb_id=p.tvdb_id WHERE p.item_type='person' AND p.tvdb_id IS NOT NULL GROUP BY p.emby_id)
+SELECT p.emby_id FROM emby_item p JOIN linked l ON l.person_emby_id=p.emby_id LEFT JOIN item_resolution r ON r.emby_id=p.emby_id LEFT JOIN tvdb_entity pe ON pe.entity_type='person' AND pe.tvdb_id=p.tvdb_id LEFT JOIN duplicates d ON d.tvdb_id=p.tvdb_id LEFT JOIN supported s ON s.emby_id=p.emby_id LEFT JOIN (SELECT DISTINCT p.emby_id FROM emby_item p JOIN remote_id rt ON rt.entity_type='person' AND rt.tvdb_id=p.tvdb_id AND rt.source_name='TheMovieDB.com' AND rt.remote_id<>p.tmdb_id JOIN remote_id ri ON ri.entity_type='person' AND ri.tvdb_id=p.tvdb_id AND ri.source_name='IMDB' AND ri.remote_id<>p.imdb_id WHERE p.item_type='person' AND p.tmdb_id IS NOT NULL AND p.tvdb_id IS NOT NULL AND p.imdb_id IS NOT NULL) cf ON cf.emby_id=p.emby_id WHERE p.item_type='person' AND (p.tvdb_id IS NULL OR r.emby_id IS NULL OR r.provenance IN('direct-unavailable','unresolved') OR (p.tvdb_id IS NOT NULL AND pe.tvdb_id IS NULL) OR d.tvdb_id IS NOT NULL OR coalesce(s.media,0)<l.linked) ORDER BY CASE WHEN cf.emby_id IS NOT NULL THEN 0 WHEN r.provenance='direct-unavailable' THEN 1 WHEN d.tvdb_id IS NOT NULL THEN 2 WHEN p.tvdb_id IS NULL THEN 4 ELSE 3 END,p.emby_id LIMIT 1000")){s.TryBind("@now",Now());foreach(var r in s.ExecuteQuery()) result.Add(r.GetInt64(0));} foreach(var id in result)MarkFetch("evidence-cohort:tvdb:"+id,true,"Frozen evaluation cohort"); return result;
+        }
+        public int GetLinkedMediaCount(long personEmbyId)
+        {
+            lock(sync) using(var s=db.PrepareStatement("SELECT count(DISTINCT media_emby_id) FROM emby_relationship WHERE person_emby_id=@id")){s.TryBind("@id",personEmbyId);foreach(var r in s.ExecuteQuery())return r.GetInt(0);}return 0;
+        }
+
+        public string GetMediaSupportedTmdbImdbId(long personEmbyId, string tmdbId)
+        {
+            if (string.IsNullOrWhiteSpace(tmdbId)) return null;
+            const string sql = @"SELECT x.external_id
+FROM tmdb_external_id x
+WHERE x.tmdb_id=@tmdb AND x.entity_type='person' AND x.source_name='imdb'
+AND EXISTS(
+ SELECT 1 FROM emby_relationship er
+ JOIN emby_item m ON m.emby_id=er.media_emby_id
+ LEFT JOIN tmdb_item_resolution mr ON mr.emby_id=m.emby_id
+ JOIN tmdb_credit_observation c ON c.production_tmdb_id=coalesce(m.tmdb_id,mr.resolved_tmdb_id)
+  AND c.production_type=m.item_type AND c.person_tmdb_id=@tmdb
+ WHERE er.person_emby_id=@emby)
+LIMIT 1";
+            lock (sync) using (var s = db.PrepareStatement(sql))
+            {
+                s.TryBind("@tmdb", tmdbId); s.TryBind("@emby", personEmbyId);
+                foreach (var row in s.ExecuteQuery()) return row.IsDBNull(0) ? null : row.GetString(0);
+            }
+            return null;
         }
 
         public string DescribeProduction(string productionKey)

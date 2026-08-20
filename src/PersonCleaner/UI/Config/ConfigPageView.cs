@@ -152,6 +152,7 @@ namespace PersonCleaner.UI
                     config.TvdbMaximumConcurrentRequests = Math.Max(1, Math.Min(8, incoming.TvdbMaximumConcurrentRequests));
                     config.TmdbMaximumConcurrentRequests = Math.Max(1, Math.Min(16, incoming.TmdbMaximumConcurrentRequests));
                     config.TmdbMinimumRequestIntervalMilliseconds = Math.Max(0, incoming.TmdbMinimumRequestIntervalMilliseconds);
+                    config.GivenNameEquivalences = incoming.GivenNameEquivalences?.Trim() ?? string.Empty;
                     config.LibraryPaths = incoming.LibraryPaths ?? new List<LibraryPathFilterItem>();
 
                     Plugin.Instance.SaveConfiguration();

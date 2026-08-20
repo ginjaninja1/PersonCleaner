@@ -37,6 +37,7 @@
 	       (without copying them into the plugin folder) avoids loading incompatible SQLite binaries. -->
 	  <Reference Include="SQLitePCL.pretty" HintPath="$(APPDATA)\Emby-Server\system\SQLitePCL.pretty.dll" Private="false" />
 	  <Reference Include="SQLitePCLRawEx.core" HintPath="$(APPDATA)\Emby-Server\system\SQLitePCLRawEx.core.dll" Private="false" />
+	  <Reference Include="Emby.Web.GenericEdit" HintPath="$(APPDATA)\Emby-Server\system\Emby.Web.GenericEdit.dll" Private="false" />
 	</ItemGroup>
 	<ItemGroup>
 		<EmbeddedResource Include="thumb.png">

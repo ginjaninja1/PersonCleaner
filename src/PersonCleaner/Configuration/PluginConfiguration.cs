@@ -39,6 +39,9 @@ namespace PersonCleaner.Configuration
 
         public int TmdbMinimumRequestIntervalMilliseconds { get; set; } = 30;
 
+        public string GivenNameEquivalences { get; set; } =
+            "Don=Donald;Bill=William;Will=William;Bob=Robert;Rob=Robert;Dick=Richard;Rick=Richard;Jim=James;Jack=John;Ed=Edward;Eddie=Edward;Charlie=Charles;Tom=Thomas;Mike=Michael;Joe=Joseph;Dave=David;Dan=Daniel;Ben=Benjamin;Sam=Samuel;Alex=Alexander;Chris=Christopher;Matt=Matthew;Nick=Nicholas;Tony=Anthony;Andy=Andrew;Steve=Steven;Steve=Stephen;Liz=Elizabeth;Beth=Elizabeth;Kate=Katherine;Kate=Catherine;Katie=Katherine;Katie=Catherine;Becky=Rebecca;Jenny=Jennifer;Sue=Susan;Debbie=Deborah;Maggie=Margaret";
+
         /// <summary>
         /// The real, persisted library/path filter data.
         /// </summary>

@@ -37,6 +37,20 @@ Merge, split, identity correction, name cleansing, and relationship movement bel
 - Migration 2 adds `provider_update_run`, `provider_work`, `emby_relationship`, and
   `emby_relationship_observation`, and seeds `truth_relationship` from complete local credits.
 - Migration 3 adds exact per-run provider response-cache counters and live `running` work state.
+- Migration 6 adds persistent provider identity issues. Housekeeping normalized-v6 audits every
+  linked Emby person against both providers, queues only evidence gaps for bounded cached HTTP
+  acquisition, retains every plausible candidate, writes per-candidate/per-media signals, withholds removals when
+  coverage is incomplete or positive evidence exists, and separates Emby merge reviews from
+  provider-side person split findings.
+- Cross-provider split detection treats conflicting exact external-ID clusters as corroboration of
+  a direct media partition. The stored David Cameron case is Emby 160974: TMDB 1220273/IMDb
+  nm2090098 owns the Brexit movie; TVDB 9148336 -> TMDB 1235383/IMDb nm0131538 owns three episodes.
+- TMDB episode acquisition must merge root `guest_stars` with appended `credits.cast`. Do not treat
+  a failed TVDB episode ID lookup through TMDB `/find` as absence when the exact TMDB
+  series/season/episode route remains available.
+- Evidence acquisition uses frozen 1,000-person development cohorts reconstructed from the earliest
+  provider person-audit checkpoints. Cached completion does not advance the cohort. Candidate-person
+  404s are negatively cached and isolated so one stale provider ID cannot abort the task.
 
 Legacy `run_state`, `tmdb_run_state`, `export_scope`, `id_probe`, and `resolution_evaluation` tables
 are retained for provenance.

@@ -29,6 +29,9 @@ namespace PersonCleaner.Tvdb
         private long cacheMisses;
         public long CacheHits => Interlocked.Read(ref cacheHits);
         public long CacheMisses => Interlocked.Read(ref cacheMisses);
+        private string evidenceName;
+        private long? evidenceEmbyId;
+        private string evidenceProviderId;
 
         public TvdbApiClient(IHttpClient httpClient, IJsonSerializer json, ILogger logger, TvdbArchiveRepository repository)
         {
@@ -37,6 +40,25 @@ namespace PersonCleaner.Tvdb
             this.logger = logger;
             this.repository = repository;
             concurrencyGate = new SemaphoreSlim(Math.Max(1, Plugin.Instance.Configuration.TvdbMaximumConcurrentRequests));
+        }
+
+        public void SetEvidenceContext(string name, long embyId, string providerId)
+        {
+            evidenceName = name; evidenceEmbyId = embyId; evidenceProviderId = providerId;
+        }
+
+        public string EvidencePrefix => LogPrefix(string.Empty);
+
+        private string LogPrefix(string path)
+        {
+            if (!evidenceEmbyId.HasValue) return "[housekeeping - - - TVDB -]";
+            var id = evidenceProviderId;
+            if (path.StartsWith("/people/", StringComparison.OrdinalIgnoreCase))
+            {
+                var value = path.Substring(8); var end = value.IndexOfAny(new[] { '/', '?' });
+                id = end < 0 ? value : value.Substring(0, end);
+            }
+            return "[" + (evidenceName ?? "-") + " - " + evidenceEmbyId.Value + " - TVDB " + (string.IsNullOrWhiteSpace(id) ? "-" : id) + "]";
         }
 
         public async Task<EntityData> GetEntity(string kind, string id, CancellationToken ct)
@@ -64,7 +86,7 @@ namespace PersonCleaner.Tvdb
             catch (HttpException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
             {
                 repository.MarkFetch(failureKey, false, "TVDB returned 404");
-                logger.Warn("TVDB has no official series episode feed for series {0}; negatively cached for the configured failure retry period", seriesId);
+                logger.Warn("{0} TVDB has no official series episode feed for series {1}; negatively cached for the configured failure retry period", LogPrefix(path), seriesId);
                 return null;
             }
         }
@@ -74,10 +96,11 @@ namespace PersonCleaner.Tvdb
             if (repository.TryGetApiResponse(path, out var cachedJson))
             {
                 Interlocked.Increment(ref cacheHits);
-                logger.Debug("TVDB Archive API cache hit: {0}", path);
+                logger.Debug("{0} TVDB Archive API cache hit: {1}", LogPrefix(path), path);
                 return json.DeserializeFromString<T>(cachedJson);
             }
             Interlocked.Increment(ref cacheMisses);
+            logger.Debug("{0} TVDB Archive API cache miss: {1}; successful response will be cached", LogPrefix(path), path);
             await EnsureToken(ct).ConfigureAwait(false);
             Exception last = null;
             for (var attempt = 0; attempt < 5; attempt++)
@@ -104,7 +127,7 @@ namespace PersonCleaner.Tvdb
                     last = ex;
                     var delay = TimeSpan.FromSeconds(Math.Min(60, Math.Pow(2, attempt + 1)));
                     if (ex.StatusCode == (HttpStatusCode)429) await ExtendProviderCooldown(delay, ct).ConfigureAwait(false);
-                    logger.Warn("TVDB transient response on {0}; retry {1}/5 in {2}s", path, attempt + 1, delay.TotalSeconds);
+                    logger.Warn("{0} TVDB transient response on {1}; retry {2}/5 in {3}s", LogPrefix(path), path, attempt + 1, delay.TotalSeconds);
                     await Task.Delay(delay, ct).ConfigureAwait(false);
                 }
                 catch (IOException ex) { last = ex; await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt + 1)), ct).ConfigureAwait(false); }

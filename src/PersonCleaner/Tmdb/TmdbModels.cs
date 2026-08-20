@@ -22,6 +22,7 @@ namespace PersonCleaner.Tmdb
         public int? show_id { get; set; }
         public TmdbExternalIds external_ids { get; set; }
         public TmdbCredits credits { get; set; }
+        public List<TmdbCredit> guest_stars { get; set; } = new List<TmdbCredit>();
         public TmdbCredits aggregate_credits { get; set; }
         public TmdbCredits combined_credits { get; set; }
         public TmdbAliases alternative_names { get; set; }
@@ -82,4 +83,5 @@ namespace PersonCleaner.Tmdb
         public List<TmdbEntity> tv_episode_results { get; set; } = new List<TmdbEntity>();
         public List<TmdbEntity> person_results { get; set; } = new List<TmdbEntity>();
     }
+    internal sealed class TmdbPersonSearchResponse { public List<TmdbEntity> results { get; set; } = new List<TmdbEntity>(); }
 }

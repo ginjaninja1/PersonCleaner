@@ -6,6 +6,8 @@ using MediaBrowser.Model.Plugins.UI.Views;
 using PersonCleaner.UIBaseClasses;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using MediaBrowser.Common.Configuration;
+using PersonCleaner.UI.Housekeeping;
 
 namespace PersonCleaner.UI
 {
@@ -33,10 +35,15 @@ namespace PersonCleaner.UI
             {
                 Name = "PersonCleaner",
                 EnableInMainMenu = false,
-                DisplayName = "TVDB Archive",
+                DisplayName = "Person truth housekeeping",
                 MenuIcon = "storage",
                 IsMainConfigPage = true
             };
+
+            this.tabPages.Add(new TabPageController(pluginInfo, "personcleaner-config", "Archive configuration",
+                info => new ConfigPageView(info, applicationHost, logger)));
+            this.tabPages.Add(new TabPageController(pluginInfo, "personcleaner-housekeeping", "Housekeeping results",
+                info => new HousekeepingResultsPageView(info, applicationHost.Resolve<IApplicationPaths>(), logger)));
         }
 
 

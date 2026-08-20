@@ -11,6 +11,7 @@ using System.Linq;
 
 namespace PersonCleaner.Storage
 {
+    internal sealed class TmdbRecoveryTarget { public long EmbyId { get; set; } public string Name { get; set; } public string CurrentId { get; set; } public string ImdbId { get; set; } public int LinkedCount { get; set; } }
     internal sealed class TmdbArchiveRepository : IDisposable
     {
         private readonly object sync = new object();
@@ -25,39 +26,16 @@ namespace PersonCleaner.Storage
             lock (sync)
             {
                 if (db != null) return;
-                db = SQLite3.Open(DatabasePath, ConnectionFlags.Create | ConnectionFlags.ReadWrite | ConnectionFlags.PrivateCache | ConnectionFlags.NoMutex, null,
-                    new Dictionary<string, delegate_collation>(), new Dictionary<Tuple<string, int>, Action<IReadOnlyList<sqlite3_value>, sqlite3_context>>(), true, false);
-                db.Execute("PRAGMA busy_timeout=30000");
-                db.Execute("PRAGMA journal_mode=WAL"); db.Execute("PRAGMA synchronous=NORMAL");
-                db.Execute("CREATE TABLE IF NOT EXISTS tmdb_schema_info(version INTEGER NOT NULL)");
-                db.Execute("INSERT INTO tmdb_schema_info(version) SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM tmdb_schema_info)");
-                db.Execute("CREATE TABLE IF NOT EXISTS tmdb_entity(tmdb_id TEXT NOT NULL,entity_type TEXT NOT NULL,name TEXT,original_name TEXT,birth_date TEXT,death_date TEXT,birth_place TEXT,first_date TEXT,season_number INTEGER,episode_number INTEGER,raw_json TEXT NOT NULL,fetched_utc TEXT NOT NULL,PRIMARY KEY(tmdb_id,entity_type))");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_tmdb_entity_name ON tmdb_entity(name,entity_type)");
-                db.Execute("CREATE TABLE IF NOT EXISTS tmdb_external_id(tmdb_id TEXT NOT NULL,entity_type TEXT NOT NULL,source_name TEXT NOT NULL,external_id TEXT NOT NULL,PRIMARY KEY(tmdb_id,entity_type,source_name,external_id))");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_tmdb_external_value ON tmdb_external_id(external_id,source_name,entity_type)");
-                db.Execute("CREATE TABLE IF NOT EXISTS tmdb_alias(tmdb_id TEXT NOT NULL,entity_type TEXT NOT NULL,alias TEXT NOT NULL,country TEXT NOT NULL DEFAULT '',alias_type TEXT NOT NULL DEFAULT '',PRIMARY KEY(tmdb_id,entity_type,alias,country,alias_type))");
-                db.Execute("CREATE TABLE IF NOT EXISTS tmdb_credit(person_tmdb_id TEXT NOT NULL,production_tmdb_id TEXT NOT NULL,production_type TEXT NOT NULL,credit_id TEXT NOT NULL DEFAULT '',credit_kind TEXT NOT NULL,job_or_character TEXT NOT NULL DEFAULT '',department TEXT,episode_count INTEGER,production_name TEXT,first_date TEXT,PRIMARY KEY(person_tmdb_id,production_tmdb_id,production_type,credit_id,credit_kind,job_or_character))");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_tmdb_credit_production ON tmdb_credit(production_tmdb_id,production_type)");
-                db.Execute("CREATE TABLE IF NOT EXISTS tmdb_credit_observation(source_entity_type TEXT NOT NULL,source_tmdb_id TEXT NOT NULL,person_tmdb_id TEXT NOT NULL,production_tmdb_id TEXT NOT NULL,production_type TEXT NOT NULL,credit_id TEXT NOT NULL DEFAULT '',credit_kind TEXT NOT NULL,job_or_character TEXT NOT NULL DEFAULT '',department TEXT,episode_count INTEGER,production_name TEXT,first_date TEXT,observed_utc TEXT NOT NULL,PRIMARY KEY(source_entity_type,source_tmdb_id,person_tmdb_id,production_tmdb_id,production_type,credit_id,credit_kind,job_or_character))");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_tmdb_credit_observation_person ON tmdb_credit_observation(person_tmdb_id,source_entity_type)");
-                db.Execute("CREATE INDEX IF NOT EXISTS ix_tmdb_credit_observation_production ON tmdb_credit_observation(production_tmdb_id,production_type,source_entity_type)");
-                db.Execute("CREATE TABLE IF NOT EXISTS tmdb_item_resolution(emby_id INTEGER PRIMARY KEY,entity_type TEXT NOT NULL,observed_tmdb_id TEXT,resolved_tmdb_id TEXT,provenance TEXT NOT NULL,method TEXT NOT NULL,candidate_count INTEGER NOT NULL,evidence_json TEXT,evaluated_utc TEXT NOT NULL)");
-                db.Execute("CREATE TABLE IF NOT EXISTS tmdb_resolution_candidate(emby_id INTEGER NOT NULL,rank INTEGER NOT NULL,entity_type TEXT NOT NULL,tmdb_id TEXT,name TEXT,source_external_id TEXT,raw_json TEXT,evaluated_utc TEXT NOT NULL,PRIMARY KEY(emby_id,rank))");
-                db.Execute("CREATE TABLE IF NOT EXISTS tmdb_api_response_cache(request_path TEXT PRIMARY KEY,response_json TEXT NOT NULL,fetched_utc TEXT NOT NULL,expires_utc TEXT NOT NULL)");
-                db.Execute("CREATE TABLE IF NOT EXISTS tmdb_api_response_archive(request_path TEXT NOT NULL,fetched_utc TEXT NOT NULL,response_json TEXT NOT NULL,PRIMARY KEY(request_path,fetched_utc))");
-                db.Execute("CREATE TABLE IF NOT EXISTS tmdb_fetch_cache(cache_key TEXT PRIMARY KEY,state TEXT NOT NULL,attempt_count INTEGER NOT NULL,fetched_utc TEXT,next_attempt_utc TEXT NOT NULL,error TEXT)");
-                db.Execute("UPDATE tmdb_fetch_cache SET state='not-found',next_attempt_utc=datetime('now','+30 days') WHERE state='failed' AND lower(COALESCE(error,'')) LIKE '%notfound%'");
-                db.Execute("CREATE TABLE IF NOT EXISTS tmdb_run_state(task_key TEXT PRIMARY KEY,status TEXT NOT NULL,started_utc TEXT,updated_utc TEXT NOT NULL,finished_utc TEXT,total_items INTEGER NOT NULL,processed_items INTEGER NOT NULL,success_count INTEGER NOT NULL,failure_count INTEGER NOT NULL,last_emby_id INTEGER,message TEXT)");
-                db.Execute("CREATE VIEW IF NOT EXISTS provider_identity_signals AS SELECT e.emby_id,e.item_type,e.name AS emby_name,e.imdb_id,e.tvdb_id AS emby_tvdb_id,e.tmdb_id AS emby_tmdb_id,r.resolved_tvdb_id,r.provenance AS tvdb_provenance,tr.resolved_tmdb_id,tr.provenance AS tmdb_provenance,te.name AS tvdb_name,me.name AS tmdb_name FROM emby_item e LEFT JOIN item_resolution r ON r.emby_id=e.emby_id LEFT JOIN tvdb_entity te ON te.tvdb_id=r.resolved_tvdb_id AND te.entity_type=e.item_type LEFT JOIN tmdb_item_resolution tr ON tr.emby_id=e.emby_id LEFT JOIN tmdb_entity me ON me.tmdb_id=tr.resolved_tmdb_id AND me.entity_type=e.item_type");
-                db.Execute("DROP VIEW IF EXISTS provider_entity");
-                db.Execute("CREATE VIEW provider_entity AS SELECT 'tvdb' AS provider,tvdb_id AS provider_id,entity_type,name,name AS original_name,birth_date,death_date,birth_place,first_aired AS first_date,fetched_utc FROM tvdb_entity UNION ALL SELECT 'tmdb',tmdb_id,entity_type,name,original_name,birth_date,death_date,birth_place,first_date,fetched_utc FROM tmdb_entity");
-                db.Execute("DROP VIEW IF EXISTS provider_external_id");
-                db.Execute("CREATE VIEW provider_external_id AS SELECT 'tvdb' AS provider,tvdb_id AS provider_id,entity_type,source_name,remote_id AS external_id,source_type FROM remote_id UNION ALL SELECT 'tmdb',tmdb_id,entity_type,source_name,external_id,NULL FROM tmdb_external_id");
-                db.Execute("DROP VIEW IF EXISTS provider_alias");
-                db.Execute("CREATE VIEW provider_alias AS SELECT 'tvdb' AS provider,tvdb_id AS provider_id,entity_type,alias,language AS locale,alias_type FROM tvdb_alias UNION ALL SELECT 'tmdb',tmdb_id,entity_type,alias,country,alias_type FROM tmdb_alias");
-                db.Execute("DROP VIEW IF EXISTS provider_credit_observation");
-                db.Execute("CREATE VIEW provider_credit_observation AS SELECT 'tvdb' AS provider,source_entity_type,source_tvdb_id AS source_provider_id,person_tvdb_id AS person_provider_id,production_tvdb_id AS production_provider_id,production_type,CAST(character_id AS TEXT) AS credit_id,CASE WHEN credit_type IN ('Actor','Guest Star') THEN 'cast' ELSE 'crew' END AS credit_kind,role_name AS job_or_character,credit_type AS department,NULL AS episode_count,observed_utc FROM tvdb_credit_observation UNION ALL SELECT 'tmdb',source_entity_type,source_tmdb_id,person_tmdb_id,production_tmdb_id,production_type,credit_id,credit_kind,job_or_character,department,episode_count,observed_utc FROM tmdb_credit_observation");
-                logger.Info("TMDB archive schema initialized at {0}", DatabasePath);
+                ArchiveDatabase.RequireExisting(DatabasePath);
+                try
+                {
+                    db = SQLite3.Open(DatabasePath, ConnectionFlags.ReadWrite | ConnectionFlags.PrivateCache | ConnectionFlags.NoMutex, null,
+                        new Dictionary<string, delegate_collation>(), new Dictionary<Tuple<string, int>, Action<IReadOnlyList<sqlite3_value>, sqlite3_context>>(), true, false);
+                    db.Execute("PRAGMA busy_timeout=30000"); db.Execute("PRAGMA synchronous=NORMAL");
+                    ArchiveDatabase.ValidateObjects(db, "TMDB", "tmdb_schema_info", "tmdb_entity", "tmdb_external_id", "tmdb_alias", "tmdb_credit", "tmdb_credit_observation", "tmdb_item_resolution", "tmdb_resolution_candidate", "tmdb_api_response_cache", "tmdb_api_response_archive", "tmdb_fetch_cache", "tmdb_run_state", "provider_identity_signals", "provider_entity", "provider_external_id", "provider_alias", "provider_credit_observation");
+                    ArchiveDatabase.ValidateVersion(db, "TMDB", "tmdb_schema_info", 1);
+                }
+                catch { db?.Dispose(); db = null; throw; }
             }
         }
 
@@ -85,6 +63,11 @@ namespace PersonCleaner.Storage
             return true;
         }
 
+        public bool IsNotFoundCached(string key)
+        {
+            lock(sync) using(var s=db.PrepareStatement("SELECT 1 FROM tmdb_fetch_cache WHERE cache_key=@key AND state='not-found' AND next_attempt_utc>@now LIMIT 1")){s.TryBind("@key",key);s.TryBind("@now",Now());foreach(var row in s.ExecuteQuery())return true;}return false;
+        }
+
         public void MarkFetch(string key, bool success, string error)
         {
             var next = DateTimeOffset.UtcNow.Add(success ? TimeSpan.FromDays(Math.Max(1, Plugin.Instance.Configuration.SuccessCacheDays)) : TimeSpan.FromMinutes(Math.Max(1, Plugin.Instance.Configuration.FailureRetryMinutes)));
@@ -95,6 +78,42 @@ namespace PersonCleaner.Storage
         {
             var next = DateTimeOffset.UtcNow.AddDays(Math.Max(1, Plugin.Instance.Configuration.SuccessCacheDays));
             Execute("INSERT OR REPLACE INTO tmdb_fetch_cache VALUES(@key,'not-found',COALESCE((SELECT attempt_count+1 FROM tmdb_fetch_cache WHERE cache_key=@key),1),@now,@next,@error)", s => { s.TryBind("@key", key); s.TryBind("@now", Now()); s.TryBind("@next", next.ToString("O")); s.TryBind("@error", error); });
+        }
+
+        public List<TmdbRecoveryTarget> GetPersonEvidenceGapTargets()
+        {
+            var frozen=new List<TmdbRecoveryTarget>();lock(sync)
+            {
+                using(var seed=db.PrepareStatement("INSERT OR IGNORE INTO tmdb_fetch_cache(cache_key,state,attempt_count,fetched_utc,next_attempt_utc,error) SELECT 'evidence-cohort:tmdb:'||substr(cache_key,length('person-evidence-audit:')+1),'cohort-active',1,@now,'9999-12-31T23:59:59Z','Frozen evaluation cohort reconstructed from earliest audited people' FROM tmdb_fetch_cache WHERE cache_key LIKE 'person-evidence-audit:%' ORDER BY fetched_utc,cache_key LIMIT 1000")){seed.TryBind("@now",Now());seed.MoveNext();}
+                using(var cohort=db.PrepareStatement("SELECT p.emby_id,p.name,p.tmdb_id,p.imdb_id,count(DISTINCT er.media_emby_id) FROM tmdb_fetch_cache f JOIN emby_item p ON p.emby_id=cast(substr(f.cache_key,length('evidence-cohort:tmdb:')+1) AS integer) JOIN emby_relationship er ON er.person_emby_id=p.emby_id WHERE f.cache_key LIKE 'evidence-cohort:tmdb:%' AND f.state IN('cohort-active','success') GROUP BY p.emby_id,p.name,p.tmdb_id,p.imdb_id ORDER BY p.emby_id"))foreach(var r in cohort.ExecuteQuery())frozen.Add(new TmdbRecoveryTarget{EmbyId=r.GetInt64(0),Name=r.GetString(1),CurrentId=r.IsDBNull(2)?null:r.GetString(2),ImdbId=r.IsDBNull(3)?null:r.GetString(3),LinkedCount=r.GetInt(4)});
+            }
+            if(frozen.Count>0)return frozen;
+            var result=new List<TmdbRecoveryTarget>(); lock(sync) using(var s=db.PrepareStatement(@"WITH linked AS (SELECT person_emby_id,count(DISTINCT media_emby_id) linked FROM emby_relationship GROUP BY person_emby_id), duplicates AS (SELECT tmdb_id FROM emby_item WHERE item_type='person' AND tmdb_id IS NOT NULL GROUP BY tmdb_id HAVING count(*)>1), supported AS (SELECT p.emby_id,count(DISTINCT er.media_emby_id) media FROM emby_item p JOIN emby_relationship er ON er.person_emby_id=p.emby_id JOIN emby_item m ON m.emby_id=er.media_emby_id LEFT JOIN tmdb_item_resolution mr ON mr.emby_id=m.emby_id JOIN tmdb_credit c ON c.production_tmdb_id=coalesce(m.tmdb_id,mr.resolved_tmdb_id) AND c.production_type=m.item_type AND c.person_tmdb_id=p.tmdb_id WHERE p.item_type='person' AND p.tmdb_id IS NOT NULL GROUP BY p.emby_id), conflicts AS (SELECT DISTINCT p.emby_id FROM emby_item p JOIN remote_id rt ON rt.entity_type='person' AND rt.tvdb_id=p.tvdb_id AND rt.source_name='TheMovieDB.com' AND rt.remote_id<>p.tmdb_id JOIN remote_id ri ON ri.entity_type='person' AND ri.tvdb_id=p.tvdb_id AND ri.source_name='IMDB' AND ri.remote_id<>p.imdb_id WHERE p.item_type='person' AND p.tmdb_id IS NOT NULL AND p.tvdb_id IS NOT NULL AND p.imdb_id IS NOT NULL)
+SELECT p.emby_id,p.name,p.tmdb_id,p.imdb_id,l.linked FROM emby_item p JOIN linked l ON l.person_emby_id=p.emby_id LEFT JOIN tmdb_item_resolution r ON r.emby_id=p.emby_id LEFT JOIN tmdb_entity pe ON pe.entity_type='person' AND pe.tmdb_id=p.tmdb_id LEFT JOIN duplicates d ON d.tmdb_id=p.tmdb_id LEFT JOIN supported s ON s.emby_id=p.emby_id LEFT JOIN conflicts cf ON cf.emby_id=p.emby_id WHERE p.item_type='person' AND (p.tmdb_id IS NULL OR r.emby_id IS NULL OR r.provenance IN('direct-unavailable','unresolved') OR (p.tmdb_id IS NOT NULL AND pe.tmdb_id IS NULL) OR d.tmdb_id IS NOT NULL OR coalesce(s.media,0)<l.linked) ORDER BY CASE WHEN cf.emby_id IS NOT NULL THEN 0 WHEN r.provenance='direct-unavailable' THEN 1 WHEN d.tmdb_id IS NOT NULL THEN 2 WHEN p.tmdb_id IS NULL THEN 4 ELSE 3 END,p.emby_id LIMIT 1000")){s.TryBind("@now",Now());foreach(var r in s.ExecuteQuery()) result.Add(new TmdbRecoveryTarget{EmbyId=r.GetInt64(0),Name=r.GetString(1),CurrentId=r.IsDBNull(2)?null:r.GetString(2),ImdbId=r.IsDBNull(3)?null:r.GetString(3),LinkedCount=r.GetInt(4)});} foreach(var target in result)MarkFetch("evidence-cohort:tmdb:"+target.EmbyId,true,"Frozen evaluation cohort"); return result;
+        }
+        public int GetLinkedSupport(long embyId,string candidateId)
+        {
+            lock(sync) using(var s=db.PrepareStatement("SELECT count(DISTINCT er.media_emby_id) FROM emby_relationship er JOIN emby_item m ON m.emby_id=er.media_emby_id LEFT JOIN tmdb_item_resolution mr ON mr.emby_id=m.emby_id JOIN tmdb_credit_observation c ON c.production_tmdb_id=coalesce(m.tmdb_id,mr.resolved_tmdb_id) AND c.person_tmdb_id=@candidate WHERE er.person_emby_id=@emby")){s.TryBind("@candidate",candidateId);s.TryBind("@emby",embyId);foreach(var r in s.ExecuteQuery())return r.GetInt(0);}return 0;
+        }
+        public List<string> GetTopLinkedCandidateIds(long embyId,string currentId,int limit)
+        {
+            var result=new List<string>(); lock(sync) using(var s=db.PrepareStatement("SELECT c.person_tmdb_id FROM emby_relationship er JOIN emby_item m ON m.emby_id=er.media_emby_id LEFT JOIN tmdb_item_resolution mr ON mr.emby_id=m.emby_id JOIN tmdb_credit_observation c ON c.production_tmdb_id=coalesce(m.tmdb_id,mr.resolved_tmdb_id) WHERE er.person_emby_id=@emby AND c.person_tmdb_id<>@current GROUP BY c.person_tmdb_id ORDER BY count(DISTINCT er.media_emby_id) DESC LIMIT @limit")){s.TryBind("@emby",embyId);s.TryBind("@current",currentId??"");s.TryBind("@limit",limit);foreach(var r in s.ExecuteQuery())result.Add(r.GetString(0));}return result;
+        }
+        public List<long> GetLinkedMediaIds(long embyId)
+        {
+            var result=new List<long>(); lock(sync) using(var s=db.PrepareStatement("SELECT DISTINCT media_emby_id FROM emby_relationship WHERE person_emby_id=@emby ORDER BY media_emby_id")){s.TryBind("@emby",embyId);foreach(var r in s.ExecuteQuery())result.Add(r.GetInt64(0));}return result;
+        }
+
+        public void SaveRecoveryCandidates(long embyId,IEnumerable<TmdbEntity> candidates,Func<TmdbEntity,string> serialize)
+        {
+            lock(sync) db.RunInTransaction(x=>
+            {
+                Statement(x,"DELETE FROM tmdb_resolution_candidate WHERE emby_id=@emby",s=>s.TryBind("@emby",embyId));var rank=0;
+                foreach(var candidate in (candidates??Enumerable.Empty<TmdbEntity>()).Where(c=>c!=null).GroupBy(c=>c.id).Select(g=>g.First()))
+                {
+                    rank++;Statement(x,"INSERT INTO tmdb_resolution_candidate(emby_id,rank,entity_type,tmdb_id,name,source_external_id,raw_json,evaluated_utc) VALUES(@emby,@rank,'person',@id,@name,NULL,@raw,@now)",s=>{s.TryBind("@emby",embyId);s.TryBind("@rank",rank);s.TryBind("@id",candidate.id.ToString(CultureInfo.InvariantCulture));s.TryBind("@name",candidate.name);s.TryBind("@raw",serialize(candidate));s.TryBind("@now",Now());});
+                }
+            },TransactionMode.Immediate);
         }
 
         public void SaveEntity(string id, string type, TmdbEntity entity, string raw)
@@ -114,7 +133,13 @@ namespace PersonCleaner.Storage
                     Statement(x, "INSERT OR IGNORE INTO tmdb_alias VALUES(@id,@type,@alias,@country,@atype)", s => { s.TryBind("@id", id); s.TryBind("@type", type); s.TryBind("@alias", alias.name ?? alias.title); s.TryBind("@country", alias.iso_3166_1 ?? ""); s.TryBind("@atype", alias.type ?? ""); });
                 foreach (var alias in entity.also_known_as ?? new List<string>())
                     if (!string.IsNullOrWhiteSpace(alias)) Statement(x, "INSERT OR IGNORE INTO tmdb_alias VALUES(@id,@type,@alias,'','also_known_as')", s => { s.TryBind("@id", id); s.TryBind("@type", type); s.TryBind("@alias", alias); });
-                SaveCredits(x, id, type, entity.combined_credits ?? entity.aggregate_credits ?? entity.credits);
+                var primaryCredits = entity.combined_credits ?? entity.aggregate_credits ?? entity.credits;
+                var mergedCredits = new TmdbCredits
+                {
+                    cast = (primaryCredits?.cast ?? new List<TmdbCredit>()).Concat(entity.guest_stars ?? new List<TmdbCredit>()).GroupBy(c => c.id).Select(g => g.First()).ToList(),
+                    crew = primaryCredits?.crew ?? new List<TmdbCredit>()
+                };
+                SaveCredits(x, id, type, mergedCredits);
             }, TransactionMode.Immediate);
         }
 
