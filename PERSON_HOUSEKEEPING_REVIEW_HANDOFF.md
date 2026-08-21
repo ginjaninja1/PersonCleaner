@@ -50,6 +50,16 @@ or provider-acquisition handoff.
   provenance `TMDB 103789 -> IMDb nm0057983`. Optional quoted-nickname removal establishes strong
   compatibility; configured `Don=Donald` is supplementary only. The executable name-safety fixture
   is `tests/PersonCleaner.NameRegression`.
+- Named split/consolidation regression: Emby 129559 Juan Fernandez must produce one actionable
+  `review-split` case: retain TMDB 1607 / TVDB 9126505 / IMDb nm0273592 for the movie relationships;
+  create TMDB 1284938 / TVDB 7876703 / IMDb nm1537814 and move Money Heist. Suppress separate
+  provider-duplicate, same-provider split, and unresolved-ID rows for the same decision.
+- Named provider-credit regression: Emby 448634 Shawn Murray must produce one TVDB replacement
+  9102233 -> 7876353, preserving the isolated conflicting episode credit as provider-misattribution
+  evidence. It must not become a split or a merge with Emby 34565.
+- Named no-action regressions: Emby 10573 Elton John (TVDB 277872) and Emby 10223 David McKail
+  (TMDB 1231421 / TVDB 376540) retain their identities. Partial but healthy current-provider coverage
+  without a supported alternative remains audit evidence and must not enter the review-case grid.
 
 Do not use benchmark runs 1 or 2 as algorithm examples. Run 1 failed during the superseded
 full-truth implementation. Run 2 is retained but marked failed/superseded because it incorrectly

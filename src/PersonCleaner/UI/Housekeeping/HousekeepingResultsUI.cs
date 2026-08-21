@@ -9,7 +9,7 @@ namespace PersonCleaner.UI.Housekeeping
 {
     public sealed class HousekeepingResultsUI : EditableOptionsBase
     {
-        public override string EditorTitle => "Baseline person housekeeping results";
+        public override string EditorTitle => "Person housekeeping review cases";
         private string snapshotDescription;
         public override string EditorDescription => snapshotDescription ?? "No completed housekeeping run is loaded.";
 
@@ -32,7 +32,7 @@ namespace PersonCleaner.UI.Housekeeping
                 wordWrapEnabled = false,
                 cellHintEnabled = true,
                 grouping = new DxGridGrouping { allowCollapsing = true, autoExpandAll = false, contextMenuEnabled = true },
-                groupPanel = new { visible = true, emptyPanelText = "Drag Recommendation or Signal here to group" },
+                groupPanel = new { visible = true, emptyPanelText = "Drag Action or Reason here to group" },
                 searchPanel = new { visible = true, width = 320, placeholder = "Search people, IDs, signals or evidence" },
                 filterRow = new DxGridFilterRow { visible = true },
                 headerFilter = new DxGridHeaderFilter { visible = true },
@@ -57,13 +57,13 @@ namespace PersonCleaner.UI.Housekeeping
                     column.allowEditing = false;
                     column.allowGrouping = true;
                     column.allowHeaderFiltering = true;
-                    if (column.dataField == nameof(HousekeepingResultRow.ProposalId)) column.caption = "Review reference";
+                    if (column.dataField == nameof(HousekeepingResultRow.ProposalId)) column.caption = "Review case ID";
                     if (column.dataField == nameof(HousekeepingResultRow.EmbyPersonId)) column.visible = false;
                     if (column.dataField == nameof(HousekeepingResultRow.Person)) column.visible = false;
                     if (column.dataField == nameof(HousekeepingResultRow.CurrentValue)) column.visible = false;
                     if (column.dataField == nameof(HousekeepingResultRow.ProposedValue)) column.visible = false;
                     if (column.dataField == nameof(HousekeepingResultRow.Provider)) column.caption = "Evidence provider";
-                    if (column.dataField == nameof(HousekeepingResultRow.Recommendation)) { column.caption = "Recommendation"; column.groupIndex = 0; column.showWhenGrouped = true; }
+                    if (column.dataField == nameof(HousekeepingResultRow.Recommendation)) { column.caption = "Proposed action"; column.groupIndex = 0; column.showWhenGrouped = true; }
                     if (column.dataField == nameof(HousekeepingResultRow.SignalType)) column.caption = "Reason";
                     if (column.dataField == nameof(HousekeepingResultRow.CurrentEmbyIds)) column.caption = "Current Emby ID(s)";
                     if (column.dataField == nameof(HousekeepingResultRow.ProposedEmbyIds)) column.caption = "Proposed Emby ID(s)";
@@ -79,7 +79,7 @@ namespace PersonCleaner.UI.Housekeeping
                 }
             }
 
-            return new HousekeepingResultsUI { Results = new DxDataGrid(options), ResultRows = rows ?? Array.Empty<HousekeepingResultRow>(), snapshotDescription = (runSummary ?? "No completed housekeeping run") + ". All recommendations are review-only." };
+            return new HousekeepingResultsUI { Results = new DxDataGrid(options), ResultRows = rows ?? Array.Empty<HousekeepingResultRow>(), snapshotDescription = (runSummary ?? "No completed housekeeping run") + ". Each row is one actionable review case; supporting and contradictory detector findings are consolidated into its evidence. Nothing is applied automatically." };
         }
     }
 }

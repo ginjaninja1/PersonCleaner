@@ -270,6 +270,22 @@ by itself create a human-review row. Unsupported search-only candidates remain i
   `Don=Donald` only corroborates the archived `Donald Barry` alias and is not needed for the
   decision. TMDB supplies IMDb nm0057983, displayed as `TMDB 103789 -> IMDb nm0057983` when Emby
   has no stored IMDb ID. Preserve the six TMDB `not-present` observations.
+- Juan Fernandez, Emby 129559: the existing record contains two disjoint people. Retain the movie
+  cluster TMDB 1607 / TVDB 9126505 / IMDb nm0273592 on the current Emby person. Create a new person
+  for TMDB 1284938 / TVDB 7876703 / IMDb nm1537814 and move the Money Heist relationship to it.
+  Emit one `review-split` case containing both clusters and their media titles. Same-birth-date and
+  provider-duplicate detectors are supporting diagnostics, not additional review rows.
+- Shawn Murray, Emby 448634: retain healthy TMDB 3164799 / IMDb nm0615273 and replace TVDB 9102233
+  with TVDB 7876353 when the latter matches those external IDs and supports 30/35 linked media.
+  TVDB 9102233 belongs coherently to Emby 34565 as TMDB 1733372 / IMDb nm2556500. Its isolated
+  credit on The Grocery Store Bank is provider-credit-misattribution evidence, not grounds to split
+  or merge the anchored Emby person. Emit one replacement case and preserve all contrary credits.
+- Elton John, Emby 10573: current TVDB 277872 has exact provider-native support on 11 relationships,
+  with two not-present and one unavailable observation, and agrees with TMDB 11370 / IMDb nm0005056.
+  It is healthy incomplete coverage, so emit no review case.
+- David McKail, Emby 10223: TMDB 1231421 supports 4/9, TVDB 376540 supports 7/9, and their combined
+  evidence supports 8/9. With no supported alternative identity, retain both IDs and emit no review
+  case; the remaining unsupported relationship is internal audit evidence.
 
 - Alexander Terentyev: replace dead TMDB ID with the exact-name candidate appearing in both linked
   movies and matching both roles.
