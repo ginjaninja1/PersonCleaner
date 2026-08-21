@@ -25,8 +25,10 @@ removed person can be recreated by a later media refresh.
 ## Evidence order
 
 1. Snapshot the Emby person, all external identities, and every linked media relationship.
-2. Check TMDB first because it is the preferred canonical provider.
-3. Check TVDB second, informed by confirmed TMDB evidence but evaluated on TVDB's own evidence.
+2. Evaluate TMDB and TVDB symmetrically through the common evidence contract. Their acquisition
+   routes differ, but neither provider's absence substitutes for checking the other provider.
+3. Use a healthy provider's external IDs to nominate candidates on the other provider where its API
+   permits; still require provider-native linked-media support before accepting that candidate.
 4. For each provider, validate an asserted identity as live, unavailable, wrong-type, or transiently
    uncheckable.
 5. Examine the person's complete set of linked media on that provider. Prefer movies over series
@@ -173,13 +175,13 @@ A provider person-detail `404` is retained as unavailable candidate evidence and
 for the configured success-cache period. It must skip that candidate and continue the remaining
 person and cohort. One stale cast/search candidate must never abort the complete Evaluate Truth task.
 
-TMDB episode absence is negative evidence only after the dedicated exact episode `/credits` request
-has completed successfully. The normal episode-details response, embedded `credits.cast`, embedded
-or root `guest_stars`, and dedicated credit `cast`/`guest_stars` collections are combined and
-deduplicated. Dedicated probes are limited to distinct episodes attached to actionable identity
-cases from the preceding completed evaluation, cached independently, and then incorporated before
-the next SQL evaluation. Failed probes remain unresolved. No season-level request is required and
-no episode-count aggregate is treated as exact overlap.
+TMDB episode absence is negative evidence only after the cached exact episode-details response has
+been normalized completely. That response already contains root `guest_stars` and appended
+`credits.cast`; no second episode or season request is normally required. Migration 7 rebuilds the
+materialized provider-neutral credit index and the legacy TMDB credit indexes directly from those
+preserved response bodies. Raw and normalized counts are recorded per production, and a mismatch is
+an explicit data-quality condition rather than negative evidence. Episode-count aggregates are
+never treated as exact overlap.
 
 - Live asserted ID with coherent linked-media evidence: retain it.
 - Dead asserted ID with a media-backed replacement: propose replacement.
@@ -280,15 +282,15 @@ by itself create a human-review row. Unsupported search-only candidates remain i
   has no stored IMDb ID. Preserve the six TMDB `not-present` observations.
 - Annie Karstens, Emby 47116 and 429373: TMDB 1137005 / IMDb nm2622011 supports Quiz Lady and
   identifies one episode of You, while TVDB 7890097 supports exact episode 7446892 A Fresh Start.
-  The dedicated TMDB episode-credit probe for TMDB episode 1944821 must be acquired before absence
-  can be asserted. When it returns Annie Karstens, combine it with embedded cast and emit one
+  The cached TMDB episode response for TMDB episode 1944821 already contains Annie in root
+  `guest_stars`; normalization must retain it alongside appended cast and emit one
   `review-merge` case naming both Emby IDs and both media relationships; never leave the operator
   with an unnamed `emby-name-collision` row.
 - Kimberly Hidalgo, Emby 439699: unavailable TVDB 7886958 must not lead directly to removal. Exact
   episode cast discovery nominates people regardless of canonical-name compatibility. TVDB 393526
   Kimberly Daugherty supports The Beach, aliases `Kim Hidalgo`, and links TMDB 1385322 / IMDb
-  nm2583683. The dedicated TMDB episode-credit probe must evaluate TMDB 1385322 without surname
-  gating. With exact native support, emit one identity-repair case retaining Emby 439699, replacing
+  nm2583683. Exact cached episode cast must evaluate TMDB 1385322 without surname gating. With
+  exact native support, emit one identity-repair case retaining Emby 439699, replacing
   TVDB, hydrating TMDB/IMDb provenance, renaming, and retaining the relationship.
 - Juan Fernandez, Emby 129559: the existing record contains two disjoint people. Retain the movie
   cluster TMDB 1607 / TVDB 9126505 / IMDb nm0273592 on the current Emby person. Create a new person

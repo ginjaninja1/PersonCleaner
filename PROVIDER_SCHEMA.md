@@ -19,12 +19,20 @@ discarded merely to make the schemas look identical.
 | Entity identity and dates | `tvdb_entity` | `tmdb_entity` | `provider_entity` |
 | External IDs | `remote_id` | `tmdb_external_id` | `provider_external_id` |
 | Aliases/alternative names | `tvdb_alias` | `tmdb_alias` | `provider_alias` |
-| Credit observations and fetch route | `tvdb_credit_observation` | `tmdb_credit_observation` | `provider_credit_observation` |
+| Credit observations and fetch route | `tvdb_credit_observation` | `tmdb_credit_observation` | materialized `provider_credit_observation` |
 | Current normalized credits | `credit` | `tmdb_credit` | none; observation view is preferred for evidence analysis |
 | Exact current API responses | `api_response_cache` | `tmdb_api_response_cache` | none |
 | Replaced response history | `api_response_archive` | `tmdb_api_response_archive` | none |
 | Fetch outcome/retry state | `fetch_cache` | `tmdb_fetch_cache` | none |
 | Per-Emby provider answer | `item_resolution` | `tmdb_item_resolution` | `provider_identity_signals` |
+
+Migration 7 materializes the common credit contract with provider, source identity, person,
+production, exact/broader scope, role, endpoint provenance and observation time. It adds
+`provider_production_evidence` for acquisition/normalization completeness,
+`provider_normalization_mismatch` for raw-to-index discrepancies, and provider-comparison views at
+the Emby person/media anchor. Indexed production-first and person-first access replaces repeated
+provider-specific union scans. Native tables remain as ingestion projections and triggers maintain
+the common credit index.
 
 ## Intentional differences
 
@@ -53,7 +61,7 @@ repository initialization because Emby constructs scheduled tasks while the serv
 
 Repository initialization is validation-only. The plugin must not create or alter persistent
 tables, indexes, views, migration records, or historical data at Emby startup. It opens the existing
-archive, verifies TVDB/TMDB schema version 1 and archive migrations 1-4, and fails with an explicit
+archive, verifies TVDB/TMDB schema version 1 and archive migrations through 7, and fails with an explicit
 offline-migration error when anything is missing or incompatible. Schema preparation, migrations,
 repairs, and rebuilds are performed offline while Emby is stopped.
 

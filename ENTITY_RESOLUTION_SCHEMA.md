@@ -39,16 +39,22 @@ Algorithms operate against a truth and observation cutoff. `experiment_run`, `ex
 and `experiment_metric` retain immutable results. `resolution_proposal` stores proposed graph changes;
 review and creation of a derived truth are separate operations.
 
-Person-housekeeping algorithm version `normalized-v2` uses the migration-5 tables
+Person-housekeeping algorithm version `normalized-v10` uses the migration-5 tables
 `housekeeping_run`, `housekeeping_signal`, and `housekeeping_recommendation`. Operational fields are
 normalized and indexed rather than hidden in JSON. Runs commit bounded phases and persist progress,
 heartbeat, cancellation, and failure state. Derived housekeeping truths are parent-relative deltas in
 `truth_entity_delta`, `truth_identity_delta`, and `truth_relationship_delta`; the 1.28-million-row
 baseline graph is never copied for an experiment.
 
+Migration 7 adds the materialized `provider_credit_observation` contract and
+`provider_production_evidence` completeness ledger. Provider-native tables and raw response caches
+remain authoritative acquisition records; the common tables are rebuildable analytical indexes.
+An exact episode can supply negative evidence only when acquisition is complete and its raw and
+normalized screen-credit counts agree. `provider_normalization_mismatch` exposes exceptions.
+
 ## Migrations and database filename
 
-`archive_schema_migration` records additive migrations. Migration 6 adds
+`archive_schema_migration` records offline migrations. Migration 6 adds
 `provider_identity_issue`, a persistent reviewed ledger for provider-side person splits,
 conflations, bad credits, and bad names. Run-specific candidate/media observations remain in
 `housekeeping_signal`; recommendations do not replace or erase those observations.
@@ -59,6 +65,9 @@ conflations, bad credits, and bad names. Run-specific candidate/media observatio
 4. Source-first lineage index supporting set-based relationship seeding.
 5. Normalized housekeeping evidence/recommendations, resumable run state, and delta truths.
 6. Persistent reviewed provider identity issues, separate from library recommendations.
+7. Materialized symmetric provider credits and completeness/mismatch views; rebuild of TMDB exact
+   episode cast from preserved response JSON; reset of historical housekeeping runs and derived
+   delta truths while preserving baseline truth, provider observations and API response archives.
 
 The plugin prefers `personcleaner-archive.db`. If only historic `tvdb-archive.db` exists, it continues
 using that file. It never moves a live database or WAL/SHM sidecars during construction.

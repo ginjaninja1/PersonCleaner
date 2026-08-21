@@ -1,6 +1,6 @@
 # PersonCleaner project handoff
 
-Last updated: 2026-08-17
+Last updated: 2026-08-21
 
 ## Current workflow
 
@@ -42,6 +42,18 @@ Merge, split, identity correction, name cleansing, and relationship movement bel
   acquisition, retains every plausible candidate, writes per-candidate/per-media signals, withholds removals when
   coverage is incomplete or positive evidence exists, and separates Emby merge reviews from
   provider-side person split findings.
+- Migration 7 materializes symmetric TMDB/TVDB credit evidence and completeness/mismatch views,
+  rebuilds TMDB episode guest credits from preserved cached responses, and removes all historical
+  housekeeping runs, recommendations and derived delta truths for a fresh human sniff-test cycle.
+  Raw API caches/archives, provider acquisition history, baseline truth and persistent provider
+  issues are preserved.
+- Migration 7 was applied offline on 2026-08-21. The first clean post-reset housekeeping execution
+  is run 1, algorithm `normalized-v10`, completed at 2026-08-21T13:43:55Z with derived truth 15,
+  737,384 signals and 2,118 human-review recommendations. This is the current sniff-test baseline;
+  pre-migration run numbers are no longer present in the database.
+- The materialized evidence baseline contains 6,568,278 unified credit observations and 96,319
+  exact-episode completeness records. TVDB episode 11763808 is the sole recorded normalization
+  mismatch (raw 9, normalized 11) and therefore cannot provide negative absence evidence.
 - Cross-provider split detection treats conflicting exact external-ID clusters as corroboration of
   a direct media partition. The stored David Cameron case is Emby 160974: TMDB 1220273/IMDb
   nm2090098 owns the Brexit movie; TVDB 9148336 -> TMDB 1235383/IMDb nm0131538 owns three episodes.

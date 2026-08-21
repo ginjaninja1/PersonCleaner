@@ -8,19 +8,20 @@ or provider-acquisition handoff.
 
 ## Review baseline
 
-- Historical review baseline: `person-housekeeping` version `normalized-v2`.
-- Current implementation: `normalized-v6`, anchored on the Emby person and complete linked-media
+- Historical review baselines were removed by migration 7.
+- Current implementation: `normalized-v10`, anchored on the Emby person and complete linked-media
   evidence, with symmetric evidence-gap TMDB/TVDB candidate acquisition, a per-relationship evidence
   ledger, merge detection for candidates already owned by Emby, and persistent provider issues.
-- Review run: housekeeping run `4` (the first Emby-executed run after the normalized redesign).
+- Review run: housekeeping run `1`, the first clean post-migration-7 sniff-test run. It completed at
+  `2026-08-21T13:43:55Z` with 737,384 signals and 2,118 recommendations.
 - Base truth: truth `1` (`Emby baseline`).
-- Output: a frozen delta truth referenced by `housekeeping_run.derived_truth_id` for run 4.
+- Output: frozen delta truth `15`, referenced by `housekeeping_run.derived_truth_id` for run 1.
 - Live Emby and truth 1 were not changed.
-- Provider requests: normalized-v6 audits all linked people from the archive, then makes bounded,
+- Provider requests: normalized-v10 audits all linked people from the archive, then makes bounded,
   cached requests only for missing, unavailable, duplicated, unsupported, partial, or unresolved
   identity evidence. Cast/media lookup precedes name/external-ID search; this is not an
   unavailable-only pathway. All responses and per-person acquisition checkpoints use the provider
-  caches. Historical run 4 remained archive-only.
+  caches.
 - Development acquisition is frozen to the original 1,000-person cohort per provider, reconstructed
   from the earliest person-audit checkpoints. Re-running Evaluate Truth must not roll automatically
   into another 1,000 people. TMDB/TVDB person-detail 404s are negative-cached candidate evidence and
@@ -34,9 +35,8 @@ or provider-acquisition handoff.
   plugin configuration. Each run snapshots the configured list. Supported provider consensus emits
   one rename row; provider disagreement or an exact healthy-provider anchor retains the Emby name.
   Derived IMDb IDs are displayed with source provenance rather than as missing or Emby-stored IDs.
-- Historical normalized-v2 runtime on the full 10.86 GB archive: approximately 13 seconds.
-- Historical run 4 UI result count: 3,406 recommendations. A normalized-v6 run has not yet been
-  executed inside Emby.
+- Current run-1 recommendation count: 2,118. Treat that volume and its composition as evidence to
+  review, not as proof that every row is actionable.
 - Stored split example: Emby 160974 David Cameron must produce `review-split` /
   `cross-provider-media-partition` when TMDB 1220273/IMDb nm2090098 supports the Brexit movie while
   TVDB 9148336 -> TMDB 1235383/IMDb nm0131538 supports three disjoint episodes. TVDB 293547/Emby
@@ -45,11 +45,10 @@ or provider-acquisition handoff.
   TMDB 1235383 David S. Cameron is a root guest star on all three Emby 160974 episodes. Failure of
   TMDB `/find/{tvdbEpisodeId}` is an unresolved crosswalk, not negative cast evidence; fall back to
   the exact TMDB series/season/episode route when Emby has that hierarchy.
-- Dedicated TMDB episode-credit regression: absence from episode details or appended credits is
-  unresolved until `/tv/{series}/season/{season}/episode/{episode}/credits` succeeds. Combine its
-  `cast` and `guest_stars` with embedded/root collections. Emby 47116/429373 Annie Karstens and A
-  Fresh Start must prove this pathway and produce a complete merge case. Probes are deduplicated by
-  episode and drawn from the preceding actionable result set; no season-level call is introduced.
+- TMDB normalization regression: the existing exact episode-details cache already contains root
+  `guest_stars` and appended `credits.cast`. Migration 7 must normalize both without another API
+  request and record matching raw/normalized counts. Emby 47116/429373 Annie Karstens and A Fresh
+  Start prove this pathway and must produce a complete merge case.
 - Named identity-repair regression: recommendation 533880 / Emby 439699 Kimberly Hidalgo must not
   remain a removal when exact linked-episode evidence nominates Kimberly Daugherty. Media-backed
   candidates bypass canonical surname gating; TVDB alias `Kim Hidalgo`, matching birth data, TMDB
@@ -71,10 +70,9 @@ or provider-acquisition handoff.
   (TMDB 1231421 / TVDB 376540) retain their identities. Partial but healthy current-provider coverage
   without a supported alternative remains audit evidence and must not enter the review-case grid.
 
-Do not use benchmark runs 1 or 2 as algorithm examples. Run 1 failed during the superseded
-full-truth implementation. Run 2 is retained but marked failed/superseded because it incorrectly
-allowed rejected TVDB candidates to become replacement recommendations. Run 3 is the final offline
-benchmark; run 4 is the equivalent Emby task result to review.
+Pre-migration run numbers and outputs were deliberately removed. All new feedback must quote the
+displayed recommendation ID and Emby person ID from current run 1; never reuse an old recommendation
+ID as though it referred to the current database row.
 
 ## Normalized review data
 
@@ -196,24 +194,26 @@ Merge and split recommendations remain pending human review and do not mutate th
 
 These are algorithm limitations, not archive-performance limitations:
 
-1. Name matching in `normalized-v2` is still mostly exact/case-normalized. It does not yet implement a
-   durable near-name score for punctuation, token order, initials, transliteration, or aliases.
-2. Rename evidence exposes linked-media counts, but provider-role compatibility is not yet a first-
+1. The fresh run still contains 2,118 rows. Review must determine which are actionable operator
+   decisions versus incomplete/internal audit findings; healthy or merely incomplete evidence must
+   not flood the recommendation grid.
+2. Name compatibility now handles aliases, safe punctuation/nickname structure and configured
+   given-name pairs, but it does not attempt unrestricted nickname, transliteration or fuzzy-name
+   equivalence. Media support remains mandatory when compatibility becomes more lenient.
+3. Rename evidence exposes linked-media counts, but provider-role compatibility is not yet a first-
    class scored signal in every recommendation.
-3. Replacement confidence is currently coarse. It needs scoring based on media type, role match,
+4. Replacement confidence is currently coarse. It needs scoring based on media type, role match,
    name similarity, coverage, negative evidence, and cross-provider corroboration.
-4. Negative evidence needs explicit complete/incomplete coverage wording:
-   `not present on any linked media`, with `and linked media not present` when provider media coverage
-   is incomplete.
-5. Person-removal recommendations are not yet fully implemented from combined provider and linked-
+5. Episode absence is completeness-gated, but operator text must still make complete, unavailable,
+   unresolved and normalization-mismatch coverage easy to distinguish.
+6. Person-removal recommendations are not yet fully implemented from combined provider and linked-
    media evidence. Current removal rows remove unavailable provider IDs, not necessarily the person.
-6. Merge evidence currently starts from a shared provider ID. It needs explicit compatible versus
-   contradictory linked-media/role evidence.
-7. Split evidence is deliberately conservative and currently exact-name oriented. It needs reviewed
-   examples before expanding candidate generation.
-8. Evidence should eventually classify whether acquisition requires a user API key or can be supplied
-   through Emby's native provider integration. The current run uses only archived data and therefore
-   performs no acquisition.
+7. Merge and split presentation must be tested for decision completeness: all participant Emby IDs,
+   every current/proposed TMDB/TVDB/IMDb identity, and media-level moves/support must appear in one
+   actionable case rather than fragmented or provider-quality rows.
+8. The common evidence structure is materialized, but native provider tables remain the ingestion
+   projections. Any raw/normalized mismatch must be investigated without turning it into negative
+   identity evidence; current run 1 has one such TVDB production, episode 11763808.
 
 ## Recommended feedback format
 
@@ -255,11 +255,13 @@ One person's recommendations and signals:
 ```sql
 SELECT *
 FROM housekeeping_recommendation
-WHERE run_id = 4 AND person_emby_id = :emby_person_id;
+WHERE run_id = (SELECT MAX(run_id) FROM housekeeping_run)
+  AND person_emby_id = :emby_person_id;
 
 SELECT *
 FROM housekeeping_signal
-WHERE run_id = 4 AND person_emby_id = :emby_person_id
+WHERE run_id = (SELECT MAX(run_id) FROM housekeeping_run)
+  AND person_emby_id = :emby_person_id
 ORDER BY provider, signal_type, media_emby_id;
 ```
 
@@ -268,7 +270,7 @@ Review outcomes by recommendation and signal type:
 ```sql
 SELECT recommendation_type, primary_signal_type, review_status, COUNT(*)
 FROM housekeeping_recommendation
-WHERE run_id = 4
+WHERE run_id = (SELECT MAX(run_id) FROM housekeeping_run)
 GROUP BY recommendation_type, primary_signal_type, review_status;
 ```
 

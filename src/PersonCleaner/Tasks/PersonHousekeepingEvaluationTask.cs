@@ -44,7 +44,6 @@ namespace PersonCleaner.Tasks
         public async Task Execute(CancellationToken cancellationToken, IProgress<double> progress)
         {
             cancellationToken.ThrowIfCancellationRequested(); progress.Report(1);
-            await AcquireTmdbDecisionEpisodeCredits(cancellationToken).ConfigureAwait(false);
             await Task.WhenAll(AcquireTmdbEvidenceGaps(cancellationToken),AcquireTvdbEvidenceGaps(cancellationToken)).ConfigureAwait(false);
             using (var repository = new HousekeepingRepository(paths))
             {
@@ -72,22 +71,6 @@ namespace PersonCleaner.Tasks
                     HousekeepingResultsCache.Replace(repository.LatestResults().ToArray());
                     progress.Report(100); logger.Info("Person housekeeping evaluation run {0} completed with {1} UI result rows. A frozen derived truth was created; Emby and baseline truth were not changed.", run, HousekeepingResultsCache.Rows.Length);
                 }
-            }
-        }
-
-        private async Task AcquireTmdbDecisionEpisodeCredits(CancellationToken ct)
-        {
-            if(string.IsNullOrWhiteSpace(Plugin.Instance.Configuration.TmdbApiKey))return;
-            using(var archive=new TmdbArchiveRepository(paths,logger))
-            {
-                archive.Initialize();var api=new TmdbApiClient(http,json,logger,archive);var targets=archive.GetDecisionEpisodeCreditProbeTargets();
-                logger.Info("TMDB decision episode-credit verification: {0} distinct episodes from the latest actionable review cases require a dedicated exact-credit probe.",targets.Count);
-                foreach(var target in targets)
-                {
-                    ct.ThrowIfCancellationRequested();var media=library.GetItemById(target.MediaEmbyId) as Episode;if(media?.Series==null||!media.ParentIndexNumber.HasValue||!media.IndexNumber.HasValue)continue;var seriesId=media.Series.GetProviderId(MetadataProviders.Tmdb);if(string.IsNullOrWhiteSpace(seriesId))continue;
-                    api.SetEvidenceContext(target.PersonName,target.PersonEmbyId,target.CurrentTmdbId);try{var episode=await api.GetEpisode(seriesId,media.ParentIndexNumber.Value,media.IndexNumber.Value,ct).ConfigureAwait(false);var credits=await api.GetEpisodeCredits(seriesId,media.ParentIndexNumber.Value,media.IndexNumber.Value,ct).ConfigureAwait(false);archive.SaveEpisodeCredits(episode.id.ToString(),credits);logger.Info("{0} Dedicated TMDB episode credits verified for Emby media {1} ({2} S{3}E{4}).",api.EvidencePrefix,target.MediaEmbyId,media.Series.Name,media.ParentIndexNumber.Value,media.IndexNumber.Value);}catch(Exception ex)when(!(ex is OperationCanceledException)){logger.Warn("{0} Dedicated TMDB episode credits remain unresolved for Emby media {1}: {2}",api.EvidencePrefix,target.MediaEmbyId,ex.Message);}
-                }
-                logger.Info("TMDB decision episode-credit cache summary: {0} hits, {1} misses.",api.CacheHits,api.CacheMisses);
             }
         }
 

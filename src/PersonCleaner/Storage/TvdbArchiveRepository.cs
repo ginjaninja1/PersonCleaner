@@ -48,9 +48,9 @@ namespace PersonCleaner.Storage
                     db = SQLite3.Open(DatabasePath, ConnectionFlags.ReadWrite | ConnectionFlags.PrivateCache | ConnectionFlags.NoMutex, null,
                         new Dictionary<string, delegate_collation>(), new Dictionary<Tuple<string, int>, Action<IReadOnlyList<sqlite3_value>, sqlite3_context>>(), true, false);
                     db.Execute("PRAGMA busy_timeout=30000"); db.Execute("PRAGMA synchronous=NORMAL"); db.Execute("PRAGMA foreign_keys=ON");
-                    ArchiveDatabase.ValidateObjects(db, "TVDB", "schema_info", "emby_item", "tvdb_entity", "remote_id", "tvdb_alias", "credit", "tvdb_credit_observation", "fetch_cache", "api_response_cache", "api_response_archive", "item_resolution", "resolution_decision_history", "resolution_candidate", "candidate_evidence", "person_local_production", "candidate_tvdb_production", "emby_observation", "truth", "truth_entity", "truth_external_identity", "truth_entity_lineage", "truth_relationship", "algorithm", "experiment_run", "resolution_proposal", "experiment_prediction", "experiment_metric", "archive_schema_migration");
+                    ArchiveDatabase.ValidateObjects(db, "TVDB", "schema_info", "emby_item", "tvdb_entity", "remote_id", "tvdb_alias", "credit", "tvdb_credit_observation", "fetch_cache", "api_response_cache", "api_response_archive", "item_resolution", "resolution_decision_history", "resolution_candidate", "candidate_evidence", "person_local_production", "candidate_tvdb_production", "emby_observation", "truth", "truth_entity", "truth_external_identity", "truth_entity_lineage", "truth_relationship", "algorithm", "experiment_run", "resolution_proposal", "experiment_prediction", "experiment_metric", "archive_schema_migration", "provider_credit_observation", "provider_production_evidence");
                     ArchiveDatabase.ValidateVersion(db, "TVDB", "schema_info", 1);
-                    ArchiveDatabase.ValidateMigrations(db, 4);
+                    ArchiveDatabase.ValidateMigrations(db, 7);
                 }
                 catch { db?.Dispose(); db = null; throw; }
             }
@@ -192,6 +192,11 @@ namespace PersonCleaner.Storage
                 foreach (var alias in d.aliases ?? new List<Tvdb.AliasData>())
                     if (!string.IsNullOrWhiteSpace(alias.name)) Statement(x, "INSERT OR REPLACE INTO tvdb_alias VALUES(@id,@type,@alias,@language,'alias')", s => { s.TryBind("@id", id); s.TryBind("@type", type); s.TryBind("@alias", alias.name); s.TryBind("@language", alias.language ?? ""); });
                 SaveCredits(x, id, type, d.characters);
+                if(type=="episode")
+                {
+                    var count=(d.characters??new List<Tvdb.CharacterData>()).Count(Tvdb.TvdbScope.IsScreenCredit);
+                    Statement(x,"INSERT OR REPLACE INTO provider_production_evidence VALUES('tvdb','episode',@id,'screen-credits','complete','tvdb-repository-save',@raw,@normalized,@now)",s=>{s.TryBind("@id",id);s.TryBind("@raw",count);s.TryBind("@normalized",count);s.TryBind("@now",Now());});
+                }
             }, TransactionMode.Immediate);
         }
 

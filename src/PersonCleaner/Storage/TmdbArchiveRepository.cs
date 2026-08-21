@@ -12,7 +12,6 @@ using System.Linq;
 namespace PersonCleaner.Storage
 {
     internal sealed class TmdbRecoveryTarget { public long EmbyId { get; set; } public string Name { get; set; } public string CurrentId { get; set; } public string ImdbId { get; set; } public int LinkedCount { get; set; } }
-    internal sealed class TmdbEpisodeCreditProbeTarget { public long MediaEmbyId { get; set; } public long PersonEmbyId { get; set; } public string PersonName { get; set; } public string CurrentTmdbId { get; set; } }
     internal sealed class TmdbArchiveRepository : IDisposable
     {
         private readonly object sync = new object();
@@ -33,8 +32,9 @@ namespace PersonCleaner.Storage
                     db = SQLite3.Open(DatabasePath, ConnectionFlags.ReadWrite | ConnectionFlags.PrivateCache | ConnectionFlags.NoMutex, null,
                         new Dictionary<string, delegate_collation>(), new Dictionary<Tuple<string, int>, Action<IReadOnlyList<sqlite3_value>, sqlite3_context>>(), true, false);
                     db.Execute("PRAGMA busy_timeout=30000"); db.Execute("PRAGMA synchronous=NORMAL");
-                    ArchiveDatabase.ValidateObjects(db, "TMDB", "tmdb_schema_info", "tmdb_entity", "tmdb_external_id", "tmdb_alias", "tmdb_credit", "tmdb_credit_observation", "tmdb_item_resolution", "tmdb_resolution_candidate", "tmdb_api_response_cache", "tmdb_api_response_archive", "tmdb_fetch_cache", "tmdb_run_state", "provider_identity_signals", "provider_entity", "provider_external_id", "provider_alias", "provider_credit_observation");
+                    ArchiveDatabase.ValidateObjects(db, "TMDB", "tmdb_schema_info", "tmdb_entity", "tmdb_external_id", "tmdb_alias", "tmdb_credit", "tmdb_credit_observation", "tmdb_item_resolution", "tmdb_resolution_candidate", "tmdb_api_response_cache", "tmdb_api_response_archive", "tmdb_fetch_cache", "tmdb_run_state", "provider_identity_signals", "provider_entity", "provider_external_id", "provider_alias", "provider_credit_observation", "provider_production_evidence");
                     ArchiveDatabase.ValidateVersion(db, "TMDB", "tmdb_schema_info", 1);
+                    ArchiveDatabase.ValidateMigrations(db, 7);
                 }
                 catch { db?.Dispose(); db = null; throw; }
             }
@@ -133,27 +133,16 @@ SELECT p.emby_id,p.name,p.tmdb_id,p.imdb_id,l.linked FROM emby_item p JOIN linke
                     Statement(x, "INSERT OR IGNORE INTO tmdb_alias VALUES(@id,@type,@alias,@country,@atype)", s => { s.TryBind("@id", id); s.TryBind("@type", type); s.TryBind("@alias", alias.name ?? alias.title); s.TryBind("@country", alias.iso_3166_1 ?? ""); s.TryBind("@atype", alias.type ?? ""); });
                 foreach (var alias in entity.also_known_as ?? new List<string>())
                     if (!string.IsNullOrWhiteSpace(alias)) Statement(x, "INSERT OR IGNORE INTO tmdb_alias VALUES(@id,@type,@alias,'','also_known_as')", s => { s.TryBind("@id", id); s.TryBind("@type", type); s.TryBind("@alias", alias); });
-                var primaryCredits = entity.combined_credits ?? entity.aggregate_credits ?? entity.credits;
                 var mergedCredits = new TmdbCredits
                 {
-                    cast = (primaryCredits?.cast ?? new List<TmdbCredit>()).Concat(primaryCredits?.guest_stars ?? new List<TmdbCredit>()).Concat(entity.guest_stars ?? new List<TmdbCredit>()).GroupBy(c => c.id).Select(g => g.First()).ToList(),
-                    crew = primaryCredits?.crew ?? new List<TmdbCredit>()
+                    cast = TmdbCreditMerger.Cast(entity),
+                    crew = (entity.combined_credits ?? entity.aggregate_credits ?? entity.credits)?.crew ?? new List<TmdbCredit>()
                 };
                 SaveCredits(x, id, type, mergedCredits);
+                if(type=="episode")Statement(x,"INSERT OR REPLACE INTO provider_production_evidence VALUES('tmdb','episode',@id,'screen-credits','complete','tmdb-repository-save',@raw,@normalized,@now)",s=>{s.TryBind("@id",id);s.TryBind("@raw",mergedCredits.cast.Count);s.TryBind("@normalized",mergedCredits.cast.Count);s.TryBind("@now",Now());});
             }, TransactionMode.Immediate);
         }
 
-        public void SaveEpisodeCredits(string episodeTmdbId,TmdbCredits credits)
-        {
-            var merged=new TmdbCredits{cast=TmdbCreditMerger.Cast(null,credits),crew=credits?.crew??new List<TmdbCredit>()};
-            lock(sync)db.RunInTransaction(x=>SaveCredits(x,episodeTmdbId,"episode",merged),TransactionMode.Immediate);
-            MarkFetch("episode-credits:"+episodeTmdbId,true,"Dedicated exact episode credits acquired");
-        }
-
-        public List<TmdbEpisodeCreditProbeTarget> GetDecisionEpisodeCreditProbeTargets()
-        {
-            var result=new List<TmdbEpisodeCreditProbeTarget>();lock(sync)using(var s=db.PrepareStatement(@"WITH latest AS (SELECT max(run_id) run_id FROM housekeeping_run WHERE status='completed'), relevant AS (SELECT DISTINCT person_emby_id FROM housekeeping_recommendation WHERE run_id=(SELECT run_id FROM latest) AND recommendation_type IN('remove-provider-id','replace-provider-id','review-split','review-merge','review-existing-emby-person','review-unresolved-provider-id')) SELECT er.media_emby_id,min(p.emby_id),min(p.name),min(p.tmdb_id) FROM relevant r JOIN emby_item p ON p.emby_id=r.person_emby_id JOIN emby_relationship er ON er.person_emby_id=p.emby_id JOIN emby_item m ON m.emby_id=er.media_emby_id LEFT JOIN tmdb_item_resolution mr ON mr.emby_id=m.emby_id WHERE m.item_type='episode' AND NOT EXISTS(SELECT 1 FROM tmdb_fetch_cache f WHERE f.cache_key='episode-credits:'||coalesce(m.tmdb_id,mr.resolved_tmdb_id) AND f.state='success') GROUP BY er.media_emby_id ORDER BY er.media_emby_id"))foreach(var r in s.ExecuteQuery())result.Add(new TmdbEpisodeCreditProbeTarget{MediaEmbyId=r.GetInt64(0),PersonEmbyId=r.GetInt64(1),PersonName=r.GetString(2),CurrentTmdbId=r.IsDBNull(3)?null:r.GetString(3)});return result;
-        }
 
         private static void SaveExternal(IDatabaseConnection x, string id, string type, string source, string value)
         { if (!string.IsNullOrWhiteSpace(value)) Statement(x, "INSERT OR REPLACE INTO tmdb_external_id VALUES(@id,@type,@source,@value)", s => { s.TryBind("@id", id); s.TryBind("@type", type); s.TryBind("@source", source); s.TryBind("@value", value); }); }
