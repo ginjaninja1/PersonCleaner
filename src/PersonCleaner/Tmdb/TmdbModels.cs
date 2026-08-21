@@ -51,6 +51,7 @@ namespace PersonCleaner.Tmdb
     internal sealed class TmdbCredits
     {
         public List<TmdbCredit> cast { get; set; } = new List<TmdbCredit>();
+        public List<TmdbCredit> guest_stars { get; set; } = new List<TmdbCredit>();
         public List<TmdbCredit> crew { get; set; } = new List<TmdbCredit>();
     }
 

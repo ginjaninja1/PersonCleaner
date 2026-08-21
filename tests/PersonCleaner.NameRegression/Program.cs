@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using PersonCleaner.Housekeeping;
+using PersonCleaner.Tmdb;
 
 internal static class Program
 {
@@ -10,8 +11,18 @@ internal static class Program
         ConfiguredGivenNameEquivalenceIsDirectAndOptional();
         SubstringsDoNotMatch();
         EquivalencePairsAreNotTransitivelyExpanded();
+        AnnieKarstensDedicatedEpisodeGuestsAreMerged();
         Console.WriteLine("Person name regression fixtures passed.");
         return 0;
+    }
+
+    private static void AnnieKarstensDedicatedEpisodeGuestsAreMerged()
+    {
+        var partial=new TmdbEntity{id=1944821,credits=new TmdbCredits{cast=new List<TmdbCredit>{new TmdbCredit{id=110927,name="Penn Badgley"}}}};
+        var dedicated=new TmdbCredits{guest_stars=new List<TmdbCredit>{new TmdbCredit{id=1137005,name="Annie Karstens",character="DMV Lady"}}};
+        var merged=TmdbCreditMerger.Cast(partial,dedicated);
+        Require(merged.Exists(x=>x.id==1137005&&x.character=="DMV Lady"),"Emby 47116 regression: dedicated A Fresh Start guest credits must add TMDB 1137005 Annie Karstens.");
+        Require(merged.Count==2,"Embedded and dedicated episode credits must be combined without losing regular cast.");
     }
 
     private static void DonBarryProviderConsensusNameCompatibility()

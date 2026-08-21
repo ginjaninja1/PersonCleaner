@@ -59,6 +59,7 @@ namespace PersonCleaner.Tmdb
         public Task<TmdbEntity> GetMovie(string id, CancellationToken ct) => Get<TmdbEntity>("/movie/" + id + "?append_to_response=external_ids,credits,alternative_titles", ct);
         public Task<TmdbEntity> GetSeries(string id, CancellationToken ct) => Get<TmdbEntity>("/tv/" + id + "?append_to_response=external_ids,aggregate_credits,alternative_titles", ct);
         public Task<TmdbEntity> GetEpisode(string seriesId, int season, int episode, CancellationToken ct) => Get<TmdbEntity>("/tv/" + seriesId + "/season/" + season + "/episode/" + episode + "?append_to_response=external_ids,credits", ct);
+        public Task<TmdbCredits> GetEpisodeCredits(string seriesId, int season, int episode, CancellationToken ct) => Get<TmdbCredits>("/tv/" + seriesId + "/season/" + season + "/episode/" + episode + "/credits", ct);
         public Task<TmdbFindResponse> FindImdb(string imdbId, CancellationToken ct) => Get<TmdbFindResponse>("/find/" + Uri.EscapeDataString(imdbId) + "?external_source=imdb_id", ct);
         public Task<TmdbPersonSearchResponse> SearchPerson(string name, CancellationToken ct) => Get<TmdbPersonSearchResponse>("/search/person?query=" + Uri.EscapeDataString(name), ct);
 

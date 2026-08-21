@@ -173,6 +173,14 @@ A provider person-detail `404` is retained as unavailable candidate evidence and
 for the configured success-cache period. It must skip that candidate and continue the remaining
 person and cohort. One stale cast/search candidate must never abort the complete Evaluate Truth task.
 
+TMDB episode absence is negative evidence only after the dedicated exact episode `/credits` request
+has completed successfully. The normal episode-details response, embedded `credits.cast`, embedded
+or root `guest_stars`, and dedicated credit `cast`/`guest_stars` collections are combined and
+deduplicated. Dedicated probes are limited to distinct episodes attached to actionable identity
+cases from the preceding completed evaluation, cached independently, and then incorporated before
+the next SQL evaluation. Failed probes remain unresolved. No season-level request is required and
+no episode-count aggregate is treated as exact overlap.
+
 - Live asserted ID with coherent linked-media evidence: retain it.
 - Dead asserted ID with a media-backed replacement: propose replacement.
 - When stored resolution has no replacement, mine every linked provider production's archived cast
@@ -270,6 +278,18 @@ by itself create a human-review row. Unsupported search-only candidates remain i
   `Don=Donald` only corroborates the archived `Donald Barry` alias and is not needed for the
   decision. TMDB supplies IMDb nm0057983, displayed as `TMDB 103789 -> IMDb nm0057983` when Emby
   has no stored IMDb ID. Preserve the six TMDB `not-present` observations.
+- Annie Karstens, Emby 47116 and 429373: TMDB 1137005 / IMDb nm2622011 supports Quiz Lady and
+  identifies one episode of You, while TVDB 7890097 supports exact episode 7446892 A Fresh Start.
+  The dedicated TMDB episode-credit probe for TMDB episode 1944821 must be acquired before absence
+  can be asserted. When it returns Annie Karstens, combine it with embedded cast and emit one
+  `review-merge` case naming both Emby IDs and both media relationships; never leave the operator
+  with an unnamed `emby-name-collision` row.
+- Kimberly Hidalgo, Emby 439699: unavailable TVDB 7886958 must not lead directly to removal. Exact
+  episode cast discovery nominates people regardless of canonical-name compatibility. TVDB 393526
+  Kimberly Daugherty supports The Beach, aliases `Kim Hidalgo`, and links TMDB 1385322 / IMDb
+  nm2583683. The dedicated TMDB episode-credit probe must evaluate TMDB 1385322 without surname
+  gating. With exact native support, emit one identity-repair case retaining Emby 439699, replacing
+  TVDB, hydrating TMDB/IMDb provenance, renaming, and retaining the relationship.
 - Juan Fernandez, Emby 129559: the existing record contains two disjoint people. Retain the movie
   cluster TMDB 1607 / TVDB 9126505 / IMDb nm0273592 on the current Emby person. Create a new person
   for TMDB 1284938 / TVDB 7876703 / IMDb nm1537814 and move the Money Heist relationship to it.

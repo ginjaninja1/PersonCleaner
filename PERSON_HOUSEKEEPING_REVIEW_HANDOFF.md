@@ -45,6 +45,16 @@ or provider-acquisition handoff.
   TMDB 1235383 David S. Cameron is a root guest star on all three Emby 160974 episodes. Failure of
   TMDB `/find/{tvdbEpisodeId}` is an unresolved crosswalk, not negative cast evidence; fall back to
   the exact TMDB series/season/episode route when Emby has that hierarchy.
+- Dedicated TMDB episode-credit regression: absence from episode details or appended credits is
+  unresolved until `/tv/{series}/season/{season}/episode/{episode}/credits` succeeds. Combine its
+  `cast` and `guest_stars` with embedded/root collections. Emby 47116/429373 Annie Karstens and A
+  Fresh Start must prove this pathway and produce a complete merge case. Probes are deduplicated by
+  episode and drawn from the preceding actionable result set; no season-level call is introduced.
+- Named identity-repair regression: recommendation 533880 / Emby 439699 Kimberly Hidalgo must not
+  remain a removal when exact linked-episode evidence nominates Kimberly Daugherty. Media-backed
+  candidates bypass canonical surname gating; TVDB alias `Kim Hidalgo`, matching birth data, TMDB
+  1385322 and IMDb nm2583683 provide corroboration. The result is one retained-Emby replacement,
+  hydration and rename case with the media relationship preserved.
 - Named rename regression: Emby 12148 Don Barry must produce one provider-consensus rename to
   `Don 'Red' Barry`, showing TMDB 103789 support 1/7, TVDB 7871284 support 7/7, and derived IMDb
   provenance `TMDB 103789 -> IMDb nm0057983`. Optional quoted-nickname removal establishes strong
