@@ -311,3 +311,22 @@ TVDB 7866725 -> 9120093 and expose the TMDB 1216116 / IMDb nm0641581 person tria
 crosswalk subrows, TMDB support on the Emby media, and TVDB absence on production 5196666. The last
 fact remains relationship/provider-coverage evidence; it does not negate the established person
 identity.
+
+## Normalized-v14 action-plan handoff
+
+Migration 9 adds `housekeeping_recommendation_action`. Rename arbitration now runs after merge,
+split and ownership analysis. A rename involving any merge/split participant is copied into the
+chosen parent as an ordered dependent action and the standalone rename recommendation is removed
+before the delta truth is created.
+
+Regression cases from normalized-v13 development output:
+
+- rename recommendation 15727 / Emby 47038 (`Kirsten Robek` -> `Lauren K. Robek`) must be absorbed
+  by merge recommendation 15024 involving Emby 47038 and 420678;
+- rename recommendation 15924 / Emby 384484 (`Femi Elufowjo` -> `Femi Elufowoju Jr.`) must be
+  absorbed by merge recommendation 14943 involving Emby 43266 and 384484.
+
+The new run will have different displayed recommendation IDs. Validate by Emby participants and
+action content, not by expecting those historical proposal numbers to be reused. The expanded case
+must show `Proposed actions` and `Evidence` as separate grouped sections while the main grid remains
+grouped by the parent decision.

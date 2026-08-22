@@ -70,6 +70,11 @@ Merge, split, identity correction, name cleansing, and relationship movement bel
   relationship. Targeted production corroboration stops after two confirmations and is reported in
   acquisition metrics. The review grid loads compact cases and exposes materialized evidence through
   expandable detail rows instead of aggregating the full signal ledger at page load.
+- Migration 9 adds normalized ordered action children. Normalized-v14 resolves identity structure
+  and ownership before preferred-name selection, absorbs participant renames into merge/split
+  parents, and removes those standalone rename rows before delta-truth generation. The expandable
+  case detail groups ordered proposed actions separately from evidence; the main grid remains grouped
+  by the single parent operator decision.
 
 Legacy `run_state`, `tmdb_run_state`, `export_scope`, `id_probe`, and `resolution_evaluation` tables
 are retained for provenance.

@@ -416,3 +416,26 @@ the anchored Emby media. Exact production crosswalks include TVDB 78493 -> TMDB 
 Brother's Little Brother`) and TVDB 74626 <-> TMDB 13999 through the production identifiers for
 `The X Factor`. TVDB's missing credit on production 5196666 remains visible as negative
 provider-coverage evidence rather than blocking the strongly corroborated person identity.
+
+## Normalized-v14 parent cases and ordered actions
+
+`normalized-v14` makes identity structure precede preferred-name selection in the executable phase
+order. Merge, split and ownership conclusions are built before rename arbitration. A name conflict
+is evidence about an already established identity cluster; it never recursively establishes a
+merge or split.
+
+One top-level recommendation represents one operator decision. When a merge or split participant
+also needs a rename, provider-ID change, relationship movement, person creation or retirement, those
+changes are ordered children in `housekeeping_recommendation_action`. The merge/split parent absorbs
+the standalone rename row before delta-truth generation. Consequently a dependent rename is never
+written as an independently applicable delta while survivor or relationship decisions remain open.
+
+For a merge the ordered plan is: select survivor, move supported relationships, apply the justified
+identity landscape, apply any dependent rename to the selected survivor, and retire a losing person
+only if it has no remaining relationships. For a split it is: confirm retained clusters, choose an
+existing owner or create a person where required, move relationships according to the support
+matrix, and apply names within the resulting clusters.
+
+The main grid continues to group by the parent decision (`review-merge`, `review-split`, replacement,
+standalone rename and so on). Expanding a case shows two separately grouped sections: `Proposed
+actions` from the normalized action table and `Evidence` from the normalized evidence table.

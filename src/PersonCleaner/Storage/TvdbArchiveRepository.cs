@@ -81,7 +81,7 @@ namespace PersonCleaner.Storage
                     db.Execute("PRAGMA busy_timeout=30000"); db.Execute("PRAGMA synchronous=NORMAL"); db.Execute("PRAGMA foreign_keys=ON");
                     ArchiveDatabase.ValidateObjects(db, "TVDB", "schema_info", "emby_item", "tvdb_entity", "remote_id", "tvdb_alias", "credit", "tvdb_credit_observation", "fetch_cache", "api_response_cache", "api_response_archive", "item_resolution", "resolution_decision_history", "resolution_candidate", "candidate_evidence", "person_local_production", "candidate_tvdb_production", "emby_observation", "truth", "truth_entity", "truth_external_identity", "truth_entity_lineage", "truth_relationship", "algorithm", "experiment_run", "resolution_proposal", "experiment_prediction", "experiment_metric", "archive_schema_migration", "provider_credit_observation", "provider_production_evidence");
                     ArchiveDatabase.ValidateVersion(db, "TVDB", "schema_info", 1);
-                    ArchiveDatabase.ValidateMigrations(db, 8);
+                    ArchiveDatabase.ValidateMigrations(db, 9);
                 }
                 catch { db?.Dispose(); db = null; throw; }
             }

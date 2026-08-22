@@ -42,7 +42,7 @@ namespace PersonCleaner.Storage
                     db.Execute("PRAGMA busy_timeout=30000"); db.Execute("PRAGMA synchronous=NORMAL");
                     ArchiveDatabase.ValidateObjects(db, "TMDB", "tmdb_schema_info", "tmdb_entity", "tmdb_external_id", "tmdb_alias", "tmdb_credit", "tmdb_credit_observation", "tmdb_item_resolution", "tmdb_resolution_candidate", "tmdb_api_response_cache", "tmdb_api_response_archive", "tmdb_fetch_cache", "tmdb_run_state", "provider_identity_signals", "provider_entity", "provider_external_id", "provider_alias", "provider_credit_observation", "provider_production_evidence");
                     ArchiveDatabase.ValidateVersion(db, "TMDB", "tmdb_schema_info", 1);
-                    ArchiveDatabase.ValidateMigrations(db, 8);
+                    ArchiveDatabase.ValidateMigrations(db, 9);
                 }
                 catch { db?.Dispose(); db = null; throw; }
             }

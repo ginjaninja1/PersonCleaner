@@ -71,6 +71,9 @@ conflations, bad credits, and bad names. Run-specific candidate/media observatio
 8. Materialized normalized evidence children for each actionable housekeeping recommendation plus
    acceptance-path and separate identity, relationship and operation confidence. These compact rows
    are indexed for the expandable review UI and avoid page-time aggregation of the full signal ledger.
+9. Normalized ordered recommendation-action children. Merge and split parents absorb dependent
+   rename, identity and relationship operations so one operator decision cannot produce competing
+   top-level rows or independently applicable dependent deltas.
 
 The plugin prefers `personcleaner-archive.db`. If only historic `tvdb-archive.db` exists, it continues
 using that file. It never moves a live database or WAL/SHM sidecars during construction.

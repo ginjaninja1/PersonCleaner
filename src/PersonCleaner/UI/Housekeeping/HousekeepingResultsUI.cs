@@ -51,20 +51,24 @@ namespace PersonCleaner.UI.Housekeeping
                 },
                 noDataText = "No completed housekeeping pass exists yet. Run 'PersonCleaner - Evaluate baseline person truth' from Scheduled Tasks."
             };
-            var detailOptions=new DxGridOptions(new HousekeepingEvidenceRow(),"EvidenceId",false,true,true,false)
+            var detailOptions=new DxGridOptions(new HousekeepingCaseDetailRow(),"DetailId",false,true,true,false)
             {
                 columnAutoWidth=true,showBorders=true,showRowLines=true,rowAlternationEnabled=true,wordWrapEnabled=true,
                 paging=new DxGridPaging{enabled=true,pageSize=25},filterRow=new DxGridFilterRow{visible=false},
-                headerFilter=new DxGridHeaderFilter{visible=false},searchPanel=new{visible=false}
+                headerFilter=new DxGridHeaderFilter{visible=false},searchPanel=new{visible=false},
+                grouping=new DxGridGrouping{allowCollapsing=true,autoExpandAll=true}
             };
             if(detailOptions.columns!=null)foreach(var column in detailOptions.columns)
             {
                 column.allowEditing=false;column.allowGrouping=false;column.allowHeaderFiltering=false;
-                if(column.dataField==nameof(HousekeepingEvidenceRow.EvidenceId))column.visible=false;
-                if(column.dataField==nameof(HousekeepingEvidenceRow.Result))column.caption="Evidence result";
-                if(column.dataField==nameof(HousekeepingEvidenceRow.Scope))column.caption="Evidence scope";
+                if(column.dataField==nameof(HousekeepingCaseDetailRow.DetailId))column.visible=false;
+                if(column.dataField==nameof(HousekeepingCaseDetailRow.Order))column.visible=false;
+                if(column.dataField==nameof(HousekeepingCaseDetailRow.Section)){column.groupIndex=0;column.showWhenGrouped=true;}
+                if(column.dataField==nameof(HousekeepingCaseDetailRow.Result))column.caption="Status / result";
+                if(column.dataField==nameof(HousekeepingCaseDetailRow.Scope))column.caption="Dependency / scope";
+                if(column.dataField==nameof(HousekeepingCaseDetailRow.Detail))column.caption="Action or evidence detail";
             }
-            options.masterDetail=new DxGridMasterDetail{enabled=true,autoExpandAll=false,childRowsFieldName=nameof(HousekeepingResultRow.EvidenceRows),detailGridOptions=detailOptions};
+            options.masterDetail=new DxGridMasterDetail{enabled=true,autoExpandAll=false,childRowsFieldName=nameof(HousekeepingResultRow.DetailRows),detailGridOptions=detailOptions};
 
             if (options.columns != null)
             {
@@ -78,7 +82,7 @@ namespace PersonCleaner.UI.Housekeeping
                     if (column.dataField == nameof(HousekeepingResultRow.Person)) column.visible = false;
                     if (column.dataField == nameof(HousekeepingResultRow.CurrentValue)) column.visible = false;
                     if (column.dataField == nameof(HousekeepingResultRow.ProposedValue)) column.visible = false;
-                    if (column.dataField == nameof(HousekeepingResultRow.EvidenceRows)) column.visible = false;
+                    if (column.dataField == nameof(HousekeepingResultRow.DetailRows)) column.visible = false;
                     if (column.dataField == nameof(HousekeepingResultRow.Provider)) column.caption = "Evidence provider";
                     if (column.dataField == nameof(HousekeepingResultRow.Recommendation)) { column.caption = "Proposed action"; column.groupIndex = 0; column.showWhenGrouped = true; }
                     if (column.dataField == nameof(HousekeepingResultRow.SignalType)) column.caption = "Reason";
@@ -101,7 +105,7 @@ namespace PersonCleaner.UI.Housekeeping
                 }
             }
 
-            return new HousekeepingResultsUI { Results = new DxDataGrid(options), ResultRows = rows ?? Array.Empty<HousekeepingResultRow>(), AcquisitionSummary = new CaptionItem(acquisitionSummary ?? "Acquisition measurements are unavailable for this run."), snapshotDescription = (runSummary ?? "No completed housekeeping run") + ". Each row is one actionable review case; supporting and contradictory detector findings are consolidated into its evidence. Nothing is applied automatically." };
+            return new HousekeepingResultsUI { Results = new DxDataGrid(options), ResultRows = rows ?? Array.Empty<HousekeepingResultRow>(), AcquisitionSummary = new CaptionItem(acquisitionSummary ?? "Acquisition measurements are unavailable for this run."), snapshotDescription = (runSummary ?? "No completed housekeeping run") + ". Each row is one parent operator decision. Expand it to review ordered proposed actions and the supporting, negative, contradictory and unresolved evidence. Nothing is applied automatically." };
         }
     }
 }
