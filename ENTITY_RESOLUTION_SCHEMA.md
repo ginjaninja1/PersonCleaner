@@ -68,6 +68,9 @@ conflations, bad credits, and bad names. Run-specific candidate/media observatio
 7. Materialized symmetric provider credits and completeness/mismatch views; rebuild of TMDB exact
    episode cast from preserved response JSON; reset of historical housekeeping runs and derived
    delta truths while preserving baseline truth, provider observations and API response archives.
+8. Materialized normalized evidence children for each actionable housekeeping recommendation plus
+   acceptance-path and separate identity, relationship and operation confidence. These compact rows
+   are indexed for the expandable review UI and avoid page-time aggregation of the full signal ledger.
 
 The plugin prefers `personcleaner-archive.db`. If only historic `tvdb-archive.db` exists, it continues
 using that file. It never moves a live database or WAL/SHM sidecars during construction.

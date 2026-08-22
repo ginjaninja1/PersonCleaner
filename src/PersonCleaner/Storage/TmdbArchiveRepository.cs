@@ -13,6 +13,13 @@ namespace PersonCleaner.Storage
 {
     internal sealed class TmdbRecoveryTarget { public long EmbyId { get; set; } public string Name { get; set; } public string CurrentId { get; set; } public string ImdbId { get; set; } public int LinkedCount { get; set; } }
     internal sealed class TmdbCrossProviderLead { public long EmbyId { get; set; } public string TmdbId { get; set; } public string TvdbId { get; set; } public string ImdbId { get; set; } }
+    internal sealed class TmdbFilmographyCorroborationTarget
+    {
+        public long EmbyId { get; set; } public string Name { get; set; } public string CurrentTmdbId { get; set; }
+        public string CandidateTmdbId { get; set; } public string TvdbId { get; set; } public string ImdbId { get; set; }
+        public List<string> SeriesIds { get; set; } = new List<string>(); public HashSet<string> TvdbSeriesIds { get; set; } = new HashSet<string>(StringComparer.Ordinal);
+        public List<string> MovieIds { get; set; } = new List<string>(); public HashSet<string> TvdbMovieIds { get; set; } = new HashSet<string>(StringComparer.Ordinal);
+    }
     internal sealed class TmdbArchiveRepository : IDisposable
     {
         private readonly object sync = new object();
@@ -35,7 +42,7 @@ namespace PersonCleaner.Storage
                     db.Execute("PRAGMA busy_timeout=30000"); db.Execute("PRAGMA synchronous=NORMAL");
                     ArchiveDatabase.ValidateObjects(db, "TMDB", "tmdb_schema_info", "tmdb_entity", "tmdb_external_id", "tmdb_alias", "tmdb_credit", "tmdb_credit_observation", "tmdb_item_resolution", "tmdb_resolution_candidate", "tmdb_api_response_cache", "tmdb_api_response_archive", "tmdb_fetch_cache", "tmdb_run_state", "provider_identity_signals", "provider_entity", "provider_external_id", "provider_alias", "provider_credit_observation", "provider_production_evidence");
                     ArchiveDatabase.ValidateVersion(db, "TMDB", "tmdb_schema_info", 1);
-                    ArchiveDatabase.ValidateMigrations(db, 7);
+                    ArchiveDatabase.ValidateMigrations(db, 8);
                 }
                 catch { db?.Dispose(); db = null; throw; }
             }
@@ -134,6 +141,26 @@ SELECT p.emby_id,p.name,p.tmdb_id,p.imdb_id,l.linked FROM emby_item p JOIN linke
 FROM tmdb_resolution_candidate rc WHERE rc.entity_type='person' AND EXISTS(SELECT 1 FROM emby_relationship er JOIN emby_item m ON m.emby_id=er.media_emby_id LEFT JOIN tmdb_item_resolution mr ON mr.emby_id=m.emby_id JOIN tmdb_credit_observation c ON c.production_tmdb_id=coalesce(m.tmdb_id,mr.resolved_tmdb_id) AND c.production_type=m.item_type AND c.person_tmdb_id=rc.tmdb_id WHERE er.person_emby_id=rc.emby_id)
 AND EXISTS(SELECT 1 FROM tmdb_external_id x WHERE x.entity_type='person' AND x.tmdb_id=rc.tmdb_id AND x.source_name IN('tvdb','imdb')) ORDER BY rc.emby_id,rc.rank";
             var result=new List<TmdbCrossProviderLead>();lock(sync)using(var s=db.PrepareStatement(sql))foreach(var r in s.ExecuteQuery())result.Add(new TmdbCrossProviderLead{EmbyId=r.GetInt64(0),TmdbId=r.GetString(1),TvdbId=r.IsDBNull(2)?null:r.GetString(2),ImdbId=r.IsDBNull(3)?null:r.GetString(3)});return result;
+        }
+
+        public List<TmdbFilmographyCorroborationTarget> GetFilmographyCorroborationTargets()
+        {
+            const string sql=@"SELECT DISTINCT p.emby_id,p.name,p.tmdb_id,rc.tmdb_id,p.tvdb_id,coalesce(p.imdb_id,vi.remote_id)
+FROM tmdb_resolution_candidate rc JOIN emby_item p ON p.emby_id=rc.emby_id
+JOIN tmdb_item_resolution ir ON ir.emby_id=p.emby_id AND ir.provenance='direct-unavailable'
+LEFT JOIN remote_id vi ON vi.entity_type='person' AND vi.tvdb_id=p.tvdb_id AND vi.source_name='IMDB'
+JOIN tmdb_external_id ct ON ct.entity_type='person' AND ct.tmdb_id=rc.tmdb_id AND ct.source_name='tvdb' AND ct.external_id=p.tvdb_id
+JOIN tmdb_external_id ci ON ci.entity_type='person' AND ci.tmdb_id=rc.tmdb_id AND ci.source_name='imdb' AND ci.external_id=coalesce(p.imdb_id,vi.remote_id)
+WHERE p.item_type='person' AND p.tvdb_id IS NOT NULL AND coalesce(p.imdb_id,vi.remote_id) IS NOT NULL AND rc.tmdb_id<>coalesce(p.tmdb_id,'') ORDER BY p.emby_id,rc.rank";
+            var result=new List<TmdbFilmographyCorroborationTarget>();lock(sync)using(var s=db.PrepareStatement(sql))foreach(var r in s.ExecuteQuery())
+            {
+                var target=new TmdbFilmographyCorroborationTarget{EmbyId=r.GetInt64(0),Name=r.GetString(1),CurrentTmdbId=r.IsDBNull(2)?null:r.GetString(2),CandidateTmdbId=r.GetString(3),TvdbId=r.GetString(4),ImdbId=r.GetString(5)};
+                using(var p=db.PrepareStatement("SELECT DISTINCT production_tmdb_id FROM tmdb_credit WHERE person_tmdb_id=@candidate AND production_type='series' ORDER BY production_tmdb_id")){p.TryBind("@candidate",target.CandidateTmdbId);foreach(var row in p.ExecuteQuery())target.SeriesIds.Add(row.GetString(0));}
+                using(var p=db.PrepareStatement("SELECT DISTINCT production_provider_id FROM provider_credit_observation WHERE provider='tvdb' AND person_provider_id=@person AND production_type='series'")){p.TryBind("@person",target.TvdbId);foreach(var row in p.ExecuteQuery())target.TvdbSeriesIds.Add(row.GetString(0));}
+                using(var p=db.PrepareStatement("SELECT DISTINCT production_tmdb_id FROM tmdb_credit WHERE person_tmdb_id=@candidate AND production_type='movie' ORDER BY production_tmdb_id")){p.TryBind("@candidate",target.CandidateTmdbId);foreach(var row in p.ExecuteQuery())target.MovieIds.Add(row.GetString(0));}
+                using(var p=db.PrepareStatement("SELECT DISTINCT production_provider_id FROM provider_credit_observation WHERE provider='tvdb' AND person_provider_id=@person AND production_type='movie'")){p.TryBind("@person",target.TvdbId);foreach(var row in p.ExecuteQuery())target.TvdbMovieIds.Add(row.GetString(0));}
+                result.Add(target);
+            }return result;
         }
 
         public void SaveEntity(string id, string type, TmdbEntity entity, string raw)

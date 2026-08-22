@@ -46,6 +46,8 @@ namespace PersonCleaner.Tasks
             cancellationToken.ThrowIfCancellationRequested(); progress.Report(1);
             var acquisition=await Task.WhenAll(AcquireTmdbEvidenceGaps(cancellationToken),AcquireTvdbEvidenceGaps(cancellationToken)).ConfigureAwait(false);
             var crossProvider=await AcquireCrossProviderIdentityEvidence(cancellationToken).ConfigureAwait(false);acquisition[0].Add(crossProvider[0]);acquisition[1].Add(crossProvider[1]);
+            acquisition[0].Add(await AcquireTmdbFilmographyCorroboration(cancellationToken).ConfigureAwait(false));
+            acquisition[1].Add(await AcquireTvdbFilmographyCorroboration(cancellationToken).ConfigureAwait(false));
             using (var repository = new HousekeepingRepository(paths))
             {
                 logger.Info("Housekeeping evaluation starting from captured provider evidence.");
@@ -74,6 +76,68 @@ namespace PersonCleaner.Tasks
                     progress.Report(100); logger.Info("Person housekeeping evaluation run {0} completed with {1} UI result rows. A frozen derived truth was created; Emby and baseline truth were not changed.", run, HousekeepingResultsCache.Rows.Length);
                 }
             }
+        }
+
+        private async Task<HousekeepingAcquisitionMetrics> AcquireTvdbFilmographyCorroboration(CancellationToken ct)
+        {
+            var metrics=new HousekeepingAcquisitionMetrics{Provider="tvdb"};
+            if(string.IsNullOrWhiteSpace(Plugin.Instance.Configuration.TvdbApiKey))return metrics;
+            using(var archive=new TvdbArchiveRepository(paths,logger))
+            {
+                archive.Initialize();var api=new TvdbApiClient(http,json,logger,archive);var targets=archive.GetFilmographyCorroborationTargets();
+                foreach(var target in targets)
+                {
+                    ct.ThrowIfCancellationRequested();metrics.PeopleEvaluated++;api.SetEvidenceContext(target.Name,target.EmbyId,target.CandidateTvdbId);var examined=0L;
+                    var personDetail=await api.GetEntity("people",target.CandidateTvdbId,ct).ConfigureAwait(false);if(personDetail!=null)archive.SaveEntity(target.CandidateTvdbId,"person",personDetail,json.SerializeToString(personDetail));
+                    var confirmations=0;foreach(var seriesId in target.SeriesIds.Distinct(StringComparer.Ordinal))
+                    {
+                        ct.ThrowIfCancellationRequested();var detail=await api.GetEntity("series",seriesId,ct).ConfigureAwait(false);if(detail==null)continue;
+                        archive.SaveEntity(seriesId,"series",detail,json.SerializeToString(detail));examined++;
+                        if((detail.remoteIds??new List<RemoteIdData>()).Any(x=>x.sourceName=="TheMovieDB.com"&&target.TmdbSeriesIds.Contains(x.id))&&++confirmations>=2)break;
+                    }
+                    if(confirmations<2)foreach(var movieId in target.MovieIds.Distinct(StringComparer.Ordinal))
+                    {
+                        ct.ThrowIfCancellationRequested();var detail=await api.GetEntity("movies",movieId,ct).ConfigureAwait(false);if(detail==null)continue;
+                        archive.SaveEntity(movieId,"movie",detail,json.SerializeToString(detail));examined++;
+                        if((detail.remoteIds??new List<RemoteIdData>()).Any(x=>x.sourceName=="TheMovieDB.com"&&target.TmdbMovieIds.Contains(x.id))&&++confirmations>=2)break;
+                    }
+                    metrics.FinishPerson(examined);
+                    logger.Info("[{0} - {1} - TVDB {2}] Cross-provider filmography corroboration acquired {3} series crosswalk(s) for exact TMDB {4} / IMDb {5} person convergence.",target.Name,target.EmbyId,target.CandidateTvdbId,examined,target.TmdbId,target.ImdbId);
+                }
+                metrics.CacheHits=api.CacheHits;metrics.ProviderCalls=api.CacheMisses;
+                logger.Info("TVDB cross-provider filmography corroboration: {0} exact person candidates; {1} cache hits; {2} provider calls.",targets.Count,api.CacheHits,api.CacheMisses);
+            }
+            return metrics;
+        }
+
+        private async Task<HousekeepingAcquisitionMetrics> AcquireTmdbFilmographyCorroboration(CancellationToken ct)
+        {
+            var metrics=new HousekeepingAcquisitionMetrics{Provider="tmdb"};
+            if(string.IsNullOrWhiteSpace(Plugin.Instance.Configuration.TmdbApiKey))return metrics;
+            using(var archive=new TmdbArchiveRepository(paths,logger))
+            {
+                archive.Initialize();var api=new TmdbApiClient(http,json,logger,archive);var targets=archive.GetFilmographyCorroborationTargets();
+                foreach(var target in targets)
+                {
+                    ct.ThrowIfCancellationRequested();metrics.PeopleEvaluated++;api.SetEvidenceContext(target.Name,target.EmbyId,target.CandidateTmdbId);var examined=0L;
+                    var confirmations=0;foreach(var seriesId in target.SeriesIds.Distinct(StringComparer.Ordinal))
+                    {
+                        ct.ThrowIfCancellationRequested();var detail=await api.GetSeries(seriesId,ct).ConfigureAwait(false);if(detail==null)continue;
+                        archive.SaveEntity(seriesId,"series",detail,json.SerializeToString(detail));examined++;
+                        if(!string.IsNullOrWhiteSpace(detail.external_ids?.tvdb_id)&&target.TvdbSeriesIds.Contains(detail.external_ids.tvdb_id)&&++confirmations>=2)break;
+                    }
+                    if(confirmations<2)foreach(var movieId in target.MovieIds.Distinct(StringComparer.Ordinal))
+                    {
+                        ct.ThrowIfCancellationRequested();var detail=await api.GetMovie(movieId,ct).ConfigureAwait(false);if(detail==null)continue;
+                        archive.SaveEntity(movieId,"movie",detail,json.SerializeToString(detail));examined++;
+                        if(!string.IsNullOrWhiteSpace(detail.external_ids?.tvdb_id)&&target.TvdbMovieIds.Contains(detail.external_ids.tvdb_id)&&++confirmations>=2)break;
+                    }
+                    metrics.FinishPerson(examined);
+                    logger.Info("[{0} - {1} - TMDB {2}] Cross-provider filmography corroboration acquired {3} series crosswalk(s) for exact TVDB {4} / IMDb {5} person convergence.",target.Name,target.EmbyId,target.CandidateTmdbId,examined,target.TvdbId,target.ImdbId);
+                }
+                metrics.CacheHits=api.CacheHits;metrics.ProviderCalls=api.CacheMisses;
+                logger.Info("TMDB cross-provider filmography corroboration: {0} exact person candidates; {1} cache hits; {2} provider calls.",targets.Count,api.CacheHits,api.CacheMisses);
+            }return metrics;
         }
 
         private async Task<HousekeepingAcquisitionMetrics> AcquireTmdbEvidenceGaps(CancellationToken ct)

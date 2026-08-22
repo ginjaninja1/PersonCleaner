@@ -27,6 +27,20 @@ namespace PersonCleaner.Storage
         public string ImdbId { get; set; }
     }
 
+    internal sealed class TvdbFilmographyCorroborationTarget
+    {
+        public long EmbyId { get; set; }
+        public string Name { get; set; }
+        public string CurrentTvdbId { get; set; }
+        public string CandidateTvdbId { get; set; }
+        public string TmdbId { get; set; }
+        public string ImdbId { get; set; }
+        public List<string> SeriesIds { get; set; } = new List<string>();
+        public HashSet<string> TmdbSeriesIds { get; set; } = new HashSet<string>(StringComparer.Ordinal);
+        public List<string> MovieIds { get; set; } = new List<string>();
+        public HashSet<string> TmdbMovieIds { get; set; } = new HashSet<string>(StringComparer.Ordinal);
+    }
+
     internal sealed class EmbyArchiveItem
     {
         public long Id { get; set; }
@@ -67,7 +81,7 @@ namespace PersonCleaner.Storage
                     db.Execute("PRAGMA busy_timeout=30000"); db.Execute("PRAGMA synchronous=NORMAL"); db.Execute("PRAGMA foreign_keys=ON");
                     ArchiveDatabase.ValidateObjects(db, "TVDB", "schema_info", "emby_item", "tvdb_entity", "remote_id", "tvdb_alias", "credit", "tvdb_credit_observation", "fetch_cache", "api_response_cache", "api_response_archive", "item_resolution", "resolution_decision_history", "resolution_candidate", "candidate_evidence", "person_local_production", "candidate_tvdb_production", "emby_observation", "truth", "truth_entity", "truth_external_identity", "truth_entity_lineage", "truth_relationship", "algorithm", "experiment_run", "resolution_proposal", "experiment_prediction", "experiment_metric", "archive_schema_migration", "provider_credit_observation", "provider_production_evidence");
                     ArchiveDatabase.ValidateVersion(db, "TVDB", "schema_info", 1);
-                    ArchiveDatabase.ValidateMigrations(db, 7);
+                    ArchiveDatabase.ValidateMigrations(db, 8);
                 }
                 catch { db?.Dispose(); db = null; throw; }
             }
@@ -437,6 +451,30 @@ SELECT candidate_id,displayed_name,supported,name_affinity,role_affinity FROM ca
 FROM candidate_evidence ce WHERE ce.entity_type='person' AND EXISTS(SELECT 1 FROM candidate_tvdb_production p WHERE p.emby_id=ce.emby_id AND p.candidate_tvdb_id=ce.tvdb_id AND p.is_shared=1)
 AND EXISTS(SELECT 1 FROM remote_id r WHERE r.entity_type='person' AND r.tvdb_id=ce.tvdb_id AND r.source_name IN('TheMovieDB.com','IMDB')) ORDER BY ce.emby_id,ce.final_rank";
             var result=new List<TvdbCrossProviderLead>();lock(sync)using(var s=db.PrepareStatement(sql))foreach(var r in s.ExecuteQuery())result.Add(new TvdbCrossProviderLead{EmbyId=r.GetInt64(0),TvdbId=r.GetString(1),TmdbId=r.IsDBNull(2)?null:r.GetString(2),ImdbId=r.IsDBNull(3)?null:r.GetString(3)});return result;
+        }
+
+        public List<TvdbFilmographyCorroborationTarget> GetFilmographyCorroborationTargets()
+        {
+            const string sql=@"SELECT DISTINCT p.emby_id,p.name,p.tvdb_id,ce.tvdb_id,p.tmdb_id,coalesce(p.imdb_id,ti.external_id)
+FROM candidate_evidence ce JOIN emby_item p ON p.emby_id=ce.emby_id
+JOIN item_resolution ir ON ir.emby_id=p.emby_id AND ir.provenance='direct-unavailable'
+LEFT JOIN tmdb_external_id ti ON ti.entity_type='person' AND ti.tmdb_id=p.tmdb_id AND ti.source_name='imdb'
+JOIN json_each(ce.external_ids_json) jt ON json_extract(jt.value,'$.sourceName')='TheMovieDB.com' AND json_extract(jt.value,'$.id')=p.tmdb_id
+JOIN json_each(ce.external_ids_json) ji ON json_extract(ji.value,'$.sourceName')='IMDB' AND json_extract(ji.value,'$.id')=coalesce(p.imdb_id,ti.external_id)
+WHERE p.item_type='person' AND p.tmdb_id IS NOT NULL AND coalesce(p.imdb_id,ti.external_id) IS NOT NULL AND ce.tvdb_id<>coalesce(p.tvdb_id,'')
+ORDER BY p.emby_id,ce.final_rank";
+            var result=new List<TvdbFilmographyCorroborationTarget>();
+            lock(sync)using(var s=db.PrepareStatement(sql))foreach(var r in s.ExecuteQuery())
+            {
+                var target=new TvdbFilmographyCorroborationTarget{EmbyId=r.GetInt64(0),Name=r.GetString(1),CurrentTvdbId=r.IsDBNull(2)?null:r.GetString(2),CandidateTvdbId=r.GetString(3),TmdbId=r.GetString(4),ImdbId=r.GetString(5)};
+                using(var p=db.PrepareStatement("SELECT production_tvdb_id FROM candidate_tvdb_production WHERE emby_id=@emby AND candidate_tvdb_id=@candidate AND production_type='series' ORDER BY production_tvdb_id"))
+                { p.TryBind("@emby",target.EmbyId);p.TryBind("@candidate",target.CandidateTvdbId);foreach(var row in p.ExecuteQuery())target.SeriesIds.Add(row.GetString(0)); }
+                using(var p=db.PrepareStatement("SELECT DISTINCT production_tmdb_id FROM tmdb_credit WHERE person_tmdb_id=@person AND production_type='series'")){p.TryBind("@person",target.TmdbId);foreach(var row in p.ExecuteQuery())target.TmdbSeriesIds.Add(row.GetString(0));}
+                using(var p=db.PrepareStatement("SELECT production_tvdb_id FROM candidate_tvdb_production WHERE emby_id=@emby AND candidate_tvdb_id=@candidate AND production_type='movie' ORDER BY production_tvdb_id")){p.TryBind("@emby",target.EmbyId);p.TryBind("@candidate",target.CandidateTvdbId);foreach(var row in p.ExecuteQuery())target.MovieIds.Add(row.GetString(0));}
+                using(var p=db.PrepareStatement("SELECT DISTINCT production_tmdb_id FROM tmdb_credit WHERE person_tmdb_id=@person AND production_type='movie'")){p.TryBind("@person",target.TmdbId);foreach(var row in p.ExecuteQuery())target.TmdbMovieIds.Add(row.GetString(0));}
+                result.Add(target);
+            }
+            return result;
         }
 
         public string GetMediaSupportedTmdbImdbId(long personEmbyId, string tmdbId)

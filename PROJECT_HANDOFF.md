@@ -63,6 +63,13 @@ Merge, split, identity correction, name cleansing, and relationship movement bel
 - Evidence acquisition uses frozen 1,000-person development cohorts reconstructed from the earliest
   provider person-audit checkpoints. Cached completion does not advance the cohort. Candidate-person
   404s are negatively cached and isolated so one stale provider ID cannot abort the task.
+- Migration 8 introduces normalized, indexed recommendation-evidence children and separate identity,
+  relationship and operation confidence. Normalized-v13 accepts a provider replacement either from
+  target-provider linked-library support or from an exact person-ID/IMDb cluster plus at least two
+  exact cross-provider production-ID overlaps while the other provider supports the anchored Emby
+  relationship. Targeted production corroboration stops after two confirmations and is reported in
+  acquisition metrics. The review grid loads compact cases and exposes materialized evidence through
+  expandable detail rows instead of aggregating the full signal ledger at page load.
 
 Legacy `run_state`, `tmdb_run_state`, `export_scope`, `id_probe`, and `resolution_evaluation` tables
 are retained for provenance.

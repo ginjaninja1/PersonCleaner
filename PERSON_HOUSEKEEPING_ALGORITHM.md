@@ -381,3 +381,38 @@ key. Archive responses are used to design and evaluate the algorithm initially. 
 stable, every required operation must be tested against Emby's built-in provider interfaces and
 classified as Emby-stored, Emby-derived, Emby-provider-mediated, or requiring a PersonCleaner API
 key.
+
+## Normalized-v13 materialized evidence and production corroboration
+
+`normalized-v13` adds a second, deliberately narrower provider-identity acceptance route. Exact
+provider-native support on Emby-linked media remains strongest, but is no longer the only way to
+accept a replacement. A candidate can also qualify when all of the following hold:
+
+- the other current provider identity is live and supports at least one anchored Emby relationship;
+- the candidate directly links to that exact provider-person ID;
+- the candidate and anchored identity share the same IMDb ID;
+- no direct identifier contradicts that closed identity cluster; and
+- at least two provider-native productions carried by both people are joined through exact
+  TMDB/TVDB production external IDs.
+
+Production titles never establish overlap. They are display labels only after the production IDs
+have been crosswalked. Acquisition is targeted to exact person-identity candidates and stops after
+two exact production confirmations; cache hits, provider calls and the maximum productions examined
+for one person remain in the acquisition summary. The destination provider's absence on the
+specific Emby media remains separate negative or unresolved relationship evidence and is not
+silently converted into support.
+
+Recommendation evidence is materialized once at consolidation in
+`housekeeping_recommendation_evidence`. The main review row contains the proposed operator action,
+acceptance path, and separate identity, relationship and operation confidences. Expandable evidence
+rows expose person links, linked-library support and absence, exact off-library production
+crosswalks, contradictions and unresolved observations. The page no longer aggregates the complete
+`housekeeping_signal` ledger when it loads.
+
+Acceptance case: recommendation 12557 / Emby 106895 Dermot O'Leary from normalized-v12 must become
+a reviewed TVDB replacement from unavailable TVDB 7866725 to TVDB 9120093. TVDB 9120093 directly
+links TMDB 1216116 and IMDb nm0641581; TMDB 1216116 independently carries IMDb nm0641581 and supports
+the anchored Emby media. Exact production crosswalks include TVDB 78493 -> TMDB 31017 (`Big
+Brother's Little Brother`) and TVDB 74626 <-> TMDB 13999 through the production identifiers for
+`The X Factor`. TVDB's missing credit on production 5196666 remains visible as negative
+provider-coverage evidence rather than blocking the strongly corroborated person identity.

@@ -61,9 +61,14 @@ repository initialization because Emby constructs scheduled tasks while the serv
 
 Repository initialization is validation-only. The plugin must not create or alter persistent
 tables, indexes, views, migration records, or historical data at Emby startup. It opens the existing
-archive, verifies TVDB/TMDB schema version 1 and archive migrations through 7, and fails with an explicit
+archive, verifies TVDB/TMDB schema version 1 and archive migrations through 8, and fails with an explicit
 offline-migration error when anything is missing or incompatible. Schema preparation, migrations,
 repairs, and rebuilds are performed offline while Emby is stopped.
+
+Migration 8 does not duplicate raw provider responses. It materializes only the compact evidence
+selected for actionable review cases. Exact cross-provider filmography corroboration is derived from
+provider-native credits joined through production external IDs; production titles are presentation
+labels and never join keys.
 
 Existing TVDB credits predate endpoint-level provenance. An explicit offline rebuild may mark those
 rows `source_entity_type='legacy-normalized'` where the original route cannot be reconstructed;

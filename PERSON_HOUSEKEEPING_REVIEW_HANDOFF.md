@@ -291,3 +291,23 @@ GROUP BY recommendation_type, primary_signal_type, review_status;
 
 The next chat should read this file, `PERSON_HOUSEKEEPING_ALGORITHM.md`, and relevant portions of
 `PROJECT_HANDOFF.md` before modifying the algorithm.
+
+## Normalized-v13 test handoff
+
+Migration 8 must be applied offline before installing the normalized-v13 build. It adds compact,
+indexed `housekeeping_recommendation_evidence` children and separate acceptance-path, identity,
+relationship and operation confidence fields. The results grid is master/detail: its initial query
+does not aggregate the full signal ledger, and expanding a case shows the materialized positive,
+negative, contradictory and unresolved evidence rows.
+
+The new symmetric acceptance path is `cross-provider-identity-and-filmography`. It is evaluated only
+for an unavailable target-provider identity whose candidate directly converges with the healthy,
+media-backed other-provider identity through both the provider-person ID and IMDb. Targeted
+production-detail acquisition stops after two exact TMDB/TVDB production crosswalk confirmations.
+Names and titles do not count as identifier overlap.
+
+Primary acceptance case: the new recommendation ID for Emby 106895 Dermot O'Leary should propose
+TVDB 7866725 -> 9120093 and expose the TMDB 1216116 / IMDb nm0641581 person triangle, exact production
+crosswalk subrows, TMDB support on the Emby media, and TVDB absence on production 5196666. The last
+fact remains relationship/provider-coverage evidence; it does not negate the established person
+identity.

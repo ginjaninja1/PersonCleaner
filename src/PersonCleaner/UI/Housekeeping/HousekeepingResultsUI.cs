@@ -51,6 +51,20 @@ namespace PersonCleaner.UI.Housekeeping
                 },
                 noDataText = "No completed housekeeping pass exists yet. Run 'PersonCleaner - Evaluate baseline person truth' from Scheduled Tasks."
             };
+            var detailOptions=new DxGridOptions(new HousekeepingEvidenceRow(),"EvidenceId",false,true,true,false)
+            {
+                columnAutoWidth=true,showBorders=true,showRowLines=true,rowAlternationEnabled=true,wordWrapEnabled=true,
+                paging=new DxGridPaging{enabled=true,pageSize=25},filterRow=new DxGridFilterRow{visible=false},
+                headerFilter=new DxGridHeaderFilter{visible=false},searchPanel=new{visible=false}
+            };
+            if(detailOptions.columns!=null)foreach(var column in detailOptions.columns)
+            {
+                column.allowEditing=false;column.allowGrouping=false;column.allowHeaderFiltering=false;
+                if(column.dataField==nameof(HousekeepingEvidenceRow.EvidenceId))column.visible=false;
+                if(column.dataField==nameof(HousekeepingEvidenceRow.Result))column.caption="Evidence result";
+                if(column.dataField==nameof(HousekeepingEvidenceRow.Scope))column.caption="Evidence scope";
+            }
+            options.masterDetail=new DxGridMasterDetail{enabled=true,autoExpandAll=false,childRowsFieldName=nameof(HousekeepingResultRow.EvidenceRows),detailGridOptions=detailOptions};
 
             if (options.columns != null)
             {
@@ -64,6 +78,7 @@ namespace PersonCleaner.UI.Housekeeping
                     if (column.dataField == nameof(HousekeepingResultRow.Person)) column.visible = false;
                     if (column.dataField == nameof(HousekeepingResultRow.CurrentValue)) column.visible = false;
                     if (column.dataField == nameof(HousekeepingResultRow.ProposedValue)) column.visible = false;
+                    if (column.dataField == nameof(HousekeepingResultRow.EvidenceRows)) column.visible = false;
                     if (column.dataField == nameof(HousekeepingResultRow.Provider)) column.caption = "Evidence provider";
                     if (column.dataField == nameof(HousekeepingResultRow.Recommendation)) { column.caption = "Proposed action"; column.groupIndex = 0; column.showWhenGrouped = true; }
                     if (column.dataField == nameof(HousekeepingResultRow.SignalType)) column.caption = "Reason";
@@ -77,7 +92,12 @@ namespace PersonCleaner.UI.Housekeeping
                     if (column.dataField == nameof(HousekeepingResultRow.ProposedTvdbIds)) column.caption = "Proposed TVDB ID(s)";
                     if (column.dataField == nameof(HousekeepingResultRow.CurrentImdbIds)) column.caption = "Current IMDb ID(s)";
                     if (column.dataField == nameof(HousekeepingResultRow.ProposedImdbIds)) column.caption = "Proposed IMDb ID(s)";
-                    if (column.dataField == nameof(HousekeepingResultRow.LinkedMediaEvidence)) column.caption = "Linked media evidence";
+                    if (column.dataField == nameof(HousekeepingResultRow.LinkedMediaEvidence)) column.visible = false;
+                    if (column.dataField == nameof(HousekeepingResultRow.Evidence)) column.visible = false;
+                    if (column.dataField == nameof(HousekeepingResultRow.AcceptancePath)) column.caption = "Acceptance pathway";
+                    if (column.dataField == nameof(HousekeepingResultRow.IdentityConfidence)) column.caption = "Identity confidence";
+                    if (column.dataField == nameof(HousekeepingResultRow.RelationshipConfidence)) column.caption = "Relationship confidence";
+                    if (column.dataField == nameof(HousekeepingResultRow.OperationConfidence)) column.caption = "Operation confidence";
                 }
             }
 
