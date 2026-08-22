@@ -10,6 +10,23 @@ using System.Linq;
 
 namespace PersonCleaner.Storage
 {
+    internal sealed class TvdbLinkedCreditCandidate
+    {
+        public string TvdbId { get; set; }
+        public string DisplayedName { get; set; }
+        public int SupportedMedia { get; set; }
+        public int NameAffinity { get; set; }
+        public int RoleAffinity { get; set; }
+    }
+
+    internal sealed class TvdbCrossProviderLead
+    {
+        public long EmbyId { get; set; }
+        public string TvdbId { get; set; }
+        public string TmdbId { get; set; }
+        public string ImdbId { get; set; }
+    }
+
     internal sealed class EmbyArchiveItem
     {
         public long Id { get; set; }
@@ -361,6 +378,18 @@ namespace PersonCleaner.Storage
                 }
             }, TransactionMode.Immediate);
         }
+
+        public void AddResolutionCandidate(long embyId,Tvdb.ResolutionCandidate c,Func<object,string> serialize)
+        {
+            if(c==null)return;lock(sync)db.RunInTransaction(x=>
+            {
+                Statement(x,"DELETE FROM resolution_candidate WHERE emby_id=@emby AND tvdb_id=@tvdb",s=>{s.TryBind("@emby",embyId);s.TryBind("@tvdb",c.TvdbId);});Statement(x,"DELETE FROM candidate_evidence WHERE emby_id=@emby AND tvdb_id=@tvdb",s=>{s.TryBind("@emby",embyId);s.TryBind("@tvdb",c.TvdbId);});Statement(x,"DELETE FROM candidate_tvdb_production WHERE emby_id=@emby AND candidate_tvdb_id=@tvdb",s=>{s.TryBind("@emby",embyId);s.TryBind("@tvdb",c.TvdbId);});
+                var rank=1;using(var q=x.PrepareStatement("SELECT coalesce(max(rank),0)+1 FROM resolution_candidate WHERE emby_id=@emby")){q.TryBind("@emby",embyId);foreach(var row in q.ExecuteQuery())rank=row.GetInt(0);}c.Rank=rank;
+                Statement(x,"INSERT INTO resolution_candidate VALUES(@emby,@rank,@type,@tvdb,@name,@score,@external,@filmography,@evidence,@now)",s=>{s.TryBind("@emby",embyId);s.TryBind("@rank",rank);s.TryBind("@type",c.EntityType);s.TryBind("@tvdb",c.TvdbId);s.TryBind("@name",c.Name);s.TryBind("@score",c.Score);s.TryBind("@external",serialize(c.ExternalIds));s.TryBind("@filmography",serialize(c.FilmographyIds));s.TryBind("@evidence",c.Evidence);s.TryBind("@now",Now());});
+                Statement(x,"INSERT OR REPLACE INTO candidate_evidence VALUES(@emby,@tvdb,@type,@searchRank,@finalRank,@name,@nameClass,@methods,@extended,@reason,@score,@external,@filmography,@evidence,@now)",s=>{s.TryBind("@emby",embyId);s.TryBind("@tvdb",c.TvdbId);s.TryBind("@type",c.EntityType);s.TryBind("@searchRank",c.SearchRank);s.TryBind("@finalRank",rank);s.TryBind("@name",c.Name);s.TryBind("@nameClass",c.NameClass??"unknown");s.TryBind("@methods",c.DiscoveryMethods??"cross-provider-direct-id");s.TryBind("@extended",c.ExtendedFetched?1:0);s.TryBind("@reason",c.ExtendedFetchReason);s.TryBind("@score",c.Score);s.TryBind("@external",serialize(c.ExternalIds));s.TryBind("@filmography",serialize(c.FilmographyIds));s.TryBind("@evidence",c.Evidence);s.TryBind("@now",Now());});
+                var overlaps=new HashSet<string>(c.OverlapIds??new List<string>());foreach(var key in c.FilmographyIds??new List<string>())SaveProductionKey(x,"candidate_tvdb_production",embyId,c.TvdbId,key,overlaps.Contains(key));
+            },TransactionMode.Immediate);
+        }
         public List<long> GetPersonEvidenceGapIds()
         {
             var frozen=new List<long>();lock(sync)
@@ -374,6 +403,40 @@ SELECT p.emby_id FROM emby_item p JOIN linked l ON l.person_emby_id=p.emby_id LE
         public int GetLinkedMediaCount(long personEmbyId)
         {
             lock(sync) using(var s=db.PrepareStatement("SELECT count(DISTINCT media_emby_id) FROM emby_relationship WHERE person_emby_id=@id")){s.TryBind("@id",personEmbyId);foreach(var r in s.ExecuteQuery())return r.GetInt(0);}return 0;
+        }
+
+        public List<TvdbLinkedCreditCandidate> GetLinkedCreditCandidates(long personEmbyId, string currentTvdbId)
+        {
+            const string sql = @"WITH linked AS (
+SELECT p.name current_name,er.person_type,er.role,m.item_type media_type,coalesce(m.tvdb_id,mr.resolved_tvdb_id) production_id
+FROM emby_item p JOIN emby_relationship er ON er.person_emby_id=p.emby_id JOIN emby_item m ON m.emby_id=er.media_emby_id
+LEFT JOIN item_resolution mr ON mr.emby_id=m.emby_id WHERE p.emby_id=@emby), candidates AS (
+SELECT c.person_tvdb_id candidate_id,max(c.person_name) displayed_name,count(DISTINCT l.media_type||':'||l.production_id) supported,
+max(CASE WHEN lower(trim(c.person_name))=lower(trim(l.current_name)) THEN 6
+ WHEN EXISTS(SELECT 1 FROM tvdb_alias a WHERE a.entity_type='person' AND a.tvdb_id=c.person_tvdb_id AND lower(trim(a.alias))=lower(trim(l.current_name))) THEN 6
+ WHEN lower(substr(c.person_name,1,instr(c.person_name||' ',' ')-1))=lower(substr(l.current_name,1,instr(l.current_name||' ',' ')-1)) THEN 3
+ ELSE 0 END) name_affinity,
+max(CASE WHEN lower(replace(coalesce(c.credit_type,''),' ',''))=lower(replace(coalesce(nullif(l.role,''),l.person_type),' ','')) THEN 1 ELSE 0 END) role_affinity
+FROM linked l JOIN credit c ON c.subject_tvdb_id=l.production_id AND c.subject_type=l.media_type
+WHERE l.production_id IS NOT NULL AND c.person_tvdb_id<>coalesce(@current,'') GROUP BY c.person_tvdb_id)
+SELECT candidate_id,displayed_name,supported,name_affinity,role_affinity FROM candidates ORDER BY supported DESC,name_affinity DESC,role_affinity DESC,candidate_id";
+            var result = new List<TvdbLinkedCreditCandidate>();
+            lock (sync) using (var s = db.PrepareStatement(sql))
+            {
+                s.TryBind("@emby", personEmbyId); s.TryBind("@current", currentTvdbId ?? string.Empty);
+                foreach (var row in s.ExecuteQuery()) result.Add(new TvdbLinkedCreditCandidate{TvdbId=row.GetString(0),DisplayedName=row.IsDBNull(1)?null:row.GetString(1),SupportedMedia=row.GetInt(2),NameAffinity=row.GetInt(3),RoleAffinity=row.GetInt(4)});
+            }
+            return result;
+        }
+
+        public List<TvdbCrossProviderLead> GetMediaSupportedCrossProviderLeads()
+        {
+            const string sql=@"SELECT ce.emby_id,ce.tvdb_id,
+(SELECT remote_id FROM remote_id r WHERE r.entity_type='person' AND r.tvdb_id=ce.tvdb_id AND r.source_name='TheMovieDB.com' LIMIT 1) tmdb_id,
+(SELECT remote_id FROM remote_id r WHERE r.entity_type='person' AND r.tvdb_id=ce.tvdb_id AND r.source_name='IMDB' LIMIT 1) imdb_id
+FROM candidate_evidence ce WHERE ce.entity_type='person' AND EXISTS(SELECT 1 FROM candidate_tvdb_production p WHERE p.emby_id=ce.emby_id AND p.candidate_tvdb_id=ce.tvdb_id AND p.is_shared=1)
+AND EXISTS(SELECT 1 FROM remote_id r WHERE r.entity_type='person' AND r.tvdb_id=ce.tvdb_id AND r.source_name IN('TheMovieDB.com','IMDB')) ORDER BY ce.emby_id,ce.final_rank";
+            var result=new List<TvdbCrossProviderLead>();lock(sync)using(var s=db.PrepareStatement(sql))foreach(var r in s.ExecuteQuery())result.Add(new TvdbCrossProviderLead{EmbyId=r.GetInt64(0),TvdbId=r.GetString(1),TmdbId=r.IsDBNull(2)?null:r.GetString(2),ImdbId=r.IsDBNull(3)?null:r.GetString(3)});return result;
         }
 
         public string GetMediaSupportedTmdbImdbId(long personEmbyId, string tmdbId)

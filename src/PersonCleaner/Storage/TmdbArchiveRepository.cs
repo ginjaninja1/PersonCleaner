@@ -12,6 +12,7 @@ using System.Linq;
 namespace PersonCleaner.Storage
 {
     internal sealed class TmdbRecoveryTarget { public long EmbyId { get; set; } public string Name { get; set; } public string CurrentId { get; set; } public string ImdbId { get; set; } public int LinkedCount { get; set; } }
+    internal sealed class TmdbCrossProviderLead { public long EmbyId { get; set; } public string TmdbId { get; set; } public string TvdbId { get; set; } public string ImdbId { get; set; } }
     internal sealed class TmdbArchiveRepository : IDisposable
     {
         private readonly object sync = new object();
@@ -114,6 +115,25 @@ SELECT p.emby_id,p.name,p.tmdb_id,p.imdb_id,l.linked FROM emby_item p JOIN linke
                     rank++;Statement(x,"INSERT INTO tmdb_resolution_candidate(emby_id,rank,entity_type,tmdb_id,name,source_external_id,raw_json,evaluated_utc) VALUES(@emby,@rank,'person',@id,@name,NULL,@raw,@now)",s=>{s.TryBind("@emby",embyId);s.TryBind("@rank",rank);s.TryBind("@id",candidate.id.ToString(CultureInfo.InvariantCulture));s.TryBind("@name",candidate.name);s.TryBind("@raw",serialize(candidate));s.TryBind("@now",Now());});
                 }
             },TransactionMode.Immediate);
+        }
+
+        public void AddRecoveryCandidate(long embyId,TmdbEntity candidate,string sourceExternalId,Func<TmdbEntity,string> serialize)
+        {
+            if(candidate==null)return;lock(sync)db.RunInTransaction(x=>
+            {
+                Statement(x,"DELETE FROM tmdb_resolution_candidate WHERE emby_id=@emby AND tmdb_id=@id",s=>{s.TryBind("@emby",embyId);s.TryBind("@id",candidate.id.ToString(CultureInfo.InvariantCulture));});
+                Statement(x,"INSERT INTO tmdb_resolution_candidate(emby_id,rank,entity_type,tmdb_id,name,source_external_id,raw_json,evaluated_utc) SELECT @emby,coalesce(max(rank),0)+1,'person',@id,@name,@source,@raw,@now FROM tmdb_resolution_candidate WHERE emby_id=@emby",s=>{s.TryBind("@emby",embyId);s.TryBind("@id",candidate.id.ToString(CultureInfo.InvariantCulture));s.TryBind("@name",candidate.name);s.TryBind("@source",sourceExternalId);s.TryBind("@raw",serialize(candidate));s.TryBind("@now",Now());});
+            },TransactionMode.Immediate);
+        }
+
+        public List<TmdbCrossProviderLead> GetMediaSupportedCrossProviderLeads()
+        {
+            const string sql=@"SELECT rc.emby_id,rc.tmdb_id,
+(SELECT external_id FROM tmdb_external_id x WHERE x.entity_type='person' AND x.tmdb_id=rc.tmdb_id AND x.source_name='tvdb' LIMIT 1),
+(SELECT external_id FROM tmdb_external_id x WHERE x.entity_type='person' AND x.tmdb_id=rc.tmdb_id AND x.source_name='imdb' LIMIT 1)
+FROM tmdb_resolution_candidate rc WHERE rc.entity_type='person' AND EXISTS(SELECT 1 FROM emby_relationship er JOIN emby_item m ON m.emby_id=er.media_emby_id LEFT JOIN tmdb_item_resolution mr ON mr.emby_id=m.emby_id JOIN tmdb_credit_observation c ON c.production_tmdb_id=coalesce(m.tmdb_id,mr.resolved_tmdb_id) AND c.production_type=m.item_type AND c.person_tmdb_id=rc.tmdb_id WHERE er.person_emby_id=rc.emby_id)
+AND EXISTS(SELECT 1 FROM tmdb_external_id x WHERE x.entity_type='person' AND x.tmdb_id=rc.tmdb_id AND x.source_name IN('tvdb','imdb')) ORDER BY rc.emby_id,rc.rank";
+            var result=new List<TmdbCrossProviderLead>();lock(sync)using(var s=db.PrepareStatement(sql))foreach(var r in s.ExecuteQuery())result.Add(new TmdbCrossProviderLead{EmbyId=r.GetInt64(0),TmdbId=r.GetString(1),TvdbId=r.IsDBNull(2)?null:r.GetString(2),ImdbId=r.IsDBNull(3)?null:r.GetString(3)});return result;
         }
 
         public void SaveEntity(string id, string type, TmdbEntity entity, string raw)

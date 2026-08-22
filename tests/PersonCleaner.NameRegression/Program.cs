@@ -9,6 +9,9 @@ internal static class Program
     {
         DonBarryProviderConsensusNameCompatibility();
         ConfiguredGivenNameEquivalenceIsDirectAndOptional();
+        ConfiguredGivenNameEquivalenceAppliesToAliases();
+        KimberlyHidalgoIdentityEnvelopeIsCompatible();
+        PlausibleLeadIsConservative();
         SubstringsDoNotMatch();
         EquivalencePairsAreNotTransitivelyExpanded();
         AnnieKarstensCachedEpisodeGuestsAreMerged();
@@ -36,6 +39,27 @@ internal static class Program
         Require(PersonNameCompatibility.Compare("Don Barry", "Donald Barry", new List<string>(), "Don=Donald").Compatible, "Configured Don=Donald must corroborate identical remaining tokens.");
         Require(!PersonNameCompatibility.Compare("Don Barry", "Donald Barry", new List<string>(), string.Empty).Compatible, "Removing Don=Donald must disable that equivalence.");
         Require(!PersonNameCompatibility.Compare("Don Smith", "Donald Barry", new List<string>(), "Don=Donald").Compatible, "Given-name equivalence must not override a surname conflict.");
+    }
+
+    private static void ConfiguredGivenNameEquivalenceAppliesToAliases()
+    {
+        var match = PersonNameCompatibility.Compare("Kimberly Hidalgo", "Kimberly Daugherty", new[] { "Kim Hidalgo" }, "Kim=Kimberly");
+        Require(match.Compatible, "Emby 439699 regression: configured Kim=Kimberly must apply to the TVDB alias Kim Hidalgo.");
+        Require(match.Reason.IndexOf("provider-alias", StringComparison.OrdinalIgnoreCase) >= 0, "The evidence must identify that the configured pair matched a provider alias.");
+    }
+
+    private static void KimberlyHidalgoIdentityEnvelopeIsCompatible()
+    {
+        var match = PersonNameCompatibility.CompareIdentityEnvelope("Kimberly Hidalgo", "Kimberly Daugherty", new[] { "Kim Hidalgo" }, string.Empty);
+        Require(match.Compatible, "Recommendation 1833 / Emby 439699: canonical Kimberly plus alias family name Hidalgo must nominate TVDB 393526 when exact media evidence exists.");
+        Require(match.Reason.IndexOf("identity envelope", StringComparison.OrdinalIgnoreCase) >= 0, "Composite canonical/alias evidence must be explicitly explained.");
+    }
+
+    private static void PlausibleLeadIsConservative()
+    {
+        Require(PersonNameCompatibility.IsPlausibleLead("Kimberly Hidalgo", "Kimberly Daugherty", "Kim=Kimberly"), "A shared full given name must nominate a linked-media candidate.");
+        Require(PersonNameCompatibility.IsPlausibleLead("Don Barry", "Donald Barry", "Don=Donald"), "A configured given-name pair with the same family name must nominate a candidate.");
+        Require(!PersonNameCompatibility.IsPlausibleLead("Kimberly Hidalgo", "Maz Jobrani", "Kim=Kimberly"), "An unrelated co-star must not become a person-detail request.");
     }
 
     private static void SubstringsDoNotMatch()

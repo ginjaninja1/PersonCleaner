@@ -39,13 +39,53 @@ namespace PersonCleaner.Housekeeping
                 var aliasExact = ExactForm(alias);
                 if (aliasExact == currentExact) return Match("current name is an exact provider alias");
                 if (ExactForm(OptionalNickname.Replace(alias ?? string.Empty, " ")) == currentExact) return Match("current name matches a provider alias after optional nickname removal");
+                if (EquivalentGivenNameWithSameRemainingTokens(currentExact, aliasExact, configuredPairs, out var aliasPair))
+                    return Match("configured given-name equivalence " + aliasPair + " with identical remaining provider-alias tokens");
             }
-            var left = currentExact.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-            var right = proposedExact.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-            if (left.Length >= 2 && right.Length == left.Length && left.Skip(1).SequenceEqual(right.Skip(1)) && IsConfiguredPair(left[0], right[0], configuredPairs))
-                return Match("configured given-name equivalence " + left[0] + "=" + right[0] + " with identical remaining name tokens");
+            if (EquivalentGivenNameWithSameRemainingTokens(currentExact, proposedExact, configuredPairs, out var canonicalPair))
+                return Match("configured given-name equivalence " + canonicalPair + " with identical remaining name tokens");
             return new PersonNameMatch { Compatible = false, Reason = "no configured or structural name compatibility" };
         }
+
+        public static PersonNameMatch CompareIdentityEnvelope(string current, string canonical, IEnumerable<string> aliases, string configuredPairs)
+        {
+            var materializedAliases = (aliases ?? Enumerable.Empty<string>()).Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
+            var direct = Compare(current, canonical, materializedAliases, configuredPairs);
+            if (direct.Compatible) return direct;
+
+            var currentTokens = Tokens(current);
+            var canonicalTokens = Tokens(canonical);
+            if (currentTokens.Length < 2 || canonicalTokens.Length < 2) return direct;
+
+            foreach (var alias in materializedAliases)
+            {
+                var aliasTokens = Tokens(alias);
+                if (aliasTokens.Length < 2) continue;
+                var canonicalGivenMatches = currentTokens[0] == canonicalTokens[0] || IsConfiguredPair(currentTokens[0], canonicalTokens[0], configuredPairs);
+                var aliasFamilyMatches = currentTokens[currentTokens.Length - 1] == aliasTokens[aliasTokens.Length - 1];
+                if (canonicalGivenMatches && aliasFamilyMatches)
+                    return Match("provider identity envelope combines canonical given name '" + canonicalTokens[0] + "' with provider-alias family name '" + aliasTokens[aliasTokens.Length - 1] + "'");
+            }
+            return direct;
+        }
+
+        public static bool IsPlausibleLead(string current, string displayedName, string configuredPairs)
+        {
+            var left = Tokens(current); var right = Tokens(displayedName);
+            if (left.Length < 2 || right.Length < 2) return ExactForm(current) == ExactForm(displayedName);
+            if (left[0] == right[0] || left[left.Length - 1] == right[right.Length - 1]) return true;
+            return IsConfiguredPair(left[0], right[0], configuredPairs) && left.Skip(1).SequenceEqual(right.Skip(1));
+        }
+
+        private static bool EquivalentGivenNameWithSameRemainingTokens(string leftValue, string rightValue, string configuredPairs, out string pair)
+        {
+            var left = Tokens(leftValue); var right = Tokens(rightValue); pair = null;
+            if (left.Length < 2 || right.Length != left.Length || !left.Skip(1).SequenceEqual(right.Skip(1)) || !IsConfiguredPair(left[0], right[0], configuredPairs)) return false;
+            pair = left[0] + "=" + right[0];
+            return true;
+        }
+
+        private static string[] Tokens(string value) => ExactForm(value).Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
 
         private static bool IsConfiguredPair(string a, string b, string configuredPairs)
         {

@@ -91,6 +91,20 @@ SELECT COUNT(*) FROM truth_relationship WHERE truth_id=1;
 
 ## Retained design cases
 
+### Normalized-v12 housekeeping decision boundary
+
+Housekeeping now preserves the normalized provider-evidence layer but selects actions only after a
+relationship/identity/ownership graph has been built. Media-supported alternatives receive targeted
+cross-provider identity completion through direct provider, IMDb and Wikidata links. Identity
+corroboration and same-media provider support remain separate conclusions. A unique existing Emby
+owner is checked before any anchor transmutation; when found, the recommendation moves supported
+relationships to that owner and presents one consolidated merge/reassignment case. The run snapshot
+is immutable and no unrestricted transitive identity merge is allowed.
+
+Manual acceptance case: normalized-v11 recommendation 8340 / Emby 421928 James Graven must resolve
+TVDB 9140765 -> IMDb nm0186609 -> TMDB 1063289 -> existing Emby 165106 James Craven, and propose
+moving `The One-Armed Man` to Emby 165106 rather than replacing IDs on Emby 421928.
+
 - Das Boot (1985): stale TVDB identity with useful TMDB/IMDb evidence.
 - Cross-type matches such as Tales from the Far Side: classification evidence, not automatic fixes.
 - Stephen Hawking and the Theory of Everything: direct/reverse lookup can work when name search fails.

@@ -244,6 +244,50 @@ by itself create a human-review row. Unsupported search-only candidates remain i
 
 ## Worked decisions from the archive
 
+## Normalized-v12 relationship, identity and ownership decision model
+
+`normalized-v12` preserves Migration 7 acquisition, archives and normalized provider observations,
+but replaces the final action-selection order. An Emby person is an immutable investigation anchor
+for the duration of a run, not the guaranteed surviving record.
+
+1. Freeze all Emby people, their current TMDB/TVDB/IMDb identities, and every linked media
+   relationship. No conclusion may change the snapshot used by another conclusion in the same run.
+2. Evaluate every relationship at matching provider scope: movie to movie, series to series, and
+   episode to exact episode. TMDB episodes combine root `guest_stars` and appended `credits.cast`.
+3. Record positive, negative, contradictory and unresolved provider facts. Episode absence is
+   negative only when acquisition is complete and raw and normalized screen-credit counts agree.
+4. Nominate identities from native credits, current IDs, direct external IDs, existing owners,
+   aliases/names and finally provider search. Names nominate and corroborate; they do not create an
+   identity cluster alone.
+5. For every media-supported alternative, complete the justified identity landscape through direct
+   TMDB, TVDB, IMDb and Wikidata links. Read local/cache evidence first and acquire missing direct
+   provider identities when supported by the provider API. Successful, empty and 404 outcomes are
+   cached. Other-provider media support is evaluated separately from identity corroboration: a
+   shared IMDb/Wikidata/provider ID may establish identity even when the other provider lacks the
+   particular credit.
+6. Build explicit identity clusters only from direct identifiers and provider-native evidence. Do
+   not infer unrestricted transitive merges. Conflicting direct identifiers remain contradictory
+   evidence rather than being silently joined.
+7. Build a relationship-support matrix showing which cluster supports each Emby media link.
+8. Before choosing any rename or provider-ID replacement, check every supported cluster against all
+   existing Emby people using indexed TMDB, TVDB, IMDb and Wikidata identity keys.
+9. Choose the operator action only after relationship partitioning and ownership are known:
+   - current cluster supported: retain, hydrate or rename;
+   - one alternative with an existing owner: move relationships to that owner and emit one
+     consolidated merge/reassignment case;
+   - one alternative without an owner: transmute the anchor by replacing/hydrating IDs and name;
+   - disjoint relationship partitions: move to existing owners or propose new people in one split;
+   - incomplete evidence: internal audit/suppression;
+   - complete stale ID with no supported alternative: remove-ID or unresolved-relationship review.
+10. Identity confidence, relationship confidence and operation confidence are distinct. The grid's
+    confidence must describe the proposed operator action, not merely the strongest media fact.
+
+James Graven, recommendation 8340 / Emby 421928 from normalized-v11, is the acceptance example for
+the existing-owner branch. TVDB 9140765 James Craven supports exact episode 11677 and carries IMDb
+nm0186609. That IMDb ID maps to TMDB 1063289, already owned by Emby 165106 James Craven. The correct
+case moves the `The One-Armed Man` relationship from Emby 421928 to Emby 165106 and shows both Emby
+records and the full identity cluster. It must not transmute Emby 421928 into a duplicate identity.
+
 - Sara Seegar, Emby 12733: dead TMDB 1213185 must not become `remove-provider-id`. Cast-first media
   evidence discovers TMDB 1161029 Sarah Seegar on all 11 linked productions; the alias Sara Seegar
   preserves the current Emby name, while exact IMDb nm0781504 is corroboration rather than the

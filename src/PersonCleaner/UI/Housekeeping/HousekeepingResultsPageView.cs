@@ -14,19 +14,21 @@ namespace PersonCleaner.UI.Housekeeping
         {
             ShowSave=false; ShowBack=true; AllowBack=true;
             var runSummary = "No completed housekeeping run";
+            var acquisitionSummary = "Acquisition measurements are unavailable for this run.";
             try
             {
                 using (var repository = new HousekeepingRepository(paths))
                 {
                     HousekeepingResultsCache.Replace(repository.LatestResults().ToArray());
                     runSummary = repository.LatestRunSummary();
+                    acquisitionSummary = repository.LatestAcquisitionSummary();
                 }
             }
             catch (Exception ex)
             {
                 logger.ErrorException("Unable to load the housekeeping results page", ex);
             }
-            ContentData = HousekeepingResultsUI.Build(HousekeepingResultsCache.Rows, runSummary);
+            ContentData = HousekeepingResultsUI.Build(HousekeepingResultsCache.Rows, runSummary, acquisitionSummary);
         }
     }
 }

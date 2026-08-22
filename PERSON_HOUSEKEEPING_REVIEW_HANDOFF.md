@@ -37,6 +37,10 @@ or provider-acquisition handoff.
   Derived IMDb IDs are displayed with source provenance rather than as missing or Emby-stored IDs.
 - Current run-1 recommendation count: 2,118. Treat that volume and its composition as evidence to
   review, not as proof that every row is actionable.
+- Run-1 composition: 245 `remove-provider-id`; 223 `rename-person`; 862
+  `replace-provider-id`; 5 `review-existing-emby-person`; 476 `review-merge`; 46
+  `review-split`; and 261 `review-unresolved-provider-id`. Provider breakdown remains queryable
+  through `housekeeping_latest_results` and should be quoted when volume suppression changes.
 - Stored split example: Emby 160974 David Cameron must produce `review-split` /
   `cross-provider-media-partition` when TMDB 1220273/IMDb nm2090098 supports the Brexit movie while
   TVDB 9148336 -> TMDB 1235383/IMDb nm0131538 supports three disjoint episodes. TVDB 293547/Emby
@@ -69,6 +73,17 @@ or provider-acquisition handoff.
 - Named no-action regressions: Emby 10573 Elton John (TVDB 277872) and Emby 10223 David McKail
   (TMDB 1231421 / TVDB 376540) retain their identities. Partial but healthy current-provider coverage
   without a supported alternative remains audit evidence and must not enter the review-case grid.
+- Named existing-owner/crosswalk regression: normalized-v11 recommendation 8340 / Emby 421928
+  James Graven must not remain a standalone TVDB replacement. Exact TVDB episode 11677 supports
+  TVDB 9140765 James Craven; TVDB supplies IMDb nm0186609; the archived IMDb crosswalk supplies
+  TMDB 1063289; and Emby 165106 already owns TMDB 1063289. Emit one relationship-reassignment/
+  merge case naming Emby 421928 and 165106 and moving `The One-Armed Man` to Emby 165106. The
+  media-supported candidate establishes the correct participant; the identity crosswalk and global
+  ownership check determine the correct operation.
+- Normalized-v12 decision order is relationship evidence -> direct cross-provider identity cluster
+  -> global Emby ownership -> operation. The anchor remains immutable during evaluation and is not
+  presumed to survive. Every serious media-supported alternative is completed through justified
+  direct TMDB/TVDB/IMDb/Wikidata links before rename, replacement, merge or split selection.
 
 Pre-migration run numbers and outputs were deliberately removed. All new feedback must quote the
 displayed recommendation ID and Emby person ID from current run 1; never reuse an old recommendation

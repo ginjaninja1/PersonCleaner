@@ -18,7 +18,9 @@ namespace PersonCleaner.UI.Housekeeping
 
         public HousekeepingResultRow[] ResultRows { get; set; } = Array.Empty<HousekeepingResultRow>();
 
-        public static HousekeepingResultsUI Build(HousekeepingResultRow[] rows, string runSummary)
+        public CaptionItem AcquisitionSummary { get; set; }
+
+        public static HousekeepingResultsUI Build(HousekeepingResultRow[] rows, string runSummary, string acquisitionSummary)
         {
             var options = new DxGridOptions(new HousekeepingResultRow(), "ProposalId", false, true, true, false)
             {
@@ -79,7 +81,7 @@ namespace PersonCleaner.UI.Housekeeping
                 }
             }
 
-            return new HousekeepingResultsUI { Results = new DxDataGrid(options), ResultRows = rows ?? Array.Empty<HousekeepingResultRow>(), snapshotDescription = (runSummary ?? "No completed housekeeping run") + ". Each row is one actionable review case; supporting and contradictory detector findings are consolidated into its evidence. Nothing is applied automatically." };
+            return new HousekeepingResultsUI { Results = new DxDataGrid(options), ResultRows = rows ?? Array.Empty<HousekeepingResultRow>(), AcquisitionSummary = new CaptionItem(acquisitionSummary ?? "Acquisition measurements are unavailable for this run."), snapshotDescription = (runSummary ?? "No completed housekeeping run") + ". Each row is one actionable review case; supporting and contradictory detector findings are consolidated into its evidence. Nothing is applied automatically." };
         }
     }
 }
