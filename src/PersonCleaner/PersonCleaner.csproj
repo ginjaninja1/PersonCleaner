@@ -5,10 +5,9 @@
     <AssemblyName>PersonCleaner</AssemblyName>
     <RootNamespace>PersonCleaner</RootNamespace>
     <LangVersion>latest</LangVersion>
-	  <Version>0.0.0.1</Version>
+	  <Version>0.1.5.0</Version>
 	  <Nullable>annotations</Nullable>
-    
-    
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
 
 	<!-- FIXED: Debug mode now turns off Optimization so breakpoints work properly -->
@@ -23,9 +22,10 @@
 		<Optimize>True</Optimize>
 	</PropertyGroup>
 	<ItemGroup>
-	  <None Remove="Handover.md" />
-	  <None Remove="Readme.md" />
-	  <Compile Remove="Tasks\PersonCleanerDiagnosticsTask.cs" />
+	  <!-- The previous implementation remains in the repository as forensic
+	       history, but none of it participates in this ground-up build. -->
+	  <Compile Include="Plugin.cs" />
+	  <Compile Include="V2\**\*.cs" />
 	</ItemGroup>
 	
   <ItemGroup>

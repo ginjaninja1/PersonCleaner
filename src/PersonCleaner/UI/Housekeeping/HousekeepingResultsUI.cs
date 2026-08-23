@@ -9,7 +9,7 @@ namespace PersonCleaner.UI.Housekeeping
 {
     public sealed class HousekeepingResultsUI : EditableOptionsBase
     {
-        public override string EditorTitle => "Person housekeeping review cases";
+        public override string EditorTitle => "Media-first person truth";
         private string snapshotDescription;
         public override string EditorDescription => snapshotDescription ?? "No completed housekeeping run is loaded.";
 
@@ -34,8 +34,8 @@ namespace PersonCleaner.UI.Housekeeping
                 wordWrapEnabled = false,
                 cellHintEnabled = true,
                 grouping = new DxGridGrouping { allowCollapsing = true, autoExpandAll = false, contextMenuEnabled = true },
-                groupPanel = new { visible = true, emptyPanelText = "Drag Action or Reason here to group" },
-                searchPanel = new { visible = true, width = 320, placeholder = "Search people, IDs, signals or evidence" },
+                groupPanel = new { visible = true, emptyPanelText = "Drag a column here to group" },
+                searchPanel = new { visible = true, width = 320, placeholder = "Search summary, media, people or IDs" },
                 filterRow = new DxGridFilterRow { visible = true },
                 headerFilter = new DxGridHeaderFilter { visible = true },
                 paging = new DxGridPaging { enabled = false, pageSize = 10000 },
@@ -49,7 +49,7 @@ namespace PersonCleaner.UI.Housekeeping
                     rowRenderingMode = DxGridScrolling.RowRenderingMode.@virtual,
                     preloadEnabled = false
                 },
-                noDataText = "No completed housekeeping pass exists yet. Run 'PersonCleaner - Evaluate baseline person truth' from Scheduled Tasks."
+                noDataText = "No completed media-first truth exists yet. Run 'PersonCleaner - Rebuild media-first person truth' from Scheduled Tasks."
             };
             var detailOptions=new DxGridOptions(new HousekeepingCaseDetailRow(),"DetailId",false,true,true,false)
             {
@@ -77,15 +77,15 @@ namespace PersonCleaner.UI.Housekeeping
                     column.allowEditing = false;
                     column.allowGrouping = true;
                     column.allowHeaderFiltering = true;
-                    if (column.dataField == nameof(HousekeepingResultRow.ProposalId)) column.caption = "Review case ID";
+                    if (column.dataField == nameof(HousekeepingResultRow.ProposalId)) column.caption = "Result ID";
                     if (column.dataField == nameof(HousekeepingResultRow.EmbyPersonId)) column.visible = false;
                     if (column.dataField == nameof(HousekeepingResultRow.Person)) column.visible = false;
                     if (column.dataField == nameof(HousekeepingResultRow.CurrentValue)) column.visible = false;
                     if (column.dataField == nameof(HousekeepingResultRow.ProposedValue)) column.visible = false;
                     if (column.dataField == nameof(HousekeepingResultRow.DetailRows)) column.visible = false;
-                    if (column.dataField == nameof(HousekeepingResultRow.Provider)) column.caption = "Evidence provider";
-                    if (column.dataField == nameof(HousekeepingResultRow.Recommendation)) { column.caption = "Proposed action"; column.groupIndex = 0; column.showWhenGrouped = true; }
-                    if (column.dataField == nameof(HousekeepingResultRow.SignalType)) column.caption = "Reason";
+                    if (column.dataField == nameof(HousekeepingResultRow.Provider)) column.visible = false;
+                    if (column.dataField == nameof(HousekeepingResultRow.Recommendation)) { column.caption = "Decision class"; column.groupIndex = 0; column.showWhenGrouped = true; }
+                    if (column.dataField == nameof(HousekeepingResultRow.SignalType)) column.caption = "Truth status";
                     if (column.dataField == nameof(HousekeepingResultRow.CurrentEmbyIds)) column.caption = "Current Emby ID(s)";
                     if (column.dataField == nameof(HousekeepingResultRow.ProposedEmbyIds)) column.caption = "Proposed Emby ID(s)";
                     if (column.dataField == nameof(HousekeepingResultRow.CurrentName)) column.caption = "Current name(s)";
@@ -98,14 +98,14 @@ namespace PersonCleaner.UI.Housekeeping
                     if (column.dataField == nameof(HousekeepingResultRow.ProposedImdbIds)) column.caption = "Proposed IMDb ID(s)";
                     if (column.dataField == nameof(HousekeepingResultRow.LinkedMediaEvidence)) column.visible = false;
                     if (column.dataField == nameof(HousekeepingResultRow.Evidence)) column.visible = false;
-                    if (column.dataField == nameof(HousekeepingResultRow.AcceptancePath)) column.caption = "Acceptance pathway";
+                    if (column.dataField == nameof(HousekeepingResultRow.AcceptancePath)) column.visible = false;
                     if (column.dataField == nameof(HousekeepingResultRow.IdentityConfidence)) column.caption = "Identity confidence";
                     if (column.dataField == nameof(HousekeepingResultRow.RelationshipConfidence)) column.caption = "Relationship confidence";
                     if (column.dataField == nameof(HousekeepingResultRow.OperationConfidence)) column.caption = "Operation confidence";
                 }
             }
 
-            return new HousekeepingResultsUI { Results = new DxDataGrid(options), ResultRows = rows ?? Array.Empty<HousekeepingResultRow>(), AcquisitionSummary = new CaptionItem(acquisitionSummary ?? "Acquisition measurements are unavailable for this run."), snapshotDescription = (runSummary ?? "No completed housekeeping run") + ". Each row is one parent operator decision. Expand it to review ordered proposed actions and the supporting, negative, contradictory and unresolved evidence. Nothing is applied automatically." };
+            return new HousekeepingResultsUI { Results = new DxDataGrid(options), ResultRows = rows ?? Array.Empty<HousekeepingResultRow>(), AcquisitionSummary = new CaptionItem(acquisitionSummary ?? "Acquisition measurements are unavailable for this run."), snapshotDescription = (runSummary ?? "No completed media-first run") + ". Auto-commit rows have already changed the new derived truth. Human-review rows preserve the current Emby relationship in that truth and expose the unresolved evidence. Expand a summary line for identities, exact media relationships and ordered truth changes. Live Emby is never changed here." };
         }
     }
 }

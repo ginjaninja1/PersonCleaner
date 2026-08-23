@@ -7,7 +7,7 @@ using MediaBrowser.Model.Logging;
 using MediaBrowser.Model.Plugins.UI;
 using MediaBrowser.Model.Serialization;
 using PersonCleaner.Configuration;
-using PersonCleaner.UI;
+using PersonCleaner.V2.UI;
 using System;
 using System.Collections.Generic;
 using System.IO; 
@@ -48,15 +48,14 @@ namespace PersonCleaner
 
 
         public override string Description =>
-            "Archives Emby and provider observations and supports versioned entity-resolution truths without changing live Emby.";
+            "Builds a read-only, media-first evidence graph for resolving Emby person identities.";
 
 
         public override Guid Id =>
             new Guid("ea91a15e-d1fe-4226-9b30-20d5f999fa1b");
 
 
-        public override string Name =>
-            "PersonCleaner Entity Resolution";
+        public override string Name => "PersonCleaner";
 
 
         public ImageFormat ThumbImageFormat =>

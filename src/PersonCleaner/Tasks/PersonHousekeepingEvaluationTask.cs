@@ -29,9 +29,9 @@ namespace PersonCleaner.Tasks
         private readonly IHttpClient http;
         private readonly IJsonSerializer json;
         private readonly ILibraryManager library;
-        public string Name => "PersonCleaner - Evaluate baseline person truth";
+        public string Name => "PersonCleaner - Rebuild media-first person truth";
         public string Key => "PersonCleanerHousekeepingEvaluation";
-        public string Description => "Acquires targeted provider evidence for unresolved people, then evaluates housekeeping proposals without changing Emby or the baseline truth.";
+        public string Description => "Uses archived exact media casts to reconstruct a new derived person truth. Confident changes are committed to derived truth; ambiguous credits are preserved and presented for human review. Live Emby is unchanged.";
         public string Category => "GinjaNinja Tools";
 
         public PersonHousekeepingEvaluationTask(IApplicationPaths paths, ILogManager logs, IHttpClient http, IJsonSerializer json, ILibraryManager library)
@@ -73,7 +73,7 @@ namespace PersonCleaner.Tasks
                     phaseStarted.Restart();
                     logger.Info("Housekeeping phase: Loading review rows; algorithm run {0} is complete; progress 99%", run);
                     HousekeepingResultsCache.Replace(repository.LatestResults().ToArray());
-                    progress.Report(100); logger.Info("Person housekeeping evaluation run {0} completed with {1} UI result rows. A frozen derived truth was created; Emby and baseline truth were not changed.", run, HousekeepingResultsCache.Rows.Length);
+                    progress.Report(100); logger.Info("Media-first person truth run {0} completed with {1} automatic/review summary rows. Confident changes were committed only to derived truth; live Emby was not changed.", run, HousekeepingResultsCache.Rows.Length);
                 }
             }
         }
@@ -122,13 +122,13 @@ namespace PersonCleaner.Tasks
                     ct.ThrowIfCancellationRequested();metrics.PeopleEvaluated++;api.SetEvidenceContext(target.Name,target.EmbyId,target.CandidateTmdbId);var examined=0L;
                     var confirmations=0;foreach(var seriesId in target.SeriesIds.Distinct(StringComparer.Ordinal))
                     {
-                        ct.ThrowIfCancellationRequested();var detail=await api.GetSeries(seriesId,ct).ConfigureAwait(false);if(detail==null)continue;
+                        ct.ThrowIfCancellationRequested();var detail=await GetTmdbMediaOrNull(api,archive,"series:"+seriesId,"series "+seriesId,()=>api.GetSeries(seriesId,ct)).ConfigureAwait(false);if(detail==null)continue;
                         archive.SaveEntity(seriesId,"series",detail,json.SerializeToString(detail));examined++;
                         if(!string.IsNullOrWhiteSpace(detail.external_ids?.tvdb_id)&&target.TvdbSeriesIds.Contains(detail.external_ids.tvdb_id)&&++confirmations>=2)break;
                     }
                     if(confirmations<2)foreach(var movieId in target.MovieIds.Distinct(StringComparer.Ordinal))
                     {
-                        ct.ThrowIfCancellationRequested();var detail=await api.GetMovie(movieId,ct).ConfigureAwait(false);if(detail==null)continue;
+                        ct.ThrowIfCancellationRequested();var detail=await GetTmdbMediaOrNull(api,archive,"movie:"+movieId,"movie "+movieId,()=>api.GetMovie(movieId,ct)).ConfigureAwait(false);if(detail==null)continue;
                         archive.SaveEntity(movieId,"movie",detail,json.SerializeToString(detail));examined++;
                         if(!string.IsNullOrWhiteSpace(detail.external_ids?.tvdb_id)&&target.TvdbMovieIds.Contains(detail.external_ids.tvdb_id)&&++confirmations>=2)break;
                     }
@@ -154,8 +154,10 @@ namespace PersonCleaner.Tasks
                     metrics.PeopleEvaluated++;var examined=0L;var decisive=false;
                     ct.ThrowIfCancellationRequested(); api.SetEvidenceContext(target.Name,target.EmbyId,target.CurrentId); var mediaContext=await BuildTmdbMediaContext(api,archive,archive.GetLinkedMediaIds(target.EmbyId),mediaItemCache,ct).ConfigureAwait(false);
                     var qualified=new List<Tuple<TmdbEntity,int,int,int,int>>();var seenCandidates=new HashSet<string>(StringComparer.Ordinal);
-                    var linkedLeads=new[]{target.CurrentId}.Concat(mediaContext.ExactCastCountByPerson.OrderByDescending(x=>mediaContext.CandidateNameCompatible(target.Name,x.Key)).ThenByDescending(x=>x.Value).Where(x=>mediaContext.CandidateNameCompatible(target.Name,x.Key)||x.Value>=2).Select(x=>x.Key)).Where(x=>!string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.Ordinal);
-                    foreach(var id in linkedLeads){if(await EvaluateTmdbCandidate(api,archive,target,mediaContext,id,qualified,seenCandidates,ct).ConfigureAwait(false))examined++;var best=qualified.OrderByDescending(x=>x.Item2+.9*x.Item5).ThenByDescending(x=>x.Item3).FirstOrDefault();if(best!=null&&best.Item2+.9*best.Item5>=Math.Max(1,target.LinkedCount*.8)&&best.Item3>0){decisive=true;metrics.DecisiveLinkedMediaStops++;break;}}
+                    var duplicateAudit=archive.HasDuplicatedPersonIdentity(target.EmbyId);
+                    var linkedLeads=new[]{target.CurrentId}.Concat(mediaContext.ExactCastCountByPerson.OrderByDescending(x=>mediaContext.CandidateNameCompatible(target.Name,x.Key)).ThenByDescending(x=>x.Value).Where(x=>mediaContext.CandidateNameCompatible(target.Name,x.Key)||(!duplicateAudit&&x.Value>=2)).Select(x=>x.Key)).Where(x=>!string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.Ordinal);
+                    foreach(var id in linkedLeads){if(await EvaluateTmdbCandidate(api,archive,target,mediaContext,id,qualified,seenCandidates,ct).ConfigureAwait(false))examined++;if(!duplicateAudit){var best=qualified.OrderByDescending(x=>x.Item2+.9*x.Item5).ThenByDescending(x=>x.Item3).FirstOrDefault();if(best!=null&&best.Item2+.9*best.Item5>=Math.Max(1,target.LinkedCount*.8)&&best.Item3>0){decisive=true;metrics.DecisiveLinkedMediaStops++;break;}}}
+                    if(duplicateAudit){metrics.FinishPerson(examined);archive.SaveRecoveryCandidates(target.EmbyId,qualified.Select(x=>x.Item1),x=>json.SerializeToString(x));archive.MarkFetch("person-evidence-audit:"+target.EmbyId,true,"duplicate identity audit retained every name-compatible linked-cast partition");logger.Info("[{0} - {1} - TMDB {2}] Duplicate-identity audit retained {3} name-compatible linked-cast identity candidate(s); no dominant candidate short-circuit or whole-name search was used.",target.Name,target.EmbyId,target.CurrentId??"-",qualified.Select(x=>x.Item1.id).Distinct().Count());continue;}
                     if(!decisive)
                     {
                         var search=await api.SearchPerson(target.Name,ct).ConfigureAwait(false);var leads=new List<TmdbEntity>();leads.AddRange(search?.results??new List<TmdbEntity>());
@@ -198,15 +200,16 @@ namespace PersonCleaner.Tasks
                 {
                     metrics.PeopleEvaluated++;var examined=0L;
                     ct.ThrowIfCancellationRequested();var person=library.GetItemById(embyId) as Person;if(person==null)continue;var currentTvdb=person.GetProviderId(MetadataProviders.Tvdb);api.SetEvidenceContext(person.Name,embyId,currentTvdb);var supportedTmdbImdb=archive.GetMediaSupportedTmdbImdbId(embyId,person.GetProviderId(MetadataProviders.Tmdb));var mediaContext=BuildTvdbMediaContext(person,ct);var linked=archive.GetLinkedMediaCount(embyId);
-                    var retained=new List<ResolutionCandidate>();ResolutionCandidate decisiveLinkedCandidate=null;
-                    var linkedLeads=archive.GetLinkedCreditCandidates(embyId,currentTvdb).Where(x=>x.NameAffinity>=6||PersonNameCompatibility.IsPlausibleLead(person.Name,x.DisplayedName,Plugin.Instance.Configuration.GivenNameEquivalences)||(x.SupportedMedia>=2&&x.RoleAffinity>0));
+                    var duplicateAudit=archive.HasDuplicatedPersonIdentity(embyId);var retained=new List<ResolutionCandidate>();ResolutionCandidate decisiveLinkedCandidate=null;
+                    var linkedLeads=archive.GetLinkedCreditCandidates(embyId,currentTvdb).Where(x=>x.NameAffinity>=6||PersonNameCompatibility.IsPlausibleLead(person.Name,x.DisplayedName,Plugin.Instance.Configuration.GivenNameEquivalences)||(!duplicateAudit&&x.SupportedMedia>=2&&x.RoleAffinity>0));
                     foreach(var lead in linkedLeads)
                     {
                         examined++;
                         var candidate=await AcquireTvdbLinkedMediaCandidate(api,archive,person,mediaContext,lead.TvdbId,supportedTmdbImdb,ct).ConfigureAwait(false);if(candidate==null)continue;
                         var existing=retained.FindIndex(x=>string.Equals(x.TvdbId,candidate.TvdbId,StringComparison.Ordinal));if(existing>=0)retained[existing]=candidate;else retained.Add(candidate);
-                        var support=TvdbScopeSupport(mediaContext,candidate.FilmographyIds);if(support.Item1+.9*support.Item2>=Math.Max(1,linked*.8)&&TvdbCandidateIdentityPlausible(person,candidate,supportedTmdbImdb)){decisiveLinkedCandidate=candidate;metrics.DecisiveLinkedMediaStops++;break;}
+                        var support=TvdbScopeSupport(mediaContext,candidate.FilmographyIds);if(!duplicateAudit&&support.Item1+.9*support.Item2>=Math.Max(1,linked*.8)&&TvdbCandidateIdentityPlausible(person,candidate,supportedTmdbImdb)){decisiveLinkedCandidate=candidate;metrics.DecisiveLinkedMediaStops++;break;}
                     }
+                    if(duplicateAudit){metrics.FinishPerson(examined);retained=retained.OrderByDescending(x=>x.Score).ThenBy(x=>x.TvdbId,StringComparer.Ordinal).ToList();for(var rank=0;rank<retained.Count;rank++)retained[rank].Rank=rank+1;archive.SaveResolutionCandidates(embyId,retained,x=>json.SerializeToString(x));archive.MarkFetch("person-evidence-audit:"+embyId,true,"duplicate identity audit retained every name-compatible linked-cast partition");logger.Info("[{0} - {1} - TVDB {2}] Duplicate-identity audit retained {3} name-compatible linked-cast identity candidate(s); no dominant candidate short-circuit or whole-name search was used.",person.Name,embyId,currentTvdb??"-",retained.Count);continue;}
                     var result=decisiveLinkedCandidate==null?await resolver.Resolve(person,ct,null,supportedTmdbImdb).ConfigureAwait(false):new ResolutionResult{Candidates=retained,CandidateCount=retained.Count,Method="linked-media-cast"};
                     if(decisiveLinkedCandidate==null)examined+=result.CandidateCount;
                     metrics.FinishPerson(examined);
@@ -285,20 +288,31 @@ namespace PersonCleaner.Tasks
                 if(media is Episode episode&&episode.Series!=null&&episode.ParentIndexNumber.HasValue&&episode.IndexNumber.HasValue)
                 {
                     var seriesId=episode.Series.GetProviderId(MetadataProviders.Tmdb);
-                    if(!string.IsNullOrWhiteSpace(seriesId)){episodeSeriesId=seriesId;context.LinkedSeriesIds.Add(seriesId);context.LinkedEpisodeCountBySeries.TryGetValue(seriesId,out var episodeCount);context.LinkedEpisodeCountBySeries[seriesId]=episodeCount+1;try{entity=await api.GetEpisode(seriesId,episode.ParentIndexNumber.Value,episode.IndexNumber.Value,ct).ConfigureAwait(false);}catch(Exception ex) when(!(ex is OperationCanceledException)){logger.Warn("{0} TMDB exact episode cast unavailable for Emby media {1}: {2}",api.EvidencePrefix,mediaId,ex.Message);}type="episode";label="Emby "+mediaId+" "+episode.Series.Name+" S"+episode.ParentIndexNumber.Value+"E"+episode.IndexNumber.Value;}
+                    if(!string.IsNullOrWhiteSpace(seriesId)){episodeSeriesId=seriesId;context.LinkedSeriesIds.Add(seriesId);context.LinkedEpisodeCountBySeries.TryGetValue(seriesId,out var episodeCount);context.LinkedEpisodeCountBySeries[seriesId]=episodeCount+1;var key="episode-coordinate:"+seriesId+":"+episode.ParentIndexNumber.Value+":"+episode.IndexNumber.Value;try{entity=await GetTmdbMediaOrNull(api,archive,key,"exact episode for Emby media "+mediaId,()=>api.GetEpisode(seriesId,episode.ParentIndexNumber.Value,episode.IndexNumber.Value,ct)).ConfigureAwait(false);}catch(Exception ex) when(!(ex is OperationCanceledException)){logger.Warn("{0} TMDB exact episode cast unavailable for Emby media {1}: {2}",api.EvidencePrefix,mediaId,ex.Message);}type="episode";label="Emby "+mediaId+" "+episode.Series.Name+" S"+episode.ParentIndexNumber.Value+"E"+episode.IndexNumber.Value;}
                 }
                 else if(media is Series series)
                 {
-                    var seriesId=series.GetProviderId(MetadataProviders.Tmdb);if(!string.IsNullOrWhiteSpace(seriesId)){context.LinkedSeriesIds.Add(seriesId);entity=await api.GetSeries(seriesId,ct).ConfigureAwait(false);type="series";label="Emby "+mediaId+" series "+series.Name;}
+                    var seriesId=series.GetProviderId(MetadataProviders.Tmdb);if(!string.IsNullOrWhiteSpace(seriesId)){context.LinkedSeriesIds.Add(seriesId);entity=await GetTmdbMediaOrNull(api,archive,"series:"+seriesId,"series for Emby media "+mediaId,()=>api.GetSeries(seriesId,ct)).ConfigureAwait(false);type="series";label="Emby "+mediaId+" series "+series.Name;}
                 }
                 else if(media is Movie movie)
                 {
-                    var movieId=movie.GetProviderId(MetadataProviders.Tmdb);if(!string.IsNullOrWhiteSpace(movieId)){entity=await api.GetMovie(movieId,ct).ConfigureAwait(false);type="movie";label="Emby "+mediaId+" "+movie.Name;}
+                    var movieId=movie.GetProviderId(MetadataProviders.Tmdb);if(!string.IsNullOrWhiteSpace(movieId)){entity=await GetTmdbMediaOrNull(api,archive,"movie:"+movieId,"movie for Emby media "+mediaId,()=>api.GetMovie(movieId,ct)).ConfigureAwait(false);type="movie";label="Emby "+mediaId+" "+movie.Name;}
                 }
                 if(entity==null)continue;context.CheckedMedia++;archive.SaveEntity(entity.id.ToString(),type,entity,json.SerializeToString(entity));
                 var castRows=TmdbCreditMerger.Cast(entity);foreach(var cast in castRows){var personId=cast.id.ToString();if(!string.IsNullOrWhiteSpace(cast.name))context.CandidateNamesByPerson[personId]=cast.name;context.ExactCastCountByPerson.TryGetValue(personId,out var count);context.ExactCastCountByPerson[personId]=count+1;if(episodeSeriesId!=null){var key=personId+"|"+episodeSeriesId;context.ExactEpisodeCountByPersonSeries.TryGetValue(key,out var exactEpisodes);context.ExactEpisodeCountByPersonSeries[key]=exactEpisodes+1;}if(!context.MatchedMediaByPerson.TryGetValue(personId,out var matches)){matches=new List<string>();context.MatchedMediaByPerson[personId]=matches;}matches.Add(label+" as "+(cast.character??"(role unavailable)"));}
             }
             return context;
+        }
+        private async Task<TmdbEntity> GetTmdbMediaOrNull(TmdbApiClient api,TmdbArchiveRepository archive,string cacheKey,string description,Func<Task<TmdbEntity>> fetch)
+        {
+            if(archive.IsNotFoundCached(cacheKey)){logger.Debug("{0} TMDB {1} remains negatively cached; retaining the media check as unresolved.",api.EvidencePrefix,description);return null;}
+            try{return await fetch().ConfigureAwait(false);}
+            catch(HttpException ex) when(ex.StatusCode==System.Net.HttpStatusCode.NotFound)
+            {
+                archive.MarkNotFound(cacheKey,"TMDB media returned 404: "+ex.Message);
+                logger.Warn("{0} TMDB {1} returned 404; the absence is negatively cached and this media check remains unresolved.",api.EvidencePrefix,description);
+                return null;
+            }
         }
         private static int MediaOverlap(TmdbMediaContext context,TmdbEntity person)
         {

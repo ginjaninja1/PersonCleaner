@@ -1,78 +1,58 @@
-# PersonCleaner provider archive and entity-resolution truth
+# PersonCleaner
 
-PersonCleaner is an Emby 4.10 scheduled-task plugin. It snapshots the in-scope Emby graph, archives
-TVDB v4 and TMDB observations in SQLite, and maintains versioned write-once truths for later entity
-resolution. It does not change live Emby names, provider IDs, people, or relationships.
+PersonCleaner is a read-only Emby person entity-resolution plugin. It treats local media relationships as the durable identity anchor, hydrates TMDB and TVDB evidence in a scheduled task, and presents pre-calculated decisions for human review.
 
-The database is `personcleaner-archive.db` under Emby's data directory. The plugin uses the SQLite
-assemblies shipped with Emby and does not deploy another SQLite native library.
+The old whole-library implementation is intentionally excluded from compilation. The active implementation is under `src/PersonCleaner/V2`.
 
-## Scheduled task
+## Safety boundaries
 
-Configure both API keys in the plugin settings and run:
+- Emby is queried through `ILibraryManager`; this version never writes Emby items, people, provider IDs, images, or relationships.
+- Raw provider responses, flattened indexes, manual bridges, run history, and decisions live under Emby's data directory in `personcleaner-v2/`.
+- API keys remain in Emby's normal plugin configuration. They are not written to the evidence database, raw cache, or logs.
+- An `ORPHAN` result is a review warning, never a deletion instruction.
+- Automatic matches update only the plugin's shadow decisions.
 
-**PersonCleaner - Update Emby and provider archive**
+## Development sandbox
 
-Each run:
+Sandbox mode is the default. It chooses a stable deterministic cohort of:
 
-1. Enumerates in-scope series, movies, regular episodes, and their scoped people once.
-2. Records changed Emby entity and credit-relationship observations.
-3. Imports unseen Emby entities and relationships into every draft truth exactly once.
-4. Runs configured TVDB and TMDB pipelines concurrently under separate request limits.
-5. Records a durable outcome for every Emby/provider work item.
+- 50 movies; and
+- 50 series.
 
-One missing provider key does not prevent the snapshot or the other provider from completing. With
-neither key, the task still updates Emby observations and truth coverage. Successful responses are
-cached for 30 days by default; failures have a shorter retry time. Cancellation retains all committed
-observations, work outcomes, raw responses, and normalized data.
+Every available TMDB and TVDB media ID on those same titles is queued. This avoids provider-biased samples and makes repeated runs directly comparable. Change the sample seed to evaluate another cohort. Full mode is available explicitly from configuration.
 
-## Scope and identity policy
+## Scheduled pipeline
 
-- Media: series, movies, and episodes from season 1 onwards.
-- People: Actor, Guest Star, Director, Writer, and Producer relationships on in-scope media.
-- TVDB acquisition uses an Emby TVDB ID or a previously accepted archived resolution. It does not
-  infer and accept a new TVDB identity during extraction.
-- TMDB acquisition uses direct IDs, episode coordinates, and unique IMDb `/find` results. Ambiguous
-  results remain evidence.
-- Provider 404s, missing identities, candidates, and contradictions are retained; Emby is not changed.
-- Resolution experiments and proposals remain separate from provider acquisition.
+1. Select the bounded media cohort and snapshot only its local people/credit relationships.
+2. Fetch or reuse cached provider media records and flatten their credits and media crosswalk IDs.
+3. Queue the unique people discovered by those credits.
+4. Fetch or reuse cached provider person records and flatten names, aliases, birth dates, IMDb IDs and Wikidata IDs.
+5. Build hard-link graph components, score only index-blocked cross-provider candidates, and resolve components back to historical Emby people by local-media mass.
+6. Persist plain-language summaries, ordered evidence lines, raw metrics and every impacted title for fast UI reads.
 
-The former TVDB/TMDB preview and full exports, ID probe, resolver evaluation, and diagnostic probe
-tasks are retired from scheduled-task registration. Their historical database rows and source remain
-available for provenance.
+Person enrichment is locally scoped: a discovered provider credit is enriched only when it shares a current provider person ID with a locally credited Emby person, or when its normalized name matches a local person on the same selected title. The complete provider credit lists remain flattened for evidence, but unrelated aggregate-series cast and crew do not generate thousands of unnecessary person API calls.
 
-## Main tables
+Fresh cache entries perform no network request and no JSON parsing. When an entry expires, the response is hashed; an unchanged payload refreshes its TTL without re-flattening. Failed requests have a persisted negative-cache window.
 
-- `emby_item`, `emby_relationship`: rebuildable current Emby projections.
-- `emby_observation`, `emby_relationship_observation`: append-only changed observations.
-- `provider_update_run`, `provider_work`: unified task and per-provider work position.
-- `tvdb_entity`, `remote_id`, `tvdb_alias`, `tvdb_credit_observation`: TVDB indexes.
-- `tmdb_entity`, `tmdb_external_id`, `tmdb_alias`, `tmdb_credit_observation`: TMDB indexes.
-- `item_resolution`, `tmdb_item_resolution`: current provider identity answers.
-- `truth`, `truth_entity`, `truth_external_identity`, `truth_entity_lineage`, and
-  `truth_relationship`: versioned desired Emby graphs.
+TMDB and TVDB hydration run as independent parallel pipelines. Each provider uses a fixed-size worker pool (defaults: TMDB 4, TVDB 2), its own request-start interval, and bounded retry behavior. TVDB token refresh is single-flight. The media phase remains a hard barrier before person discovery, and the person phase remains a hard barrier before offline resolution.
 
-Provider equivalences are in `PROVIDER_SCHEMA.md`; truth semantics are in
-`ENTITY_RESOLUTION_SCHEMA.md`; current operational notes are in `PROJECT_HANDOFF.md`.
-Use `PROVIDER_UPDATE_VERIFY.sql` for the unified run audit; the provider-specific verification files
-remain useful for historical and detailed archive inspection.
+## Decision meanings
 
-## Useful SQL
+- `MATCH`: provider evidence supports one shadow identity.
+- `DRIFT`: the current provider key disappeared or changed, but compatible naming and unchanged local-media mass preserve the historical Emby anchor.
+- `CONFLATION`: two provider profiles share evidence but remain below the automatic threshold.
+- `SPLIT`: one Emby person points to disconnected provider components.
+- `ORPHAN`: no hydrated provider node supports a locally credited Emby person; review fetch failures and missing IDs before taking any action.
 
-```sql
-SELECT * FROM provider_update_run ORDER BY run_id DESC LIMIT 1;
+The dashboard is sorted by risk and uncertainty and returns up to the configured row limit from every decision class, rather than applying one global limit before grouping. The summary always shows the uncapped class totals. Each row leads with the decision in ordinary language; expansion reveals supporting/conflicting signals and representative impacted titles. The complete title attribution remains in SQLite. Operators can confirm or reject a TMDB↔TVDB alignment and recalculate immediately from flattened evidence without refetching.
 
-SELECT provider,entity_type,state,outcome,COUNT(*) AS items
-FROM provider_work
-WHERE last_run_id=(SELECT MAX(run_id) FROM provider_update_run)
-GROUP BY provider,entity_type,state,outcome;
-
-SELECT * FROM provider_identity_signals WHERE emby_id=173844;
-SELECT * FROM truth_relationship WHERE truth_id=1 LIMIT 100;
-```
-
-## Build
+## Build and test
 
 ```powershell
-dotnet build src/PersonCleaner/PersonCleaner.csproj -c Release --no-restore -p:SkipPluginDeploy=true
+dotnet build .\src\PersonCleaner\PersonCleaner.csproj -c Release -p:SkipPluginDeploy=true
+dotnet run --project .\tests\PersonCleaner.EngineTests\PersonCleaner.EngineTests.csproj -p:SkipPluginDeploy=true
 ```
+
+Omit `SkipPluginDeploy` only when intentionally deploying the compiled plugin into the local Emby installation.
+
+See [the architecture](docs/ARCHITECTURE.md) for the data model, scoring rules, cache semantics, performance characteristics, and extension points.

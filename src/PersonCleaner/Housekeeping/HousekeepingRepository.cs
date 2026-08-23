@@ -93,10 +93,10 @@ namespace PersonCleaner.Housekeeping
         {
             ArchiveDatabase.RequireExisting(path);
             db=SQLite3.Open(path,ConnectionFlags.ReadWrite|ConnectionFlags.PrivateCache|ConnectionFlags.NoMutex,null,new Dictionary<string,delegate_collation>(),new Dictionary<Tuple<string,int>,Action<IReadOnlyList<sqlite3_value>,sqlite3_context>>(),true,false);
-            db.Execute("PRAGMA busy_timeout=5000"); db.Execute("PRAGMA synchronous=NORMAL");
-            ArchiveDatabase.ValidateObjects(db,"housekeeping v5","housekeeping_run","housekeeping_signal","housekeeping_recommendation","housekeeping_recommendation_evidence","housekeeping_recommendation_action","truth_entity_delta","truth_identity_delta","truth_relationship_delta","housekeeping_latest_results","provider_identity_issue");
+            db.Execute("PRAGMA foreign_keys=ON"); db.Execute("PRAGMA busy_timeout=5000"); db.Execute("PRAGMA synchronous=NORMAL");
+            ArchiveDatabase.ValidateObjects(db,"media-first person truth","housekeeping_run","media_truth_run","media_truth_person","media_truth_identity","media_truth_lineage","media_truth_credit","media_truth_credit_evidence","media_truth_issue","media_truth_change","media_truth_projection","media_truth_latest_projection");
             ArchiveDatabase.ValidateObjects(db,"housekeeping provider evidence","provider_credit_observation","provider_production_evidence","provider_normalization_mismatch","emby_person_media_provider_support","emby_person_media_provider_mismatch");
-            ArchiveDatabase.ValidateMigrations(db,9);
+            ArchiveDatabase.ValidateMigrations(db,11);
         }
 
         public long Run(DateTime cutoff,CancellationToken token,Action<string,double,TimeSpan> report)
@@ -104,28 +104,11 @@ namespace PersonCleaner.Housekeeping
             var clock=Stopwatch.StartNew(); long run=0;
             using(token.Register(()=>{try{db.Interrupt();}catch{}})) try
             {
-                Phase(token,report,clock,"Creating experiment run",1); run=StartRun(cutoff);
-                Phase(token,report,clock,"Normalizing provider identity status",4);
-                Tx(x=>{IdentitySignals(x,run);MissingIdentitySignals(x,run);State(x,run,"provider-identity-status",5);});
-                Phase(token,report,clock,"Auditing every current identity against linked media",5);Tx(x=>{UniversalIdentityAudits(x,run);State(x,run,"universal-identity-audit",10);});
-                Phase(token,report,clock,"Building retained candidate/media evidence ledger",10);Tx(x=>{RelationshipSignals(x,run);State(x,run,"identity-and-relationship-evidence",14);});
-                Reacquire("tmdb",run,token,report,clock,14,24);
-                Reacquire("tvdb",run,token,report,clock,24,48);
-                Phase(token,report,clock,"Evaluating media-backed TMDB replacements",48);Tx(x=>{MediaBackedTmdbReplacements(x,run);State(x,run,"media-backed-tmdb-replacements",49);});
-                Phase(token,report,clock,"Evaluating retained provider candidates and Emby ownership",49);Tx(x=>{CandidateDecisions(x,run);State(x,run,"candidate-decisions",51);});
-                Phase(token,report,clock,"Retaining universal identity-audit findings for case evidence",51);Tx(x=>State(x,run,"universal-audit-evidence",52));
-                Phase(token,report,clock,"Finding provider identity issues",52);Tx(x=>{ProviderIssues(x,run);State(x,run,"provider-identity-issues",53);});
-                Phase(token,report,clock,"Withholding or confirming unavailable-ID removals",53);Tx(x=>{UnavailableExplicit(x,run);State(x,run,"identity-decisions",54);});
-                Phase(token,report,clock,"Evaluating cross-provider identity and filmography replacements",54);Tx(x=>CrossProviderFilmographyReplacements(x,run));
-                Phase(token,report,clock,"Finding merge evidence",54);
-                Tx(x=>{Merges(x,run);State(x,run,"merge-evidence",72);});
-                Phase(token,report,clock,"Finding cross-provider split evidence",72);Tx(x=>{CrossProviderSplits(x,run);State(x,run,"cross-provider-split-evidence",78);});
-                Phase(token,report,clock,"Finding same-provider linked-media partitions",78);Tx(x=>{SplitsV2(x,run);State(x,run,"split-evidence",84);});
-                Phase(token,report,clock,"Resolving identity clusters and existing Emby ownership",84);Tx(x=>{GraphOperationDecisions(x,run);State(x,run,"identity-cluster-ownership",87);});
-                Phase(token,report,clock,"Arbitrating names within resolved identity clusters",87);Tx(x=>{RenamesV3(x,run);State(x,run,"provider-renames",88);});
-                Phase(token,report,clock,"Consolidating detector findings into actionable review cases",88);Tx(x=>{ConsolidateReviewCases(x,run);MaterializeRecommendationActions(x,run);MaterializeRecommendationEvidence(x,run);State(x,run,"review-case-consolidation",90);});
-                Phase(token,report,clock,"Creating delta truth",90); Tx(x=>DeltaTruth(x,run));
-                Phase(token,report,clock,"Finalizing results",96); Tx(x=>Complete(x,run));
+                Phase(token,report,clock,"Creating media-first truth run",1); run=StartRun(cutoff);
+                Phase(token,report,clock,"Reconstructing people from exact media casts",5);
+                Tx(x=>{MediaFirstTruthBuilder.Materialize(x,run,(stage,elapsed)=>report?.Invoke("Media-first: "+stage,Math.Min(97,5+elapsed.TotalSeconds/10),clock.Elapsed));State(x,run,"media-first-derived-truth",98);});
+                Phase(token,report,clock,"Finalizing automatic and human-review summaries",98);
+                Tx(x=>CompleteMediaFirst(x,run));
                 token.ThrowIfCancellationRequested(); return run;
             }
             catch(SQLiteException) when(token.IsCancellationRequested){if(run!=0)Stop(run,"cancelled","SQLite interrupted by Emby cancellation");throw new OperationCanceledException("Housekeeping cancelled",token);}
@@ -136,9 +119,18 @@ namespace PersonCleaner.Housekeeping
         private long StartRun(DateTime cutoff)
         {
             long id=0; var now=Now(); Tx(x=>{
-                x.Execute("INSERT OR IGNORE INTO algorithm(name,version,code_hash,configuration_json) VALUES('person-housekeeping','normalized-v14','normalized-v14-parent-cases-and-ordered-actions','{\"humanReview\":true,\"deltaTruth\":true,\"batchSize\":1000,\"anchor\":\"immutable-emby-person-linked-media-snapshot\",\"relationshipFirst\":true,\"crossProviderIdentityCompletion\":true,\"crossProviderProductionCorroboration\":true,\"materializedRecommendationEvidence\":true,\"materializedOrderedActions\":true,\"nameSelectionAfterIdentityStructure\":true,\"mergeSplitAbsorbDependentRenames\":true,\"globalEmbyOwnershipBeforeOperation\":true,\"separateIdentityRelationshipOperationEvidence\":true,\"normalizationCompleteNegativeEvidence\":true,\"noUnrestrictedTransitiveMerge\":true,\"providerNeutralDecisionLayer\":true}')");
-                Exec(x,"INSERT INTO experiment_run(algorithm_id,truth_id,observation_cutoff_utc,mask_policy_json,started_utc,status) SELECT algorithm_id,1,@cutoff,json_object('providerRequests','observable-cached-candidate-funnel','candidateCeiling','stop-after-two-exact-production-crosswalks','auditScope','all-linked-emby-people-both-providers','givenNameEquivalences',@names,'decisionModel','identity-relationship-ownership-name-parent-action-plan'),@now,'running' FROM algorithm WHERE name='person-housekeeping' AND version='normalized-v14'",s=>{s.TryBind("@cutoff",cutoff.ToString("o"));s.TryBind("@names",Plugin.Instance.Configuration.GivenNameEquivalences??string.Empty);s.TryBind("@now",now);}); id=LastId(x);
-                Exec(x,"INSERT INTO housekeeping_run(run_id,algorithm_version,base_truth_id,phase,progress,status,observation_cutoff_utc,started_utc,heartbeat_utc) VALUES(@run,'normalized-v14',1,'starting',1,'running',@cutoff,@now,@now)",s=>{s.TryBind("@run",id);s.TryBind("@cutoff",cutoff.ToString("o"));s.TryBind("@now",now);});}); return id;
+                Exec(x,"UPDATE housekeeping_run SET status='failed',phase='interrupted',heartbeat_utc=@now,completed_utc=@now,error=coalesce(error,'A later media-first rebuild found this run incomplete; its transaction was rolled back.') WHERE status='running'",s=>s.TryBind("@now",now));
+                Exec(x,"UPDATE experiment_run SET status='failed',completed_utc=@now WHERE status='running' AND run_id IN(SELECT run_id FROM housekeeping_run WHERE phase='interrupted')",s=>s.TryBind("@now",now));
+                x.Execute("INSERT OR IGNORE INTO algorithm(name,version,code_hash,configuration_json) VALUES('person-housekeeping','media-first-v1','media-first-exact-credit-reconstruction','{\"derivedTruth\":true,\"autoCommitScope\":\"derived-truth-only\",\"humanReviewPreservesCurrentRelationship\":true,\"embyPerson\":\"continuity-container\",\"exactMediaFirst\":true,\"conflatedProviderIdentityWithheld\":true}')");
+                Exec(x,"INSERT INTO experiment_run(algorithm_id,truth_id,observation_cutoff_utc,mask_policy_json,started_utc,status) SELECT algorithm_id,1,@cutoff,json_object('providerRequests','archive-first-fetch-missing','decisionModel','media-first-exact-credit-reconstruction'),@now,'running' FROM algorithm WHERE name='person-housekeeping' AND version='media-first-v1'",s=>{s.TryBind("@cutoff",cutoff.ToString("o"));s.TryBind("@now",now);}); id=LastId(x);
+                Exec(x,"INSERT INTO housekeeping_run(run_id,algorithm_version,base_truth_id,phase,progress,status,observation_cutoff_utc,started_utc,heartbeat_utc) VALUES(@run,'media-first-v1',1,'starting',1,'running',@cutoff,@now,@now)",s=>{s.TryBind("@run",id);s.TryBind("@cutoff",cutoff.ToString("o"));s.TryBind("@now",now);});}); return id;
+        }
+
+        private static void CompleteMediaFirst(IDatabaseConnection x,long run)
+        {
+            var now=Now();
+            Exec(x,"UPDATE housekeeping_run SET derived_truth_id=NULL,phase='completed',progress=100,status='completed',heartbeat_utc=@now,completed_utc=@now WHERE run_id=@run",s=>{s.TryBind("@now",now);s.TryBind("@run",run);});
+            Exec(x,"UPDATE experiment_run SET status='completed',completed_utc=@now WHERE run_id=@run",s=>{s.TryBind("@now",now);s.TryBind("@run",run);});
         }
 
         private static void IdentitySignals(IDatabaseConnection x,long run)=>Exec(x,@"INSERT INTO housekeeping_signal(run_id,person_emby_id,subject_truth_entity_id,provider,signal_type,current_external_id,candidate_external_id,current_name,candidate_name,score,confidence,evidence_text,created_utc)
@@ -594,10 +586,76 @@ WHERE r.run_id=@run AND r.provider='tmdb' AND r.acceptance_path='cross-provider-
         }
 
         private static void DeltaTruth(IDatabaseConnection x,long run){Exec(x,"INSERT INTO truth(name,parent_truth_id,created_utc,status,description) VALUES(@name,1,@now,'frozen',@description)",s=>{s.TryBind("@name","Person housekeeping delta run "+run);s.TryBind("@now",Now());s.TryBind("@description","Delta truth from normalized-v14 parent cases and ordered actions run "+run);});long truth=LastId(x);Exec(x,"INSERT OR REPLACE INTO truth_entity_delta SELECT @truth,subject_truth_entity_id,'update',proposed_value,'update','housekeeping-run:'||@run FROM housekeeping_recommendation WHERE run_id=@run AND recommendation_type='rename-person' ORDER BY CASE provider WHEN 'tmdb' THEN 1 ELSE 0 END",s=>{s.TryBind("@truth",truth);s.TryBind("@run",run);});Exec(x,"INSERT OR REPLACE INTO truth_identity_delta SELECT @truth,subject_truth_entity_id,provider,CASE recommendation_type WHEN 'remove-provider-id' THEN 'remove' ELSE 'set' END,proposed_value,'housekeeping-run:'||@run FROM housekeeping_recommendation WHERE run_id=@run AND recommendation_type IN('remove-provider-id','replace-provider-id') ORDER BY confidence",s=>{s.TryBind("@truth",truth);s.TryBind("@run",run);});Exec(x,"UPDATE housekeeping_run SET derived_truth_id=@truth,phase='delta-truth',progress=96,heartbeat_utc=@now WHERE run_id=@run",s=>{s.TryBind("@truth",truth);s.TryBind("@now",Now());s.TryBind("@run",run);});}
-        private static void Complete(IDatabaseConnection x,long run){var now=Now();Exec(x,"INSERT INTO experiment_metric SELECT @run,'person',recommendation_type,'recommendation_count',count(*) FROM housekeeping_recommendation WHERE run_id=@run GROUP BY recommendation_type",s=>s.TryBind("@run",run));Exec(x,"UPDATE housekeeping_run SET phase='completed',progress=100,status='completed',heartbeat_utc=@now,completed_utc=@now WHERE run_id=@run",s=>{s.TryBind("@now",now);s.TryBind("@run",run);});Exec(x,"UPDATE experiment_run SET status='completed',completed_utc=@now WHERE run_id=@run",s=>{s.TryBind("@now",now);s.TryBind("@run",run);});}
+        private static void Complete(IDatabaseConnection x,long run){var now=Now();Exec(x,"INSERT INTO experiment_metric SELECT @run,'person',case_type,'review_case_count',count(*) FROM housekeeping_case WHERE run_id=@run AND decision_state<>'suppressed' GROUP BY case_type",s=>s.TryBind("@run",run));Exec(x,"UPDATE housekeeping_run SET derived_truth_id=NULL,phase='completed',progress=100,status='completed',heartbeat_utc=@now,completed_utc=@now WHERE run_id=@run",s=>{s.TryBind("@now",now);s.TryBind("@run",run);});Exec(x,"UPDATE experiment_run SET status='completed',completed_utc=@now WHERE run_id=@run",s=>{s.TryBind("@now",now);s.TryBind("@run",run);});}
         private void Stop(long run,string status,string error){try{Tx(x=>{Exec(x,"UPDATE housekeeping_run SET status=@s,phase=@s,heartbeat_utc=@now,completed_utc=@now,error=@e WHERE run_id=@run",q=>{q.TryBind("@s",status);q.TryBind("@now",Now());q.TryBind("@e",error);q.TryBind("@run",run);});Exec(x,"UPDATE experiment_run SET status=@s,completed_utc=@now WHERE run_id=@run",q=>{q.TryBind("@s",status);q.TryBind("@now",Now());q.TryBind("@run",run);});});}catch{}}
 
-        public List<HousekeepingResultRow> LatestResults(){var a=new List<HousekeepingResultRow>();const string sql=@"WITH RECURSIVE base AS (
+        public List<HousekeepingResultRow> LatestResults()
+        {
+            var rows=new List<HousekeepingResultRow>();
+            const string sql=@"SELECT projection_id,coalesce(cast(substr(current_emby_ids,1,instr(current_emby_ids||',',',')-1) AS integer),0),summary,
+decision_class,CASE decision_class WHEN 'auto-commit' THEN 'committed-to-derived-truth' ELSE 'decision-required' END,'TMDB,TVDB,IMDB,WIKIDATA',
+current_emby_ids,proposed_emby_ids,current_names,proposed_names,current_tmdb_ids,proposed_tmdb_ids,current_tvdb_ids,proposed_tvdb_ids,current_imdb_ids,proposed_imdb_ids,
+operation_confidence,supporting_media_count,affected_relationship_count,evidence_summary,decision_class,identity_confidence,relationship_confidence,truth_result
+FROM media_truth_latest_projection ORDER BY CASE decision_class WHEN 'human-review' THEN 0 ELSE 1 END,operation_confidence,projection_id";
+            using(var s=db.PrepareStatement(sql))foreach(var r in s.ExecuteQuery())rows.Add(new HousekeepingResultRow{
+                ProposalId=r.GetInt64(0),EmbyPersonId=r.GetInt64(1),Person=T(r,2),Recommendation=T(r,3),SignalType=T(r,4),Provider=T(r,5),
+                CurrentEmbyIds=T(r,6),ProposedEmbyIds=T(r,7),CurrentName=T(r,8),ProposedName=T(r,9),CurrentTmdbIds=T(r,10),ProposedTmdbIds=T(r,11),CurrentTvdbIds=T(r,12),ProposedTvdbIds=T(r,13),CurrentImdbIds=T(r,14),ProposedImdbIds=T(r,15),
+                Confidence=r.IsDBNull(16)?0:r.GetDouble(16),LinkedMedia=r.GetInt(17),CheckedMedia=r.GetInt(18),Evidence=T(r,19),ReviewStatus=T(r,20),AcceptancePath=T(r,4),IdentityConfidence=r.IsDBNull(21)?0:r.GetDouble(21),RelationshipConfidence=r.IsDBNull(22)?0:r.GetDouble(22),OperationConfidence=r.IsDBNull(16)?0:r.GetDouble(16),LinkedMediaEvidence=T(r,23)});
+            var byId=rows.ToDictionary(v=>v.ProposalId);
+            using(var q=db.PrepareStatement(@"SELECT c.change_id,p.projection_id,c.change_order,c.change_type,coalesce(c.provider,''),coalesce(c.precondition,''),
+CASE c.decision_class WHEN 'human-review' THEN 1 ELSE 0 END,c.operation_confidence,c.summary,c.source_emby_id,c.target_emby_id,c.media_emby_id
+FROM media_truth_change c JOIN media_truth_projection p ON p.run_id=c.run_id AND
+ ((c.truth_person_id IS NOT NULL AND p.projection_key='person:'||c.truth_person_id) OR (c.issue_id IS NOT NULL AND p.projection_key='issue:'||c.issue_id))
+WHERE p.run_id=(SELECT max(run_id) FROM media_truth_run WHERE status='completed') ORDER BY p.projection_id,c.change_order,c.change_id"))foreach(var r in q.ExecuteQuery())
+            {
+                if(!byId.TryGetValue(r.GetInt64(1),out var parent))continue;var list=parent.DetailRows.ToList();var target=(r.IsDBNull(9)?string.Empty:"Emby "+r.GetInt64(9))+(r.IsDBNull(10)?string.Empty:" -> Emby "+r.GetInt64(10))+(r.IsDBNull(11)?string.Empty:" on media "+r.GetInt64(11));
+                list.Add(new HousekeepingCaseDetailRow{DetailId="action:"+r.GetInt64(0),Section="Proposed actions",Order=r.GetInt(2),Type=T(r,3),Result=r.GetInt(6)==1?"Operator decision":"Proposed",Scope=T(r,5),Provider=T(r,4),Target=target,Detail=T(r,8),Confidence=r.GetDouble(7)});parent.DetailRows=list.ToArray();
+            }
+            using(var q=db.PrepareStatement(@"SELECT l.truth_person_id,pj.projection_id,l.emby_person_id,l.disposition,'',l.disposition,l.summary,e.name,e.tmdb_id,e.tvdb_id,e.imdb_id
+FROM media_truth_lineage l JOIN media_truth_person p ON p.truth_person_id=l.truth_person_id JOIN media_truth_projection pj ON pj.run_id=p.run_id AND pj.projection_key='person:'||p.truth_person_id
+JOIN emby_item e ON e.emby_id=l.emby_person_id WHERE p.run_id=(SELECT max(run_id) FROM media_truth_run WHERE status='completed') ORDER BY pj.projection_id,l.emby_person_id"))foreach(var r in q.ExecuteQuery())
+            {
+                if(!byId.TryGetValue(r.GetInt64(1),out var parent))continue;var list=parent.DetailRows.ToList();var identities="name="+T(r,7)+"; TMDB="+T(r,8)+"; TVDB="+T(r,9)+"; IMDb="+T(r,10);
+                list.Add(new HousekeepingCaseDetailRow{DetailId="participant:"+r.GetInt64(0),Section="Participants",Order=500,Type=T(r,3),Result=T(r,5),Scope=T(r,4),Target="Emby "+r.GetInt64(2),Detail=identities+". "+T(r,6),Confidence=parent.IdentityConfidence});parent.DetailRows=list.ToArray();
+            }
+            using(var q=db.PrepareStatement(@"SELECT rowid,pj.projection_id,p.person_key,i.provider,i.external_id,i.identity_state,i.provenance,i.confidence,p.preferred_name,i.summary
+FROM media_truth_identity i JOIN media_truth_person p ON p.truth_person_id=i.truth_person_id JOIN media_truth_projection pj ON pj.run_id=p.run_id AND pj.projection_key='person:'||p.truth_person_id
+WHERE p.run_id=(SELECT max(run_id) FROM media_truth_run WHERE status='completed') ORDER BY pj.projection_id,i.provider,i.external_id"))foreach(var r in q.ExecuteQuery())
+            {
+                if(!byId.TryGetValue(r.GetInt64(1),out var parent))continue;var list=parent.DetailRows.ToList();
+                list.Add(new HousekeepingCaseDetailRow{DetailId="identity:"+r.GetInt64(0),Section="Identity clusters",Order=600,Type=T(r,5),Result=T(r,6),Scope=T(r,2),Provider=T(r,3),Target=T(r,3).ToUpperInvariant()+" "+T(r,4),Detail=(string.IsNullOrWhiteSpace(T(r,8))?string.Empty:"canonical name="+T(r,8)+". ")+T(r,9),Confidence=r.GetDouble(7)});parent.DetailRows=list.ToArray();
+            }
+            using(var q=db.PrepareStatement(@"SELECT cr.truth_credit_id,pj.projection_id,p.person_key,cr.media_emby_id,m.item_type,cr.relationship_type,cr.relationship_role,cr.current_emby_person_id,p.continuity_emby_id,cr.disposition,cr.relationship_confidence,cr.summary
+FROM media_truth_credit cr JOIN media_truth_person p ON p.truth_person_id=cr.truth_person_id JOIN media_truth_projection pj ON pj.run_id=cr.run_id AND pj.projection_key='person:'||p.truth_person_id
+JOIN emby_item m ON m.emby_id=cr.media_emby_id WHERE cr.run_id=(SELECT max(run_id) FROM media_truth_run WHERE status='completed') ORDER BY pj.projection_id,cr.media_emby_id"))foreach(var r in q.ExecuteQuery())
+            {
+                if(!byId.TryGetValue(r.GetInt64(1),out var parent))continue;var list=parent.DetailRows.ToList();var owners="Emby "+r.GetInt64(7)+(r.IsDBNull(8)?string.Empty:" -> Emby "+r.GetInt64(8));
+                list.Add(new HousekeepingCaseDetailRow{DetailId="relationship:"+r.GetInt64(0),Section="Relationship decisions",Order=700,Type=T(r,5),Result=T(r,9),Scope=T(r,2),Target=owners+" on media "+r.GetInt64(3),Detail=T(r,4)+"; role="+T(r,6)+". "+T(r,11),Confidence=r.GetDouble(10)});parent.DetailRows=list.ToArray();
+            }
+            using(var e=db.PrepareStatement(@"SELECT rowid,pj.projection_id,e.evidence_state,'evidence','exact-media',e.provider,e.summary,e.confidence,cr.media_emby_id
+FROM media_truth_credit_evidence e JOIN media_truth_credit cr ON cr.truth_credit_id=e.truth_credit_id JOIN media_truth_person p ON p.truth_person_id=cr.truth_person_id
+JOIN media_truth_projection pj ON pj.run_id=cr.run_id AND pj.projection_key='person:'||p.truth_person_id
+WHERE cr.run_id=(SELECT max(run_id) FROM media_truth_run WHERE status='completed') ORDER BY pj.projection_id,cr.media_emby_id,e.provider"))foreach(var r in e.ExecuteQuery())
+            {
+                if(!byId.TryGetValue(r.GetInt64(1),out var parent))continue;var list=parent.DetailRows.ToList();list.Add(new HousekeepingCaseDetailRow{DetailId="relationship-evidence:"+r.GetInt64(0),Section="Relationship evidence",Order=2000,Type=T(r,2),Result=T(r,3),Scope=T(r,4),Provider=T(r,5),Target="Emby media "+r.GetInt64(8),Detail=T(r,6),Confidence=r.GetDouble(7)});parent.DetailRows=list.ToArray();
+            }
+            return rows;
+        }
+
+        internal List<string> DescribeCasesForTesting(long run,long embyId)
+        {
+            var rows=new List<string>();
+            using(var s=db.PrepareStatement(@"SELECT c.case_id,c.case_type,c.decision_state,c.operation_confidence,c.summary,
+(SELECT count(*) FROM housekeeping_case_action a WHERE a.case_id=c.case_id AND a.action_type NOT IN('review-identity','review-relationship')) mutations
+FROM housekeeping_case c WHERE c.run_id=@run AND EXISTS(SELECT 1 FROM housekeeping_case_participant p WHERE p.case_id=c.case_id AND p.emby_id=@emby) ORDER BY c.case_id"))
+            {
+                s.TryBind("@run",run);s.TryBind("@emby",embyId);
+                foreach(var r in s.ExecuteQuery())rows.Add("case="+r.GetInt64(0)+" type="+T(r,1)+" state="+T(r,2)+" operationConfidence="+(r.IsDBNull(3)?0:r.GetDouble(3))+" mutations="+r.GetInt(5)+" summary="+T(r,4));
+            }
+            return rows;
+        }
+
+        private List<HousekeepingResultRow> LegacyLatestResults(){var a=new List<HousekeepingResultRow>();const string sql=@"WITH RECURSIVE base AS (
 SELECT r.*,CASE WHEN r.recommendation_type='review-merge' THEN CASE WHEN instr(r.proposed_value,',')>0 THEN r.proposed_value ELSE r.current_value END ELSE cast(r.person_emby_id AS text) END participant_ids
 FROM housekeeping_latest_results r), parts(recommendation_id,rest,person_id) AS (
 SELECT recommendation_id,participant_ids||',','' FROM base
@@ -642,6 +700,36 @@ FROM base r LEFT JOIN identity_agg i ON i.recommendation_id=r.recommendation_id 
         {
             const string sql=@"WITH latest AS (SELECT run_id FROM housekeeping_run WHERE status='completed' ORDER BY run_id DESC LIMIT 1), p AS (SELECT entity_type,metric_name,metric_value FROM experiment_metric WHERE run_id=(SELECT run_id FROM latest) AND cohort='acquisition') SELECT upper(entity_type)||': '||coalesce(max(CASE WHEN metric_name='people_evaluated' THEN metric_value END),0)||' people; '||coalesce(max(CASE WHEN metric_name='candidates_examined' THEN metric_value END),0)||' candidate identities examined; '||coalesce(max(CASE WHEN metric_name='provider_calls' THEN metric_value END),0)||' provider calls; '||coalesce(max(CASE WHEN metric_name='cache_hits' THEN metric_value END),0)||' cache hits; worst person '||coalesce(max(CASE WHEN metric_name='maximum_candidates_for_one_person' THEN metric_value END),0)||' candidates; '||coalesce(max(CASE WHEN metric_name='people_over_eight_candidates' THEN metric_value END),0)||' people exceeded 8; '||coalesce(max(CASE WHEN metric_name='decisive_linked_media_stops' THEN metric_value END),0)||' stopped after decisive linked-media evidence.' FROM p GROUP BY entity_type ORDER BY entity_type";
             var lines=new List<string>();using(var s=db.PrepareStatement(sql))foreach(var r in s.ExecuteQuery())lines.Add(T(r,0));return lines.Count==0?"Acquisition measurements are unavailable for this run.":string.Join(" ",lines);
+        }
+        internal void MaterializeCasesForTesting(long run)=>Tx(x=>HousekeepingCasePlanner.Materialize(x,run));
+        internal List<string> PlannerTimingsForTesting()=>new List<string>(HousekeepingCasePlanner.LastTimings);
+        internal List<string> NamedRegressionFailuresForTesting(long run)
+        {
+            var failures=new List<string>();
+            long Count(string sql)=>Scalar(db,sql,s=>s.TryBind("@run",run));
+
+            // This assertion is enabled only after the linked-cast acquisition that
+            // discovered TVDB 7882354 has been preserved in the fixture.
+            if(Count("SELECT count(*) FROM resolution_candidate WHERE emby_id=16398 AND entity_type='person' AND tvdb_id='7882354'")>0)
+            {
+                if(Count(@"SELECT count(*) FROM housekeeping_case c WHERE c.run_id=@run AND c.case_type='merge-duplicate-people' AND c.decision_state='actionable' AND c.anchor_emby_id=16398 AND EXISTS(SELECT 1 FROM housekeeping_case_participant p WHERE p.case_id=c.case_id AND p.emby_id=16398) AND EXISTS(SELECT 1 FROM housekeeping_case_participant p WHERE p.case_id=c.case_id AND p.emby_id=438951)")!=1)
+                    failures.Add("Kristin Bauer Emby 16398/438951 did not produce exactly one actionable duplicate merge");
+                if(Count(@"SELECT count(*) FROM housekeeping_case_identity i JOIN housekeeping_case c ON c.case_id=i.case_id WHERE c.run_id=@run AND c.anchor_emby_id=16398 AND i.cluster_key='assigned' AND i.provider='tvdb' AND i.provider_person_id='7882354' AND i.identity_state='corroborating' AND i.provenance='provider-native-media'")!=1)
+                    failures.Add("Kristin Bauer case did not expose TVDB 7882354 as one supporting provider-side identity");
+                if(Count(@"SELECT count(*) FROM housekeeping_case_relationship_evidence e JOIN housekeeping_case_relationship r ON r.case_relationship_id=e.case_relationship_id JOIN housekeeping_case c ON c.case_id=e.case_id WHERE c.run_id=@run AND c.anchor_emby_id=16398 AND r.media_emby_id=331602 AND e.provider='tvdb' AND e.provider_person_id='7882354' AND e.evidence_state='exact-support' AND e.polarity='positive'")!=1)
+                    failures.Add("Kristin Bauer Undercover relationship lacks exact positive TVDB 7882354 evidence");
+                if(Count(@"SELECT count(*) FROM housekeeping_case_action a JOIN housekeeping_case c ON c.case_id=a.case_id WHERE c.run_id=@run AND c.anchor_emby_id=16398 AND a.action_type='move-relationship' AND a.source_emby_id=438951 AND a.target_emby_id=16398")!=2)
+                    failures.Add("Kristin Bauer merge does not contain exactly the two Emby 438951-to-16398 relationship moves");
+            }
+
+            if(Count("SELECT count(*) FROM emby_item WHERE emby_id IN(34686,354625)")==2)
+            {
+                if(Count(@"SELECT count(*) FROM housekeeping_case c WHERE c.run_id=@run AND c.case_type='reconcile-person' AND c.operation_confidence=0 AND EXISTS(SELECT 1 FROM housekeeping_case_participant p WHERE p.case_id=c.case_id AND p.emby_id=34686) AND EXISTS(SELECT 1 FROM housekeeping_case_participant p WHERE p.case_id=c.case_id AND p.emby_id=354625) AND NOT EXISTS(SELECT 1 FROM housekeeping_case_action a WHERE a.case_id=c.case_id AND a.action_type NOT IN('review-identity','review-relationship'))")!=1)
+                    failures.Add("Ian Roberts Emby 34686/354625 did not remain one zero-mutation reconciliation");
+            }
+            if(Count(@"SELECT count(*) FROM housekeeping_case c WHERE c.run_id=@run AND EXISTS(SELECT 1 FROM housekeeping_case_participant p WHERE p.case_id=c.case_id AND p.emby_id=16398) AND EXISTS(SELECT 1 FROM housekeeping_case_participant p WHERE p.case_id=c.case_id AND p.emby_id IN(65379,76725))")!=0)
+                failures.Add("Kristin Bauer was combined with Beverley Elliott or Meghan Ory through media co-occurrence");
+            return failures;
         }
         private void Tx(Action<IDatabaseConnection>a)=>db.RunInTransaction(a,TransactionMode.Immediate);
         private static void State(IDatabaseConnection x,long run,string phase,double progress)=>Exec(x,"UPDATE housekeeping_run SET phase=@p,progress=@n,heartbeat_utc=@now WHERE run_id=@run",s=>{s.TryBind("@p",phase);s.TryBind("@n",progress);s.TryBind("@now",Now());s.TryBind("@run",run);});

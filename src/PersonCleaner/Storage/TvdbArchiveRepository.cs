@@ -408,11 +408,18 @@ namespace PersonCleaner.Storage
         {
             var frozen=new List<long>();lock(sync)
             {
-                using(var cohort=db.PrepareStatement("SELECT cast(substr(cache_key,length('evidence-cohort:tvdb:')+1) AS integer) FROM fetch_cache WHERE cache_key LIKE 'evidence-cohort:tvdb:%' AND state IN('cohort-active','success') ORDER BY fetched_utc,cache_key LIMIT 1000"))foreach(var r in cohort.ExecuteQuery())frozen.Add(r.GetInt64(0));
+                using(var cohort=db.PrepareStatement(@"WITH original AS (
+SELECT cast(substr(cache_key,length('evidence-cohort:tvdb:')+1) AS integer) emby_id FROM fetch_cache WHERE cache_key LIKE 'evidence-cohort:tvdb:%' AND state IN('cohort-active','success') ORDER BY fetched_utc,cache_key LIMIT 1000), duplicated AS (
+SELECT p.emby_id FROM emby_item p JOIN (SELECT tvdb_id FROM emby_item WHERE item_type='person' AND tvdb_id IS NOT NULL GROUP BY tvdb_id HAVING count(*)>1) d ON d.tvdb_id=p.tvdb_id WHERE p.item_type='person')
+SELECT emby_id FROM original UNION SELECT emby_id FROM duplicated ORDER BY emby_id"))foreach(var r in cohort.ExecuteQuery())frozen.Add(r.GetInt64(0));
             }
             if(frozen.Count>0)return frozen;
             var result=new List<long>(); lock(sync) using(var s=db.PrepareStatement(@"WITH linked AS (SELECT person_emby_id,count(DISTINCT media_emby_id) linked FROM emby_relationship GROUP BY person_emby_id), duplicates AS (SELECT tvdb_id FROM emby_item WHERE item_type='person' AND tvdb_id IS NOT NULL GROUP BY tvdb_id HAVING count(*)>1), supported AS (SELECT p.emby_id,count(DISTINCT er.media_emby_id) media FROM emby_item p JOIN emby_relationship er ON er.person_emby_id=p.emby_id JOIN emby_item m ON m.emby_id=er.media_emby_id LEFT JOIN item_resolution mr ON mr.emby_id=m.emby_id JOIN credit c ON c.subject_tvdb_id=coalesce(m.tvdb_id,mr.resolved_tvdb_id) AND c.subject_type=m.item_type AND c.person_tvdb_id=p.tvdb_id WHERE p.item_type='person' AND p.tvdb_id IS NOT NULL GROUP BY p.emby_id)
 SELECT p.emby_id FROM emby_item p JOIN linked l ON l.person_emby_id=p.emby_id LEFT JOIN item_resolution r ON r.emby_id=p.emby_id LEFT JOIN tvdb_entity pe ON pe.entity_type='person' AND pe.tvdb_id=p.tvdb_id LEFT JOIN duplicates d ON d.tvdb_id=p.tvdb_id LEFT JOIN supported s ON s.emby_id=p.emby_id LEFT JOIN (SELECT DISTINCT p.emby_id FROM emby_item p JOIN remote_id rt ON rt.entity_type='person' AND rt.tvdb_id=p.tvdb_id AND rt.source_name='TheMovieDB.com' AND rt.remote_id<>p.tmdb_id JOIN remote_id ri ON ri.entity_type='person' AND ri.tvdb_id=p.tvdb_id AND ri.source_name='IMDB' AND ri.remote_id<>p.imdb_id WHERE p.item_type='person' AND p.tmdb_id IS NOT NULL AND p.tvdb_id IS NOT NULL AND p.imdb_id IS NOT NULL) cf ON cf.emby_id=p.emby_id WHERE p.item_type='person' AND (p.tvdb_id IS NULL OR r.emby_id IS NULL OR r.provenance IN('direct-unavailable','unresolved') OR (p.tvdb_id IS NOT NULL AND pe.tvdb_id IS NULL) OR d.tvdb_id IS NOT NULL OR coalesce(s.media,0)<l.linked) ORDER BY CASE WHEN cf.emby_id IS NOT NULL THEN 0 WHEN r.provenance='direct-unavailable' THEN 1 WHEN d.tvdb_id IS NOT NULL THEN 2 WHEN p.tvdb_id IS NULL THEN 4 ELSE 3 END,p.emby_id LIMIT 1000")){s.TryBind("@now",Now());foreach(var r in s.ExecuteQuery()) result.Add(r.GetInt64(0));} foreach(var id in result)MarkFetch("evidence-cohort:tvdb:"+id,true,"Frozen evaluation cohort"); return result;
+        }
+        public bool HasDuplicatedPersonIdentity(long embyId)
+        {
+            lock(sync) using(var s=db.PrepareStatement("SELECT EXISTS(SELECT 1 FROM emby_item p JOIN emby_item d ON d.item_type='person' AND d.emby_id<>p.emby_id AND d.tvdb_id=p.tvdb_id WHERE p.emby_id=@emby AND p.tvdb_id IS NOT NULL)")){s.TryBind("@emby",embyId);foreach(var r in s.ExecuteQuery())return r.GetInt(0)!=0;}return false;
         }
         public int GetLinkedMediaCount(long personEmbyId)
         {

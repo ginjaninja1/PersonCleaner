@@ -1,0 +1,153 @@
+using Emby.Web.GenericEdit;
+using Emby.Web.GenericEdit.Elements;
+using Emby.Web.GenericEdit.Elements.List;
+using MediaBrowser.Controller;
+using MediaBrowser.Model.Attributes;
+using MediaBrowser.Model.Logging;
+using MediaBrowser.Model.Plugins;
+using MediaBrowser.Model.Plugins.UI.Views;
+using MediaBrowser.Model.Serialization;
+using MediaBrowser.Model.Tasks;
+using PersonCleaner.Configuration;
+using System;
+using System.ComponentModel;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace PersonCleaner.V2.UI
+{
+    public sealed class ConfigurationUI : EditableOptionsBase
+    {
+        public override string EditorTitle => "PersonCleaner configuration";
+        public override string EditorDescription => "The calculation runs as an Emby scheduled task. Emby metadata is read-only; raw provider payloads, flattened evidence and proposed decisions live in PersonCleaner's private workspace.";
+
+        public CaptionItem ScopeHeading { get; set; } = new CaptionItem("Scope and safety");
+        [DisplayName("Enable PersonCleaner")]
+        public bool EnablePlugin { get; set; }
+        [DisplayName("Sandbox mode")]
+        [Description("Recommended while developing: select a stable, deterministic sample from each media pool instead of scanning the whole library.")]
+        public bool SandboxMode { get; set; } = true;
+        [DisplayName("Samples per media pool")]
+        [Description("Sandbox selects this many movies and this many series. The default is 50 + 50.")]
+        public int SandboxSampleSizePerMediaType { get; set; } = 50;
+        [DisplayName("Stable sample seed")]
+        [Description("Keep this unchanged for repeatable test runs; change it to evaluate a different cohort.")]
+        public int SandboxSeed { get; set; }
+
+        public CaptionItem ProviderHeading { get; set; } = new CaptionItem("Provider access and caching");
+        [DisplayName("TMDB v3 API key")]
+        [Description("Stored only in Emby's plugin configuration. It is never written to the evidence database, payload cache or logs.")]
+        public string TmdbApiKey { get; set; }
+        [DisplayName("TVDB v4 API key")]
+        [Description("Stored only in Emby's plugin configuration.")]
+        public string TvdbApiKey { get; set; }
+        [DisplayName("TVDB subscriber PIN (optional)")]
+        public string TvdbSubscriberPin { get; set; }
+        [DisplayName("Successful payload TTL (days)")]
+        [Description("Fresh payloads bypass the network and JSON parsing. Expired responses are hashed; unchanged payloads refresh the TTL without re-flattening.")]
+        public int CacheTtlDays { get; set; } = 7;
+        [DisplayName("Failed request retry delay (minutes)")]
+        public int FailureRetryMinutes { get; set; } = 30;
+        [DisplayName("TMDB maximum concurrent requests")]
+        [Description("Bounded TMDB worker count. TMDB and TVDB run in parallel; 4 is the conservative default.")]
+        public int TmdbMaximumConcurrentRequests { get; set; } = 4;
+        [DisplayName("TVDB maximum concurrent requests")]
+        [Description("Bounded TVDB worker count with one shared bearer token; 2 is the conservative default.")]
+        public int TvdbMaximumConcurrentRequests { get; set; } = 2;
+        [DisplayName("TMDB minimum interval (milliseconds)")]
+        public int TmdbMinimumRequestIntervalMilliseconds { get; set; } = 40;
+        [DisplayName("TVDB minimum interval (milliseconds)")]
+        public int TvdbMinimumRequestIntervalMilliseconds { get; set; } = 150;
+
+        public CaptionItem ScoringHeading { get; set; } = new CaptionItem("Evidence scoring");
+        [DisplayName("Filmography overlap weight")]
+        public double FilmographyWeight { get; set; }
+        [DisplayName("Birthday match weight")]
+        public double BirthdayWeight { get; set; }
+        [DisplayName("Exact normalized-name weight")]
+        public double ExactNameWeight { get; set; }
+        [DisplayName("Provider-alias weight")]
+        public double AliasWeight { get; set; }
+        [DisplayName("Birthday mismatch penalty")]
+        public double BirthdayMismatchPenalty { get; set; }
+        [DisplayName("Automatic alignment threshold")]
+        public double AutomaticMatchThreshold { get; set; }
+        [DisplayName("Human-review threshold")]
+        public double HumanReviewThreshold { get; set; }
+
+        public GenericItemList ScheduledTaskLink { get; set; } = new GenericItemList();
+    }
+
+    internal sealed class ConfigurationPageView : PageViewBase
+    {
+        private readonly IJsonSerializer json;
+        private readonly ITaskManager tasks;
+        private readonly ILogger logger;
+        public ConfigurationPageView(PluginInfo plugin, IServerApplicationHost host, ILogger logger) : base(plugin.Id)
+        {
+            this.logger = logger; json = host.Resolve<IJsonSerializer>(); tasks = host.Resolve<ITaskManager>(); ShowSave = true; Rebuild();
+        }
+
+        public override Task<IPluginUIView> RunCommand(string itemId, string commandId, string data)
+        {
+            if (!string.IsNullOrWhiteSpace(data))
+            {
+                try
+                {
+                    var incoming = json.DeserializeFromString<ConfigurationUI>(data);
+                    if (incoming != null) Save(incoming);
+                }
+                catch (Exception ex) { logger.ErrorException("Unable to save PersonCleaner configuration", ex); }
+                Rebuild(); Refresh();
+            }
+            return Task.FromResult<IPluginUIView>(this);
+        }
+
+        private void Save(ConfigurationUI source)
+        {
+            var target = Plugin.Instance.Configuration;
+            target.EnablePlugin = source.EnablePlugin;
+            target.ExecutionMode = source.SandboxMode ? "Sandbox" : "Full";
+            target.SandboxSampleSizePerMediaType = Clamp(source.SandboxSampleSizePerMediaType, 1, 500);
+            target.SandboxSeed = source.SandboxSeed;
+            target.TmdbApiKey = (source.TmdbApiKey ?? string.Empty).Trim();
+            target.TvdbApiKey = (source.TvdbApiKey ?? string.Empty).Trim();
+            target.TvdbSubscriberPin = (source.TvdbSubscriberPin ?? string.Empty).Trim();
+            target.CacheTtlDays = Clamp(source.CacheTtlDays, 1, 365);
+            target.FailureRetryMinutes = Clamp(source.FailureRetryMinutes, 1, 10080);
+            target.TmdbMaximumConcurrentRequests = Clamp(source.TmdbMaximumConcurrentRequests, 1, 16);
+            target.TvdbMaximumConcurrentRequests = Clamp(source.TvdbMaximumConcurrentRequests, 1, 8);
+            target.TmdbMinimumRequestIntervalMilliseconds = Clamp(source.TmdbMinimumRequestIntervalMilliseconds, 0, 10000);
+            target.TvdbMinimumRequestIntervalMilliseconds = Clamp(source.TvdbMinimumRequestIntervalMilliseconds, 0, 10000);
+            target.FilmographyWeight = Unit(source.FilmographyWeight);
+            target.BirthdayWeight = Unit(source.BirthdayWeight);
+            target.ExactNameWeight = Unit(source.ExactNameWeight);
+            target.AliasWeight = Unit(source.AliasWeight);
+            target.BirthdayMismatchPenalty = Unit(source.BirthdayMismatchPenalty);
+            target.AutomaticMatchThreshold = Unit(source.AutomaticMatchThreshold);
+            target.HumanReviewThreshold = Math.Min(Unit(source.HumanReviewThreshold), target.AutomaticMatchThreshold);
+            Plugin.Instance.SaveConfiguration();
+            logger.Info("PersonCleaner configuration saved: mode={0}, sample={1}+{1}, TMDB key={2}, TVDB key={3}, TMDB concurrency={4}, TVDB concurrency={5}", target.ExecutionMode, target.SandboxSampleSizePerMediaType, !string.IsNullOrWhiteSpace(target.TmdbApiKey), !string.IsNullOrWhiteSpace(target.TvdbApiKey), target.TmdbMaximumConcurrentRequests, target.TvdbMaximumConcurrentRequests);
+        }
+
+        private void Rebuild()
+        {
+            var c = Plugin.Instance.Configuration;
+            var worker = tasks.ScheduledTasks.FirstOrDefault(x => string.Equals(x.ScheduledTask.Key, "PersonCleanerEntityResolutionV2", StringComparison.Ordinal));
+            var link = worker == null ? "/scheduledtasks" : "/scheduledtask?id=" + worker.Id;
+            ContentData = new ConfigurationUI
+            {
+                EnablePlugin = c.EnablePlugin, SandboxMode = !string.Equals(c.ExecutionMode, "Full", StringComparison.OrdinalIgnoreCase), SandboxSampleSizePerMediaType = c.SandboxSampleSizePerMediaType, SandboxSeed = c.SandboxSeed,
+                TmdbApiKey = c.TmdbApiKey, TvdbApiKey = c.TvdbApiKey, TvdbSubscriberPin = c.TvdbSubscriberPin, CacheTtlDays = c.CacheTtlDays, FailureRetryMinutes = c.FailureRetryMinutes,
+                TmdbMaximumConcurrentRequests = c.TmdbMaximumConcurrentRequests, TvdbMaximumConcurrentRequests = c.TvdbMaximumConcurrentRequests,
+                TmdbMinimumRequestIntervalMilliseconds = c.TmdbMinimumRequestIntervalMilliseconds, TvdbMinimumRequestIntervalMilliseconds = c.TvdbMinimumRequestIntervalMilliseconds,
+                FilmographyWeight = c.FilmographyWeight, BirthdayWeight = c.BirthdayWeight, ExactNameWeight = c.ExactNameWeight, AliasWeight = c.AliasWeight, BirthdayMismatchPenalty = c.BirthdayMismatchPenalty,
+                AutomaticMatchThreshold = c.AutomaticMatchThreshold, HumanReviewThreshold = c.HumanReviewThreshold,
+                ScheduledTaskLink = new GenericItemList { new GenericListItem { PrimaryText = "Run or schedule evidence calculation", SecondaryText = "Hydration and calculation are background work; the dashboard stays query-only.", Icon = IconNames.schedule, Status = ItemStatus.Succeeded, HyperLink = link, HyperLinkTargetExternal = false } }
+            };
+        }
+
+        private static int Clamp(int value, int minimum, int maximum) => Math.Max(minimum, Math.Min(maximum, value));
+        private static double Unit(double value) => Math.Max(0, Math.Min(1, value));
+    }
+}
