@@ -4,7 +4,7 @@
 
 1. **Local media is the anchor.** Provider person IDs are mutable observations, not the internal definition of a human identity.
 2. **Media discovers people.** Only people credited on selected media enter an evaluation cohort.
-3. **Emby is read-only.** All computed state and operator overrides are private shadow data.
+3. **Evidence collection is read-only; commits are explicit.** Computed state and operator overrides remain private shadow data until an operator reviews a scoped change dialog and presses **Update Emby**.
 4. **Network work is scheduled.** The UI executes bounded indexed reads and offline recalculation only.
 5. **A name is never proof.** Normalized names and aliases can corroborate an already media-blocked candidate; they cannot create a candidate edge alone.
 6. **Missing evidence is not destructive evidence.** Missing provider support becomes a review state.
@@ -163,7 +163,7 @@ Provider components are mapped to local Emby people through indexed current prov
 
 Cluster identity confidence is the weakest accepted pair edge needed by the component. Local-anchor confidence is stored separately: a direct current-ID binding is `1.0`; a media-mass-only binding is `mass / (mass + 1)`. Ordinary stable singleton bindings are omitted from provider-identity decisions because they contain no cross-provider identity inference.
 
-The result remains a proposal in plugin shadow storage. No `BaseItem`, provider ID, person record, relationship, image or Emby database row is mutated.
+The result remains a proposal in plugin shadow storage until explicit operator approval. The commit path validates live preconditions, then applies only the provider-ID and sampled credit moves shown in the dialog. It does not delete people, media, or images.
 
 ## UI contract
 
@@ -176,10 +176,10 @@ The evidence page loads at most the configured summary limit (default 100), orde
 - expandable ordered evidence with verdicts and stored raw metrics; and
 - a capped display set of impacted titles, while all impacted rows remain stored.
 
-Confirm/reject actions write `manual_bridge`; typed provider corrections write `provider_correction`. Both rerun only the offline graph/scoring stage against effective cached evidence. They issue no provider requests and update the current run's pre-rendered decision rows atomically.
+The **Change** checkbox opens a scoped commit preview. **Update Emby** validates the live records, applies every listed operation, synchronizes the local snapshot and reruns the offline graph/scoring stage. When a durable evidence override is recommended, the dialog opens the existing typed `provider_correction` editor prefilled from the decision.
 
 ## Deliberate non-goals in v2
 
-- Applying proposals to live Emby is not implemented. That requires a separately reviewed commit protocol, backups, idempotent mutations and rollback semantics.
+- Deleting Emby people or media is not implemented. Credit moves are limited to relationships present in the evaluated snapshot, and every commit is guarded by live precondition checks.
 - Name-only global search is not used because it recreates conflation risk.
 - Provider requests are intentionally conservative and serial per provider. Cache behavior and bounded cohorts matter more than first-run throughput during algorithm development.

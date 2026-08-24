@@ -1,16 +1,17 @@
 # PersonCleaner
 
-PersonCleaner is a read-only Emby person entity-resolution plugin. It treats local media relationships as the durable identity anchor, hydrates TMDB and TVDB evidence in a scheduled task, and presents pre-calculated decisions for human review.
+PersonCleaner is an Emby person entity-resolution plugin. It treats local media relationships as the durable identity anchor, hydrates TMDB and TVDB evidence in a scheduled task, and presents pre-calculated decisions for human review and explicit operator-approved updates.
 
 The old whole-library implementation is intentionally excluded from compilation. The active implementation is under `src/PersonCleaner/V2`.
 
 ## Safety boundaries
 
-- Emby is queried through `ILibraryManager`; this version never writes Emby items, people, provider IDs, images, or relationships.
+- Evidence collection is read-only. Live Emby writes occur only after an operator ticks a decision, reviews the separate scoped-change dialog, and presses **Update Emby**.
+- The commit path validates every current provider binding and credit relationship immediately before writing. It can set/remove person provider IDs and move only the sampled credit relationships listed in the dialog; it never deletes a person or media item.
 - Raw provider responses, flattened indexes, persistent provider corrections, manual bridges, run history, and decisions live under Emby's data directory in `personcleaner-v2/`.
 - API keys remain in Emby's normal plugin configuration. They are not written to the evidence database, raw cache, or logs.
 - An `ORPHAN` result never recommends deleting an Emby person. It may recommend review of removing only a named current provider binding after that provider authoritatively returns `404/410`.
-- Automatic matches update only the plugin's shadow decisions.
+- Automatic matches remain shadow decisions until an operator explicitly commits the listed changes.
 
 ## Development sandbox
 
@@ -49,7 +50,7 @@ Missing provider fields and unmatched filmography are neutral, not contradiction
 
 Identity evidence strength describes the provider cluster and is a deterministic decision score, not a calibrated probability. Local-anchor confidence separately describes how securely that cluster maps back to an Emby person. A stable one-provider/one-Emby binding is therefore not emitted as a misleading `100% MATCH`.
 
-The full-screen evidence dialog is sorted by risk and uncertainty and returns up to the configured row limit from every decision class, rather than applying one global limit before grouping. The summary always shows the uncapped class totals. Each row leads with the decision in ordinary language; expansion reveals supporting/conflicting signals and representative impacted titles. Emby people and media link to the current server, while TMDB, TVDB and IMDb identifiers link to their provider pages in a new tab. TVDB media slugs are flattened from cached payloads by the background task and persisted in SQLite; the dialog never opens or parses provider payload files. The complete title attribution remains in SQLite. Operators can confirm or reject a TMDB↔TVDB alignment and recalculate immediately from flattened evidence without refetching.
+The full-screen evidence dialog is sorted by risk and uncertainty and returns up to the configured row limit from every decision class, rather than applying one global limit before grouping. The grid has no pager: virtual row rendering keeps filters and the horizontal scrollbar available while detail grids are rendered when their parent is expanded. The summary always shows the uncapped class totals. Each row leads with the decision in ordinary language; expansion reveals supporting/conflicting signals and representative impacted titles. Emby people and media link to the current server, while TMDB, TVDB and IMDb identifiers link to their provider pages in a new tab. Ticking **Change** opens a separate preview of the exact in-scope Emby mutations and, when appropriate, offers a prefilled provider-correction dialog.
 
 The Provider corrections tab stores a persistent operator overlay without editing raw payloads or flattened source facts. Separate add dialogs cover media-person attribution, credit role, person/media cross-references, person name or birthday, local provider bindings and explicit identity relationships. A blank replacement marks the selected fact unusable; a supplied replacement substitutes it only for effective analysis. Corrections can be edited, disabled, re-enabled or removed. Every active rule records whether it triggered in each calculation run, and triggered rules write an informational log line.
 

@@ -60,6 +60,8 @@ namespace PersonCleaner.V2.Storage
     public sealed class DashboardDecision
     {
         public string DecisionId { get; set; }
+        [System.ComponentModel.DisplayName("Change")]
+        public bool ReviewChanges { get; set; }
         public string Status { get; set; }
         public string Action { get; set; }
         public string Person { get; set; }

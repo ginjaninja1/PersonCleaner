@@ -563,6 +563,76 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
             return result.ToArray();
         }
 
+        public DecisionChangeContext DecisionChangeContext(string decisionId)
+        {
+            if (string.IsNullOrWhiteSpace(decisionId)) throw new ArgumentException("The decision ID is missing.", nameof(decisionId));
+            lock (sync)
+            {
+                var runId = LatestCompletedRunId();
+                ResolutionDecision decision = null;
+                using (var s = db.PrepareStatement("SELECT decision_id,status,action,display_name,anchor_emby_id,provider_keys,confidence,impact_media_count,headline,explanation,local_anchor_confidence FROM resolution_decision WHERE run_id=@run AND decision_id=@id"))
+                {
+                    s.Bind("@run", runId); s.Bind("@id", decisionId);
+                    foreach (var r in s.Rows()) decision = new ResolutionDecision
+                    {
+                        DecisionId = r.GetString(0), Status = r.GetString(1), Action = r.GetString(2), DisplayName = r.GetString(3), AnchorEmbyPersonId = r.IsDBNull(4) ? (long?)null : r.GetInt64(4), ProviderKeys = r.GetString(5), Confidence = r.GetDouble(6), ImpactedMediaCount = r.GetInt(7), Headline = r.GetString(8), Explanation = r.GetString(9), LocalAnchorConfidence = r.GetDouble(10)
+                    };
+                }
+                if (decision == null) throw new InvalidOperationException("The selected decision is no longer present in the latest completed run.");
+                var context = new DecisionChangeContext { Decision = decision };
+                using (var s = db.PrepareStatement("SELECT emby_id,name,tmdb_id,tvdb_id,imdb_id FROM current_local_person"))
+                    foreach (var r in s.Rows()) context.LocalPeople.Add(new LocalPerson { EmbyId = r.GetInt64(0), Name = r.GetString(1), TmdbId = Null(r, 2), TvdbId = Null(r, 3), ImdbId = Null(r, 4) });
+                using (var s = db.PrepareStatement("SELECT person_emby_id,media_emby_id,role FROM current_local_credit"))
+                    foreach (var r in s.Rows()) context.LocalCredits.Add(new LocalCredit { PersonEmbyId = r.GetInt64(0), MediaEmbyId = r.GetInt64(1), Role = r.GetString(2) });
+                using (var s = db.PrepareStatement("SELECT provider,provider_id,outcome,graph_eligible,source,detail FROM acquisition_observation WHERE run_id=@run AND entity_type='person' AND media_type='person'"))
+                {
+                    s.Bind("@run", runId);
+                    foreach (var r in s.Rows()) context.Acquisitions.Add(new PersonAcquisition { Provider = r.GetString(0), ProviderId = r.GetString(1), State = r.GetString(2), GraphEligible = r.GetInt(3) != 0, Source = r.GetString(4), Detail = Null(r, 5) });
+                }
+                foreach (var token in (decision.ProviderKeys ?? string.Empty).Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var separator = token.IndexOf(':'); if (separator <= 0 || separator == token.Length - 1) continue;
+                    var provider = token.Substring(0, separator).Trim().ToLowerInvariant(); var providerId = token.Substring(separator + 1).Trim();
+                    ProviderPerson person = null;
+                    using (var s = db.PrepareStatement("SELECT name,clean_name,birthday FROM provider_person WHERE provider=@provider AND provider_person_id=@id"))
+                    {
+                        s.Bind("@provider", provider); s.Bind("@id", providerId);
+                        foreach (var r in s.Rows()) person = new ProviderPerson { Provider = provider, ProviderId = providerId, Name = r.GetString(0), CleanName = r.GetString(1), Birthday = Null(r, 2) };
+                    }
+                    if (person == null) continue;
+                    using (var s = db.PrepareStatement("SELECT external_provider,external_id FROM person_external_id WHERE provider=@provider AND provider_person_id=@id"))
+                    {
+                        s.Bind("@provider", provider); s.Bind("@id", providerId);
+                        foreach (var r in s.Rows()) person.ExternalIds[r.GetString(0)] = r.GetString(1);
+                    }
+                    context.ProposedProviderPeople.Add(person);
+                }
+                return context;
+            }
+        }
+
+        public void RecordCommittedEmbyChanges(DecisionChangePlan plan)
+        {
+            if (plan == null) throw new ArgumentNullException(nameof(plan));
+            lock (sync) db.RunInTransaction(x =>
+            {
+                foreach (var change in plan.Changes)
+                {
+                    if (change.Kind == EmbyChangeKinds.SetPersonProviderId || change.Kind == EmbyChangeKinds.RemovePersonProviderId)
+                    {
+                        var column = change.Provider == ProviderNames.Tmdb ? "tmdb_id" : change.Provider == ProviderNames.Tvdb ? "tvdb_id" : change.Provider == ProviderNames.Imdb ? "imdb_id" : null;
+                        if (column == null) throw new InvalidOperationException("Unsupported person provider change: " + change.Provider);
+                        Statement(x, "UPDATE current_local_person SET " + column + "=@value WHERE emby_id=@id", s => { s.Bind("@value", change.Kind == EmbyChangeKinds.RemovePersonProviderId ? null : change.ProposedValue); s.Bind("@id", change.SourcePersonId); });
+                    }
+                    else if (change.Kind == EmbyChangeKinds.MoveCredit && change.TargetPersonId.HasValue && change.MediaId.HasValue)
+                    {
+                        Statement(x, "DELETE FROM current_local_credit WHERE person_emby_id=@source AND media_emby_id=@media AND role=@role", s => { s.Bind("@source", change.SourcePersonId); s.Bind("@media", change.MediaId.Value); s.Bind("@role", change.Role); });
+                        Statement(x, "INSERT OR IGNORE INTO current_local_credit(person_emby_id,media_emby_id,role) VALUES(@target,@media,@role)", s => { s.Bind("@target", change.TargetPersonId.Value); s.Bind("@media", change.MediaId.Value); s.Bind("@role", change.Role); });
+                    }
+                }
+            }, TransactionMode.Immediate);
+        }
+
         private static string ProviderIdText(LocalPerson person)
         {
             var ids = new List<string>();

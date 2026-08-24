@@ -45,6 +45,11 @@ internal static class Program
         Run("provider correction removes a bad media cross-reference before canonicalization", ProviderCorrectionSuppressesMediaCrosswalk);
         Run("provider corrections replace person facts and local bindings", ProviderCorrectionsReplaceFactsAndBindings);
         Run("provider identity correction becomes an operator bridge", ProviderIdentityCorrectionBecomesBridge);
+        Run("Emby change planner scopes shadow credit moves and missing bindings", ChangePlannerScopesMerge);
+        Run("Emby change planner exposes present-ID drift as a manual replacement", ChangePlannerExposesManualDrift);
+        Run("Emby change planner carries proposed IMDb identity with TMDB drift", ChangePlannerCarriesExternalIdentity);
+        Run("Emby change planner removes only provider-confirmed stale bindings", ChangePlannerScopesStaleRemoval);
+        Run("Emby change planner exposes unsupported orphan bindings for manual removal", ChangePlannerExposesOrphanRemoval);
         Console.WriteLine("Passed " + passed + " entity-resolution tests; failed " + failed + ".");
         return failed == 0 ? 0 : 1;
     }
@@ -503,6 +508,87 @@ internal static class Program
         ProviderCorrectionOverlay.Apply(input, new CorrectionApplicationTracker(new[] { correction }));
         Equal(1, input.Bridges.Count);
         True(!input.Bridges[0].IsRejected);
+    }
+
+    private static void ChangePlannerScopesMerge()
+    {
+        var context = new DecisionChangeContext
+        {
+            Decision = new ResolutionDecision { DecisionId = "merge", Status = "MATCH", Action = "AUTO_MERGE_SHADOW", DisplayName = "Example", AnchorEmbyPersonId = 10, ProviderKeys = "tmdb:100, tvdb:200", Headline = "Merge the shadow." },
+            LocalPeople = new List<LocalPerson>
+            {
+                new LocalPerson { EmbyId = 10, Name = "Example", TmdbId = "100" },
+                new LocalPerson { EmbyId = 11, Name = "Example", TvdbId = "200" }
+            },
+            LocalCredits = new List<LocalCredit> { new LocalCredit { PersonEmbyId = 11, MediaEmbyId = 20, Role = "Actor: Lead" } }
+        };
+        var plan = DecisionChangePlanner.Build(context);
+        Equal(2, plan.Changes.Count);
+        True(plan.Changes.Any(x => x.Kind == EmbyChangeKinds.SetPersonProviderId && x.SourcePersonId == 10 && x.Provider == ProviderNames.Tvdb && x.ProposedValue == "200"));
+        True(plan.Changes.Any(x => x.Kind == EmbyChangeKinds.MoveCredit && x.SourcePersonId == 11 && x.TargetPersonId == 10 && x.MediaId == 20));
+    }
+
+    private static void ChangePlannerExposesManualDrift()
+    {
+        var decision = new ResolutionDecision { DecisionId = "drift", Status = "DRIFT", Action = "HUMAN_REVIEW", DisplayName = "Example", AnchorEmbyPersonId = 10, ProviderKeys = "tmdb:new", Headline = "Replace a stale ID." };
+        var context = new DecisionChangeContext { Decision = decision, LocalPeople = new List<LocalPerson> { new LocalPerson { EmbyId = 10, TmdbId = "old" } } };
+        var manual = DecisionChangePlanner.Build(context);
+        Equal(1, manual.Changes.Count);
+        True(manual.Changes[0].ManualReviewOnly);
+        context.Acquisitions.Add(Acquisition(ProviderNames.Tmdb, "old", AcquisitionStates.Absent));
+        decision.Action = "RETAINED_BY_MASS_ID_DRIFT";
+        var plan = DecisionChangePlanner.Build(context);
+        Equal(1, plan.Changes.Count);
+        Equal("new", plan.Changes[0].ProposedValue);
+        True(!plan.Changes[0].ManualReviewOnly);
+        Equal(CorrectionKinds.LocalPersonBinding, plan.RecommendedCorrection.Kind);
+    }
+
+    private static void ChangePlannerScopesStaleRemoval()
+    {
+        var context = new DecisionChangeContext
+        {
+            Decision = new ResolutionDecision { DecisionId = "orphan", Status = "ORPHAN", Action = "REVIEW_REMOVE_STALE_PROVIDER_ID", DisplayName = "Example", AnchorEmbyPersonId = 10, ProviderKeys = "No hydrated provider identity", Headline = "Remove confirmed stale bindings." },
+            LocalPeople = new List<LocalPerson> { new LocalPerson { EmbyId = 10, TmdbId = "missing", TvdbId = "present" } },
+            Acquisitions = new List<PersonAcquisition> { Acquisition(ProviderNames.Tmdb, "missing", AcquisitionStates.Absent), Acquisition(ProviderNames.Tvdb, "present", AcquisitionStates.Present) }
+        };
+        var plan = DecisionChangePlanner.Build(context);
+        Equal(1, plan.Changes.Count);
+        Equal(ProviderNames.Tmdb, plan.Changes[0].Provider);
+        Equal(EmbyChangeKinds.RemovePersonProviderId, plan.Changes[0].Kind);
+    }
+
+    private static void ChangePlannerCarriesExternalIdentity()
+    {
+        var proposed = new ProviderPerson { Provider = ProviderNames.Tmdb, ProviderId = "3844231", Name = "Samantha Kelly" };
+        proposed.ExternalIds[ProviderNames.Imdb] = "nm2841197";
+        var context = new DecisionChangeContext
+        {
+            Decision = new ResolutionDecision { DecisionId = "samantha", Status = "DRIFT", Action = "HUMAN_REVIEW", DisplayName = "Samantha Kelly", AnchorEmbyPersonId = 402910, ProviderKeys = "tmdb:3844231", Headline = "Media-backed identity drift." },
+            LocalPeople = new List<LocalPerson> { new LocalPerson { EmbyId = 402910, TmdbId = "3210679", ImdbId = "nm0446845" } },
+            ProposedProviderPeople = new List<ProviderPerson> { proposed },
+            Acquisitions = new List<PersonAcquisition> { Acquisition(ProviderNames.Tmdb, "3210679", AcquisitionStates.Present) }
+        };
+        var plan = DecisionChangePlanner.Build(context);
+        Equal(2, plan.Changes.Count);
+        True(plan.Changes.Any(x => x.Provider == ProviderNames.Tmdb && x.CurrentValue == "3210679" && x.ProposedValue == "3844231"));
+        True(plan.Changes.Any(x => x.Provider == ProviderNames.Imdb && x.CurrentValue == "nm0446845" && x.ProposedValue == "nm2841197"));
+        True(plan.Changes.All(x => x.ManualReviewOnly));
+    }
+
+    private static void ChangePlannerExposesOrphanRemoval()
+    {
+        var context = new DecisionChangeContext
+        {
+            Decision = new ResolutionDecision { DecisionId = "orphan-review", Status = "ORPHAN", Action = "HUMAN_REVIEW", DisplayName = "Example", AnchorEmbyPersonId = 10, ProviderKeys = "No hydrated provider identity", Headline = "No media support." },
+            LocalPeople = new List<LocalPerson> { new LocalPerson { EmbyId = 10, TmdbId = "present" } },
+            Acquisitions = new List<PersonAcquisition> { Acquisition(ProviderNames.Tmdb, "present", AcquisitionStates.Present) }
+        };
+        var plan = DecisionChangePlanner.Build(context);
+        Equal(1, plan.Changes.Count);
+        True(plan.Changes[0].ManualReviewOnly);
+        Equal(EmbyChangeKinds.RemovePersonProviderId, plan.Changes[0].Kind);
+        Equal(CorrectionKinds.LocalPersonBinding, plan.RecommendedCorrection.Kind);
     }
 
     private static void OperatorBridgeJoinsRecords()

@@ -7,6 +7,7 @@ using MediaBrowser.Model.Attributes;
 using MediaBrowser.Model.Logging;
 using MediaBrowser.Model.Plugins;
 using MediaBrowser.Model.Plugins.UI.Views;
+using MediaBrowser.Model.Serialization;
 using PersonCleaner.V2.Domain;
 using PersonCleaner.V2.Storage;
 using System;
@@ -46,8 +47,20 @@ namespace PersonCleaner.V2.UI
                 searchPanel = new { visible = true, width = 420, placeholder = "Search names, provider IDs, decisions or reasons" },
                 filterRow = new DxGridFilterRow { visible = true },
                 headerFilter = new DxGridHeaderFilter { visible = true },
-                paging = new DxGridPaging { enabled = true, pageSize = 50 },
-                scrolling = new DxGridScrolling { showScrollbar = DxGridScrolling.ShowScrollbarMode.always, mode = DxGridScrolling.ScrollingMode.standard },
+                paging = new DxGridPaging { enabled = false },
+                scrolling = new DxGridScrolling
+                {
+                    scrollByContent = true,
+                    scrollByThumb = true,
+                    showScrollbar = DxGridScrolling.ShowScrollbarMode.always,
+                    columnRenderingMode = DxGridScrolling.ColumnRenderingMode.standard,
+                    mode = DxGridScrolling.ScrollingMode.@virtual,
+                    rowRenderingMode = DxGridScrolling.RowRenderingMode.@virtual,
+                    preloadEnabled = false,
+                    useNative = "false"
+                },
+                editing = new DxGridEditing { mode = DxGridEditing.GridEditMode.cell, allowUpdating = true },
+                onChangeCommand = new DxGridOnChangeCommand { commandId = "decision-review-changes" },
                 noDataText = "No completed person evidence is available. Run 'PersonCleaner - Build person evidence' from Scheduled Tasks."
             };
 
@@ -59,7 +72,9 @@ namespace PersonCleaner.V2.UI
                 showRowLines = true,
                 rowAlternationEnabled = true,
                 wordWrapEnabled = true,
-                grouping = new DxGridGrouping { autoExpandAll = true, allowCollapsing = true }
+                grouping = new DxGridGrouping { autoExpandAll = true, allowCollapsing = true },
+                paging = new DxGridPaging { enabled = false },
+                scrolling = new DxGridScrolling { scrollByContent = true, scrollByThumb = true, showScrollbar = DxGridScrolling.ShowScrollbarMode.always, mode = DxGridScrolling.ScrollingMode.standard, useNative = "false" }
             };
 
             if (detail.columns != null) foreach (var column in detail.columns)
@@ -73,17 +88,9 @@ namespace PersonCleaner.V2.UI
                 if (column.dataField == nameof(DashboardDetail.Signal)) column.width = 150;
                 if (column.dataField == nameof(DashboardDetail.Verdict)) column.width = 110;
                 if (column.dataField == nameof(DashboardDetail.RawMetric)) { column.caption = "Stored metric"; column.width = 220; }
-                if (column.dataField == nameof(DashboardDetail.Explanation)) { column.encodeHtml = false; column.caption = "Evidence / Emby title"; }
+                if (column.dataField == nameof(DashboardDetail.Explanation)) { column.encodeHtml = false; column.caption = "Evidence / Emby title"; column.width = 650; }
                 if (column.dataField == nameof(DashboardDetail.ProviderObjects)) { column.encodeHtml = false; column.caption = "Provider pages"; column.width = 300; }
             }
-
-            grid.masterDetail = new DxGridMasterDetail
-            {
-                enabled = true,
-                autoExpandAll = false,
-                childRowsFieldName = nameof(DashboardDecision.Details),
-                detailGridOptions = detail
-            };
 
             if (grid.columns != null) foreach (var column in grid.columns)
             {
@@ -91,9 +98,10 @@ namespace PersonCleaner.V2.UI
                 column.allowGrouping = true;
                 column.allowHeaderFiltering = true;
                 if (column.dataField == nameof(DashboardDecision.DecisionId)) column.visible = false;
+                if (column.dataField == nameof(DashboardDecision.ReviewChanges)) { column.caption = "Review / update"; column.width = 110; column.allowEditing = true; column.allowGrouping = false; column.allowHeaderFiltering = false; }
                 if (column.dataField == nameof(DashboardDecision.Details)) { column.visible = false; column.isSecondaryGridDataSource = true; }
                 if (column.dataField == nameof(DashboardDecision.Status)) { column.caption = "Decision class"; column.groupIndex = 0; column.showWhenGrouped = true; column.width = 120; }
-                if (column.dataField == nameof(DashboardDecision.Action)) column.width = 190;
+                if (column.dataField == nameof(DashboardDecision.Action)) { column.caption = "Recommendation mode"; column.width = 190; }
                 if (column.dataField == nameof(DashboardDecision.Person)) column.width = 190;
                 if (column.dataField == nameof(DashboardDecision.EmbyAnchor)) { column.caption = "Emby anchor"; column.width = 100; }
                 if (column.dataField == nameof(DashboardDecision.Person)) column.encodeHtml = false;
@@ -107,6 +115,16 @@ namespace PersonCleaner.V2.UI
                 if (column.dataField == nameof(DashboardDecision.Why)) column.width = 480;
             }
 
+            // Mark the secondary source before assigning masterDetail. The GenericEdit
+            // host uses this metadata during its first serialization pass.
+            grid.masterDetail = new DxGridMasterDetail
+            {
+                enabled = true,
+                autoExpandAll = false,
+                childRowsFieldName = nameof(DashboardDecision.Details),
+                detailGridOptions = detail
+            };
+
             var summary = run == null ? "No completed run is available."
                 : "Run " + run.RunId + " · " + run.Decisions + " decisions (" + run.DecisionBreakdown + ") · up to " + Plugin.Instance.Configuration.MaximumDashboardRows + " rows shown per decision class";
             return new EvidenceDialogUI { RunSummary = new CaptionItem(summary), Decisions = new DxDataGrid(grid), Rows = rows ?? Array.Empty<DashboardDecision>() };
@@ -115,14 +133,22 @@ namespace PersonCleaner.V2.UI
 
     internal sealed class EvidenceDialogView : DialogViewBase
     {
+        private readonly PluginInfo plugin;
+        private readonly IServerApplicationHost host;
+        private readonly IApplicationPaths paths;
+        private readonly IJsonSerializer json;
         private readonly ILogger logger;
 
         public EvidenceDialogView(PluginInfo plugin, IServerApplicationHost host, ILogger logger) : base(plugin.Id)
         {
-            this.logger = logger;
+            this.plugin = plugin; this.host = host; this.logger = logger; this.paths = host.Resolve<IApplicationPaths>(); this.json = host.Resolve<IJsonSerializer>();
             AllowOk = false;
             AllowCancel = true;
-            var paths = host.Resolve<IApplicationPaths>();
+            Rebuild();
+        }
+
+        private void Rebuild()
+        {
             using (var repository = new ResolutionRepository(paths))
             {
                 repository.Initialize();
@@ -144,9 +170,21 @@ namespace PersonCleaner.V2.UI
 
         public override Task<IPluginUIView> RunCommand(string itemId, string commandId, string data)
         {
+            if (commandId == "decision-review-changes" && !string.IsNullOrWhiteSpace(data))
+            {
+                var incoming = json.DeserializeFromString<EvidenceDialogUI>(data);
+                var selected = incoming?.Rows?.FirstOrDefault(x => x.ReviewChanges && !string.IsNullOrWhiteSpace(x.DecisionId));
+                if (selected != null)
+                {
+                    logger.Info("PersonCleaner opening scoped change review for decision {0}.", selected.DecisionId);
+                    return Task.FromResult<IPluginUIView>(new DecisionChangeDialogView(plugin, host, logger, this, Rebuild, selected.DecisionId));
+                }
+            }
             logger.Debug("PersonCleaner evidence dialog command {0}; delegating to dialog host.", commandId ?? "(null)");
             return base.RunCommand(itemId, commandId, data);
         }
+
+        public override void OnDialogResult(IPluginUIView dialogView, bool completedOk, object data) { Rebuild(); Refresh(); }
     }
 
     internal static class EvidenceLinks
