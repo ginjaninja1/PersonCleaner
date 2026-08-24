@@ -169,8 +169,14 @@ namespace PersonCleaner.V2.UI
                     var media = library.GetItemById(change.MediaId.Value) ?? throw new InvalidOperationException("Emby media " + change.MediaId.Value + " no longer exists.");
                     if (!(library.GetItemById(change.SourcePersonId) is Person)) throw new InvalidOperationException("Source Emby person " + change.SourcePersonId + " no longer exists.");
                     if (!(library.GetItemById(change.TargetPersonId.Value) is Person)) throw new InvalidOperationException("Target Emby person " + change.TargetPersonId.Value + " no longer exists.");
-                    if (!library.GetItemPeople(media).Any(x => x.Id == change.SourcePersonId && RoleText(x) == (change.Role ?? string.Empty)))
-                        throw new InvalidOperationException("The scoped credit on Emby media " + change.MediaId.Value + " has changed; refresh the evidence before applying.");
+                    var livePeople = ReadPeople(media.InternalId);
+                    if (!livePeople.Any(x => x.Id == change.SourcePersonId && RoleText(x) == (change.Role ?? string.Empty)))
+                    {
+                        var liveRoles = livePeople.Where(x => x.Id == change.SourcePersonId).Select(RoleText).Distinct(StringComparer.Ordinal).OrderBy(x => x, StringComparer.Ordinal).ToList();
+                        throw new InvalidOperationException(liveRoles.Count == 0
+                            ? "Cannot move the expected credit '" + (change.Role ?? string.Empty) + "' on Emby media " + change.MediaId.Value + ": source person " + change.SourcePersonId + " is no longer credited on that item. Rebuild the evidence before applying."
+                            : "Cannot move the expected credit '" + (change.Role ?? string.Empty) + "' on Emby media " + change.MediaId.Value + ": source person " + change.SourcePersonId + " now has " + string.Join(", ", liveRoles.Select(x => "'" + x + "'")) + ". Rebuild the evidence before applying.");
+                    }
                 }
                 else throw new InvalidOperationException("Unsupported Emby change " + change.Kind + ".");
             }
@@ -179,7 +185,7 @@ namespace PersonCleaner.V2.UI
         private void ApplyCreditMoves(long mediaId, List<EmbyChangeProposal> changes)
         {
             var media = library.GetItemById(mediaId) ?? throw new InvalidOperationException("Emby media " + mediaId + " no longer exists.");
-            var people = library.GetItemPeople(media);
+            var people = ReadPeople(mediaId);
             foreach (var change in changes)
             {
                 var target = (Person)library.GetItemById(change.TargetPersonId.Value);
@@ -205,6 +211,14 @@ namespace PersonCleaner.V2.UI
             }
             library.UpdateItem(person, null, ItemUpdateType.MetadataEdit);
         }
+
+        private List<PersonInfo> ReadPeople(long mediaId) => library.GetItemPeople(new InternalPeopleQuery
+        {
+            ItemIds = new[] { mediaId },
+            EnableIds = true,
+            EnableProviderIds = true,
+            EnableGroupByName = false
+        });
 
         private static string ProviderId(Person person, string provider) => provider == ProviderNames.Tmdb ? person.GetProviderId(MetadataProviders.Tmdb) : provider == ProviderNames.Tvdb ? person.GetProviderId(MetadataProviders.Tvdb) : provider == ProviderNames.Imdb ? person.GetProviderId(MetadataProviders.Imdb) : null;
         private static string RoleText(PersonInfo person) => person.Type + (string.IsNullOrWhiteSpace(person.Role) ? string.Empty : ": " + person.Role);

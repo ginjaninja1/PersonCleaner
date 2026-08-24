@@ -166,9 +166,21 @@ FROM current_local_credit c JOIN current_local_person p ON p.emby_id=c.person_em
                     }
                 var discovered = new HashSet<string>(StringComparer.Ordinal);
                 var selected = new HashSet<string>(StringComparer.Ordinal);
-                using (var s = db.PrepareStatement(@"SELECT DISTINCT c.provider,c.provider_person_id,c.person_name,m.emby_id
-FROM provider_media_credit c
-JOIN current_media m ON m.media_type=c.media_type AND ((c.provider='tmdb' AND m.tmdb_id=c.provider_media_id) OR (c.provider='tvdb' AND m.tvdb_id=c.provider_media_id))"))
+                // Keep current_media as the outer loop and probe the leading
+                // provider/media columns of provider_media_credit's primary key.
+                // A single OR join makes SQLite scan the entire historical credit
+                // archive and compare it with every current title of the same type.
+                using (var s = db.PrepareStatement(@"SELECT c.provider,c.provider_person_id,c.person_name,m.emby_id
+FROM current_media m
+CROSS JOIN provider_media_credit c
+  ON c.provider='tmdb' AND c.media_type=m.media_type AND c.provider_media_id=m.tmdb_id
+WHERE m.tmdb_id IS NOT NULL
+UNION
+SELECT c.provider,c.provider_person_id,c.person_name,m.emby_id
+FROM current_media m
+CROSS JOIN provider_media_credit c
+  ON c.provider='tvdb' AND c.media_type=m.media_type AND c.provider_media_id=m.tvdb_id
+WHERE m.tvdb_id IS NOT NULL"))
                     foreach (var r in s.Rows())
                     {
                         var provider = r.GetString(0); var providerId = r.GetString(1); var key = provider + ":" + providerId;

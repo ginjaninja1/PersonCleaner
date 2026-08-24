@@ -67,8 +67,12 @@ namespace PersonCleaner.V2.Tasks
                     var mediaMetrics = await RunHydrationPhase("media", runId, mediaWork, hydration, repository, configuration, progress, 10, 35, 10, cancellationToken).ConfigureAwait(false);
                     logger.Info("PersonCleaner run {0} media phase complete: {1}.", runId, mediaMetrics.Summary());
 
+                    repository.UpdateRun(runId, "scoping", "Scoping provider people discovered from media credits");
+                    logger.Info("PersonCleaner run {0} person scoping starting: matching flattened provider credits to the current local-media cohort.", runId);
+                    var personScopingClock = Stopwatch.StartNew();
                     var personSeeds = repository.SeedDiscoveredPeople();
-                    logger.Info("PersonCleaner run {0} person scoping: media discovery found {1} unique provider people (TMDB={2}, TVDB={3}); {4} are graph-eligible by current provider ID or normalized same-title name (TMDB={5}, TVDB={6}); {7} current in-scope bindings are queued for validation (TMDB={8}, TVDB={9}). Validation-only people are fully cached but cannot seed the identity graph.", runId, personSeeds.DiscoveredTotal, personSeeds.DiscoveredTmdb, personSeeds.DiscoveredTvdb, personSeeds.SelectedTotal, personSeeds.SelectedTmdb, personSeeds.SelectedTvdb, personSeeds.ValidationTotal, personSeeds.ValidationTmdb, personSeeds.ValidationTvdb);
+                    personScopingClock.Stop();
+                    logger.Info("PersonCleaner run {0} person scoping complete in {10}: media discovery found {1} unique provider people (TMDB={2}, TVDB={3}); {4} are graph-eligible by current provider ID or normalized same-title name (TMDB={5}, TVDB={6}); {7} current in-scope bindings are queued for validation (TMDB={8}, TVDB={9}). Validation-only people are fully cached but cannot seed the identity graph.", runId, personSeeds.DiscoveredTotal, personSeeds.DiscoveredTmdb, personSeeds.DiscoveredTvdb, personSeeds.SelectedTotal, personSeeds.SelectedTmdb, personSeeds.SelectedTvdb, personSeeds.ValidationTotal, personSeeds.ValidationTmdb, personSeeds.ValidationTvdb, personScopingClock.Elapsed.ToString(@"hh\:mm\:ss\.fff", CultureInfo.InvariantCulture));
                     repository.UpdateRun(runId, "people", "Enriching people discovered from media credits");
                     var peopleWork = repository.PendingPeople();
                     logger.Info("PersonCleaner run {0} person phase starting: {1} unique provider person(s) ({2}); bounded parallelism TMDB={3}, TVDB={4}. Fresh cache entries bypass both network and JSON parsing.", runId, peopleWork.Count, WorkBreakdown(peopleWork), configuration.TmdbMaximumConcurrentRequests, configuration.TvdbMaximumConcurrentRequests);

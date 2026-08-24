@@ -184,6 +184,39 @@ The result remains a proposal in plugin shadow storage until explicit operator a
 
 Before assigning a provider person ID, commit preflight re-reads all live Emby people and rejects an owner outside the evaluated scope. This repeats the calculation-time global-binding veto without turning global people into resolution evidence.
 
+## Confirmed Emby mutation and metadata-folder lifecycle
+
+The manual `PersonCleanerEmbyMutationProbeV2` task confirmed the live Emby 4.10 mutation contract on 2026-08-24:
+
+- `ILibraryManager.GetItemPeople(BaseItem)` does not hydrate `PersonInfo.Id`; the IDs are zero. Any identity-sensitive read must use `GetItemPeople(InternalPeopleQuery)` with `EnableIds = true`, `EnableProviderIds = true`, and `EnableGroupByName = false`.
+- `UpdatePeople` is a full replacement of the media item's people rows. Moving one relationship must begin with the complete hydrated list and preserve every unrelated row. Replacing a source relationship and removing a source duplicate both round-tripped correctly.
+- Person provider IDs can be set, replaced, and removed with `UpdateItem(..., ItemUpdateType.MetadataEdit)`.
+- An ID-less `PersonInfo` passed to `UpdatePeople` is resolved into an Emby `Person`. Removing its final supporting relationship leaves the person row temporarily present with `IsDeadPerson = true`.
+- Emby's normal cleanup subsequently removed that unreferenced person row without a PersonCleaner delete operation. Production credit commits therefore move relationships and allow Emby to own dead-person database cleanup.
+
+Emby's person database lifecycle and metadata-folder lifecycle are separate. A metadata edit writes `person.nfo` beneath a path derived from the current person name and provider binding. Changing or removing the provider ID writes another path; it does not remove the earlier path. Deleting or automatically cleaning the Emby person row also does not imply that any of its historical metadata directories were removed. The probe observed all of these directories for one logical source person:
+
+```text
+<name>
+<name>-tmdb-<original-id>
+<name>-tmdb-<replacement-id>
+```
+
+It also observed orphan-sentinel directories remaining after the corresponding person was absent from Emby's database. Historical probe directories from the earlier diagnostics task demonstrate the same persistence.
+
+Filesystem reconciliation is consequently a separate future phase, not part of a credit move or provider-ID transaction. It must:
+
+1. derive the complete set of metadata directories currently referenced by live Emby people;
+2. associate historical directory variants with an evidenced person transition rather than by display name alone;
+3. treat an absent database row as necessary but insufficient deletion evidence;
+4. account for files, artwork, NFO metadata, junctions and unexpected contents before proposing an action;
+5. preview exact source and destination paths and collision behavior;
+6. avoid overwriting a current directory or combining different people that share a name;
+7. use a recoverable quarantine/move before permanent deletion; and
+8. run only as an explicit, separately approved commit after a fresh database/filesystem preflight.
+
+Until that phase exists, PersonCleaner may correct Emby database relationships and provider bindings but must not claim that historical person folders were corrected or removed.
+
 ## UI contract
 
 The evidence page loads at most the configured summary limit (default 100), ordered as `SPLIT`, `REALIGNMENT`, `MERGE`, `CONFLATION`, `DRIFT`, `ORPHAN`, `MATCH_WITH_CONFLICT`, then `MATCH`. Each summary includes:
