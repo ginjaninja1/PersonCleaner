@@ -19,9 +19,11 @@ internal static class Program
         Run("two shared credits accumulate enough evidence without birthdays", TwoSharedCreditsAccumulateEvidence);
         Run("asymmetric media IDs resolve through the full crosswalk graph", AsymmetricMediaIdsResolveTransitively);
         Run("missing external ids are neutral", MissingExternalIdsAreNeutral);
-        Run("conflicting external ids prevent merge", ConflictingExternalIdsPreventMerge);
+        Run("unopposed external id conflict remains reviewable negative evidence", ConflictingExternalIdsRequireReview);
+        Run("Derek Luh native crosswalk outweighs a secondary IMDb conflict", DerekLuhCrosswalkOutweighsImdbConflict);
         Run("competing same-name attribution prevents automatic merge", CompetingAttributionRequiresReview);
-        Run("birthday conflict prevents merge and exposes split", BirthdayConflictExposesSplit);
+        Run("unopposed birthday conflict remains reviewable negative evidence", BirthdayConflictRequiresReview);
+        Run("Gerald Sim corroborated identity outweighs a birthday conflict", GeraldSimBirthdayConflictRetainsIdentity);
         Run("local media mass survives provider id drift", MediaMassSurvivesIdDrift);
         Run("operator bridge joins disconnected provider records", OperatorBridgeJoinsRecords);
         Run("operator rejection keeps shared-media records separate", OperatorRejectionKeepsRecordsSeparate);
@@ -193,7 +195,7 @@ internal static class Program
         True(score.Score >= 0.75);
     }
 
-    private static void ConflictingExternalIdsPreventMerge()
+    private static void ConflictingExternalIdsRequireReview()
     {
         var left = Person(ProviderNames.Tmdb, "conflict-left", "Identifier Conflict", ProviderNames.Imdb, "nm-left", "shared");
         var right = Person(ProviderNames.Tvdb, "conflict-right", "Identifier Conflict", ProviderNames.Imdb, "nm-right", "shared");
@@ -205,8 +207,36 @@ internal static class Program
         var engine = new ResolutionEngine();
         var decisions = engine.Resolve(input, new ResolutionSettings());
         True(engine.PairEvaluations.Single().Score.IdentifierConflict);
-        True(engine.PairEvaluations.Single().Score.Score < 0.40);
-        True(decisions.Any(x => x.Status == "SPLIT" && x.Evidence.Any(e => e.SignalType == "EXTERNAL_ID" && e.Verdict == "conflicts")));
+        True(engine.PairEvaluations.Single().Score.Score >= 0.40);
+        True(engine.PairEvaluations.Single().Score.Score < 0.75);
+        True(decisions.Any(x => x.Status == "CONFLATION" && x.Evidence.Any(e => e.SignalType == "EXTERNAL_ID" && e.Verdict == "conflicts")));
+        True(!decisions.Any(x => x.Status == "SPLIT"));
+    }
+
+    private static void DerekLuhCrosswalkOutweighsImdbConflict()
+    {
+        var tmdb = Person(ProviderNames.Tmdb, "2498030", "Derek Luh", ProviderNames.Imdb, "nm11221274", "gen-v");
+        tmdb.ExternalIds[ProviderNames.Wikidata] = "Q33124975";
+        tmdb.Birthday = "1992-06-24";
+        var tvdb = Person(ProviderNames.Tvdb, "9116159", "Derek Luh", ProviderNames.Imdb, "nm1122127", "gen-v");
+        tvdb.ExternalIds[ProviderNames.Tmdb] = "2498030";
+        AddObservedCredit(tmdb, "gen-v", "Actor", "Jordan Li");
+        AddObservedCredit(tvdb, "gen-v", "Actor", "Jordan Li (Boy)");
+        var input = BaseInput(tmdb, tvdb);
+        input.ProviderCredits.AddRange(tmdb.Credits.Concat(tvdb.Credits));
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 40557, Name = "Derek Luh", TmdbId = "2498030", TvdbId = "9116159", ImdbId = "nm11221274" });
+        input.Media.Add(Media(25324, "Gen V")); input.LocalCredits.Add(Credit(40557, 25324));
+        var engine = new ResolutionEngine();
+        var decision = engine.Resolve(input, new ResolutionSettings()).Single(x => x.Status == "MATCH_WITH_CONFLICT");
+        var score = engine.PairEvaluations.Single().Score;
+        True(score.NativeProviderCrosswalkMatch);
+        True(score.IdentifierConflict);
+        Equal("mixed", score.ExternalIdState);
+        True(score.Score >= 0.75);
+        Equal("CROSS_PROVIDER_IDENTITY_WITH_METADATA_CONFLICT", decision.Action);
+        True(decision.Evidence.Any(x => x.SignalType == "EXTERNAL_ID" && x.Verdict == "mixed"));
+        True(decision.Evidence.Any(x => x.SignalType == "EXTERNAL_ID" && x.Metric.Contains("nm11221274") && x.Metric.Contains("nm1122127")));
+        True(!engine.PairEvaluations.Any(x => x.Disposition == "constraint-blocked"));
     }
 
     private static void CompetingAttributionRequiresReview()
@@ -224,7 +254,7 @@ internal static class Program
         Equal("human-review", pair.Disposition);
     }
 
-    private static void BirthdayConflictExposesSplit()
+    private static void BirthdayConflictRequiresReview()
     {
         var tmdb = Person(ProviderNames.Tmdb, "12", "Chris Example", null, null, "m:1"); tmdb.Birthday = "1970-01-01";
         var tvdb = Person(ProviderNames.Tvdb, "22", "Chris Example", null, null, "m:1"); tvdb.Birthday = "1980-01-01";
@@ -232,9 +262,38 @@ internal static class Program
         input.LocalPeople.Add(new LocalPerson { EmbyId = 300, Name = "Chris Example", TmdbId = "12", TvdbId = "22" });
         input.Media.Add(Media(1, "Shared")); input.LocalCredits.Add(Credit(300, 1));
         var decisions = new ResolutionEngine().Resolve(input, new ResolutionSettings());
-        var split = decisions.Single(x => x.Status == "SPLIT");
-        True(split.Headline.Contains("2 constraint-separated"));
+        var review = decisions.Single(x => x.Status == "CONFLATION");
+        True(review.Evidence.Any(x => x.SignalType == "BIRTHDAY" && x.Verdict == "conflicts"));
         True(!decisions.Any(x => x.Action == "AUTO_MERGE_SHADOW"));
+        True(!decisions.Any(x => x.Status == "SPLIT"));
+    }
+
+    private static void GeraldSimBirthdayConflictRetainsIdentity()
+    {
+        var tmdb = Person(ProviderNames.Tmdb, "91663", "Gerald Sim", ProviderNames.Imdb, "nm0799245", "ryans-daughter");
+        tmdb.ExternalIds[ProviderNames.Wikidata] = "Q5549581";
+        tmdb.Birthday = "1925-02-04";
+        var tvdb = Person(ProviderNames.Tvdb, "282419", "Gerald Sim", ProviderNames.Imdb, "nm0799245", "ryans-daughter", "to-the-manor-born");
+        tvdb.Birthday = "1925-06-04";
+        AddObservedCredit(tmdb, "ryans-daughter", "Actor", "Captain");
+        AddObservedCredit(tvdb, "ryans-daughter", "Actor", "Captain");
+        AddObservedCredit(tvdb, "to-the-manor-born", "Actor", "The Rector");
+        var input = BaseInput(tmdb, tvdb);
+        input.ProviderCredits.AddRange(tmdb.Credits.Concat(tvdb.Credits));
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 23430, Name = "Gerald Sim", TmdbId = "91663", TvdbId = "282419", ImdbId = "nm0799245" });
+        input.Media.AddRange(new[] { Media(298340, "Ryan's Daughter"), Media(113, "To the Manor Born") });
+        input.LocalCredits.AddRange(new[] { Credit(23430, 298340), Credit(23430, 113) });
+        var engine = new ResolutionEngine();
+        var decisions = engine.Resolve(input, new ResolutionSettings());
+        var decision = decisions.Single(x => x.Status == "MATCH_WITH_CONFLICT");
+        var score = engine.PairEvaluations.Single().Score;
+        True(score.BirthdayConflict);
+        True(score.HardIdentifierMatch);
+        True(score.Score >= 0.75);
+        Equal("CROSS_PROVIDER_IDENTITY_WITH_METADATA_CONFLICT", decision.Action);
+        True(decision.Evidence.Any(x => x.SignalType == "BIRTHDAY" && x.Narrative.Contains("not by itself proof")));
+        True(decision.Evidence.Any(x => x.SignalType == "BIRTHDAY" && x.Metric.Contains("1925-02-04") && x.Metric.Contains("1925-06-04")));
+        True(!decisions.Any(x => x.Status == "SPLIT"));
     }
 
     private static void SameNameAloneDoesNotMerge()

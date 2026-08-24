@@ -137,7 +137,7 @@ namespace PersonCleaner.V2.Domain
 
     public sealed class ScoreBreakdown
     {
-        public string ModelVersion { get; set; } = "person-evidence-v3";
+        public string ModelVersion { get; set; } = "person-evidence-v4";
         public double FilmographyJaccard { get; set; }
         public double FilmographyContainment { get; set; }
         public int LeftMediaCount { get; set; }
@@ -149,14 +149,18 @@ namespace PersonCleaner.V2.Domain
         public int CompetingAttributionCount { get; set; }
         public int NameFrequency { get; set; } = 1;
         public string BirthdayState { get; set; } = "missing";
+        public string BirthdayDetail { get; set; }
         public string ExternalIdState { get; set; } = "missing";
+        public string IdentifierMatchDetail { get; set; }
+        public string IdentifierConflictDetail { get; set; }
         public bool BirthdayMatch { get; set; }
         public bool BirthdayConflict { get; set; }
         public bool ExactNameMatch { get; set; }
         public bool AliasMatch { get; set; }
         public bool HardIdentifierMatch { get; set; }
+        public bool NativeProviderCrosswalkMatch { get; set; }
         public bool IdentifierConflict { get; set; }
-        public bool HasHardConflict => BirthdayConflict || IdentifierConflict;
+        public bool HasMetadataConflict => BirthdayConflict || IdentifierConflict;
         public double Score { get; set; }
     }
 

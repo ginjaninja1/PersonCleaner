@@ -127,13 +127,11 @@ This makes candidate construction proportional to observed cross-provider edges 
 Every media/name or external-ID blocked pair is scored and persisted before clustering. Automatic edges are considered strongest-first. Union-Find may join two components only when the proposed component contains:
 
 - no operator-rejected pair, including a rejection reached transitively;
-- no two different identities from the same provider;
-- no conflicting known birth dates; and
-- no conflicting stable IMDb or Wikidata person IDs.
+- no two different identities from the same provider.
 
-Operator-confirmed bridges are explicit identity evidence, but still cannot cross an operator rejection. Automatic candidates must also be free of observed identity conflicts and competing same-name role attributions.
+Operator-confirmed bridges are explicit identity evidence, but still cannot cross an operator rejection. A same-name, role-compatible attribution to a different provider person prevents automatic matching. Provider metadata disagreements remain negative evidence, but are not logical component constraints.
 
-Evidence model `person-evidence-v3` first resolves provider media records through the transitive equivalence graph of every observed native and external media ID. This avoids false filmography gaps when providers expose different subsets of the same crosswalk. It then uses fixed contributions so scores remain comparable between runs:
+Evidence model `person-evidence-v4` first resolves provider media records through the transitive equivalence graph of every observed native and external media ID. This avoids false filmography gaps when providers expose different subsets of the same crosswalk. It also recognizes an explicit TMDB-to-TVDB or TVDB-to-TMDB person cross-reference as direct identity support. It then uses fixed contributions so scores remain comparable between runs:
 
 ```text
 score = 0.35 × exact normalized name / sqrt(name frequency)
@@ -142,17 +140,20 @@ score = 0.35 × exact normalized name / sqrt(name frequency)
       + 0.20 × (1 - exp(-shared-credit count))
       + 0.15 × role agreement
       + 0.20 × exact known birthday
+
+conflicting external ID: -0.30, or -0.15 when independent identifier evidence matches
+conflicting birthday:    -0.25, or -0.15 when independent identifier evidence matches
 ```
 
 Containment is `shared / min(left credit count, right credit count)`. Jaccard is retained as a diagnostic but does not penalize a provider for returning a smaller credit set. Exact role names score fully; a compatible role category scores partially. Missing birthdays, external IDs, roles and unmatched titles add neither support nor a penalty.
 
-A shared stable person external ID is hard support. Different values in a comparable stable-ID namespace cap the score at `0.15` (or `0.50` if another namespace matches); different known birthdays cap it at `0.25`; and a same-name, role-compatible attribution to a different provider person caps it at `0.55`. Any explicit identity conflict blocks automatic clustering regardless of the numeric score. Scores are clamped to `[0, 1]`. Default interpretation:
+A shared stable person external ID or explicit provider-native person cross-reference starts from direct identity support. Conflicting birthdays and external IDs subtract deterministic penalties rather than erasing otherwise independent evidence. Automatic matching in the presence of such a disagreement additionally requires corroborating name/alias or shared-media evidence. A same-name, role-compatible attribution to a different provider person caps the score at `0.55` and prevents automatic matching. Scores are clamped to `[0, 1]`. Default interpretation:
 
 - `>= 0.75`: join the shadow graph;
 - `0.40–0.749...`: human review;
 - `< 0.40`: do not propose an alignment.
 
-Diacritics, punctuation and whitespace are normalized for name comparison. Name equality never creates a candidate by itself. The configurable values are decision thresholds only; the feature contributions are part of the versioned model.
+Diacritics, punctuation and whitespace are normalized for name comparison. Name equality never creates a candidate by itself. The configurable values are decision thresholds only; the feature contributions are part of the versioned model. The persisted number is deterministic evidence strength, not a statistically calibrated probability.
 
 ## Gravitational resolution
 
@@ -164,12 +165,12 @@ The result remains a proposal in plugin shadow storage. No `BaseItem`, provider 
 
 ## UI contract
 
-The evidence page loads at most the configured summary limit (default 100), ordered as `SPLIT`, `CONFLATION`, `DRIFT`, `ORPHAN`, then `MATCH`. Each summary includes:
+The evidence page loads at most the configured summary limit (default 100), ordered as `SPLIT`, `CONFLATION`, `DRIFT`, `ORPHAN`, `MATCH_WITH_CONFLICT`, then `MATCH`. Each summary includes:
 
 - decision status and proposed shadow action;
 - ordinary-language headline and explanation;
 - chosen Emby anchor and provider identities;
-- provider-identity confidence, local-anchor confidence and impacted-title count;
+- provider-identity evidence strength, local-anchor confidence and impacted-title count;
 - expandable ordered evidence with verdicts and stored raw metrics; and
 - a capped display set of impacted titles, while all impacted rows remain stored.
 

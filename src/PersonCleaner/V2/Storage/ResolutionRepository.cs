@@ -408,7 +408,11 @@ WHERE a.run_id=@run AND a.outcome='PRESENT'";
                     PairFeature(x, runId, pair.PairId, "compatible_role_matches", score.CompatibleRoleMatches, null);
                     PairFeature(x, runId, pair.PairId, "name_frequency", score.NameFrequency, score.ExactNameMatch ? "exact" : score.AliasMatch ? "alias" : "none");
                     PairFeature(x, runId, pair.PairId, "birthday", null, score.BirthdayState);
+                    PairFeature(x, runId, pair.PairId, "birthday_detail", null, score.BirthdayDetail);
                     PairFeature(x, runId, pair.PairId, "external_id", null, score.ExternalIdState);
+                    PairFeature(x, runId, pair.PairId, "external_id_matches", null, score.IdentifierMatchDetail);
+                    PairFeature(x, runId, pair.PairId, "external_id_conflicts", null, score.IdentifierConflictDetail);
+                    PairFeature(x, runId, pair.PairId, "native_provider_crosswalk", score.NativeProviderCrosswalkMatch ? 1 : 0, score.NativeProviderCrosswalkMatch ? "exact" : "missing");
                     PairFeature(x, runId, pair.PairId, "competing_attributions", score.CompetingAttributionCount, null);
                 }
                 foreach (var cluster in clusters ?? new ResolutionClusterSnapshot[0])
@@ -499,7 +503,7 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
                 if (run == null) return null;
 
                 var counts = new List<string>();
-                using (var s = db.PrepareStatement("SELECT status,count(*) FROM resolution_decision WHERE run_id=@run GROUP BY status ORDER BY CASE status WHEN 'SPLIT' THEN 0 WHEN 'CONFLATION' THEN 1 WHEN 'DRIFT' THEN 2 WHEN 'ORPHAN' THEN 3 ELSE 4 END,status"))
+                using (var s = db.PrepareStatement("SELECT status,count(*) FROM resolution_decision WHERE run_id=@run GROUP BY status ORDER BY CASE status WHEN 'SPLIT' THEN 0 WHEN 'CONFLATION' THEN 1 WHEN 'DRIFT' THEN 2 WHEN 'ORPHAN' THEN 3 WHEN 'MATCH_WITH_CONFLICT' THEN 4 ELSE 5 END,status"))
                 {
                     s.Bind("@run", run.RunId);
                     foreach (var r in s.Rows()) counts.Add(r.GetString(0) + "=" + r.GetInt(1).ToString(CultureInfo.InvariantCulture));
@@ -516,7 +520,7 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
             {
                 var latest = 0L; using (var q = db.PrepareStatement("SELECT max(run_id) FROM resolution_run WHERE status='completed'")) foreach (var r in q.Rows()) if (!r.IsDBNull(0)) latest = r.GetInt64(0);
                 const string visible = "SELECT decision_id FROM (SELECT decision_id,status,confidence,impact_media_count,ROW_NUMBER() OVER(PARTITION BY status ORDER BY confidence ASC,impact_media_count DESC,decision_id) AS status_row FROM resolution_decision WHERE run_id=@run) WHERE status_row<=@summaryLimit";
-                using (var s = db.PrepareStatement("WITH visible AS (" + visible + ") SELECT d.decision_id,d.status,d.action,d.display_name,d.anchor_emby_id,d.provider_keys,d.confidence,d.impact_media_count,d.headline,d.explanation,d.local_anchor_confidence FROM resolution_decision d JOIN visible v ON v.decision_id=d.decision_id WHERE d.run_id=@run ORDER BY CASE d.status WHEN 'SPLIT' THEN 0 WHEN 'CONFLATION' THEN 1 WHEN 'DRIFT' THEN 2 WHEN 'ORPHAN' THEN 3 ELSE 4 END,d.confidence ASC,d.impact_media_count DESC,d.decision_id"))
+                using (var s = db.PrepareStatement("WITH visible AS (" + visible + ") SELECT d.decision_id,d.status,d.action,d.display_name,d.anchor_emby_id,d.provider_keys,d.confidence,d.impact_media_count,d.headline,d.explanation,d.local_anchor_confidence FROM resolution_decision d JOIN visible v ON v.decision_id=d.decision_id WHERE d.run_id=@run ORDER BY CASE d.status WHEN 'SPLIT' THEN 0 WHEN 'CONFLATION' THEN 1 WHEN 'DRIFT' THEN 2 WHEN 'ORPHAN' THEN 3 WHEN 'MATCH_WITH_CONFLICT' THEN 4 ELSE 5 END,d.confidence ASC,d.impact_media_count DESC,d.decision_id"))
                 {
                     s.Bind("@run", latest); s.Bind("@summaryLimit", Math.Max(1, maximumRows));
                     foreach (var r in s.Rows()) result.Add(new DashboardDecision { DecisionId = r.GetString(0), Status = r.GetString(1), Action = r.GetString(2), Person = r.GetString(3), EmbyAnchor = r.IsDBNull(4) ? "—" : r.GetInt64(4).ToString(CultureInfo.InvariantCulture), ProviderIdentities = r.GetString(5), Confidence = r.GetDouble(6).ToString("P0", CultureInfo.InvariantCulture), ImpactedTitles = r.GetInt(7), Decision = r.GetString(8), Why = r.GetString(9), LocalAnchorConfidence = r.GetDouble(10).ToString("P0", CultureInfo.InvariantCulture) });
