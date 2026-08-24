@@ -20,6 +20,8 @@ namespace PersonCleaner.Configuration
         public int TvdbMinimumRequestIntervalMilliseconds { get; set; } = 150;
         public int TmdbMinimumRequestIntervalMilliseconds { get; set; } = 40;
 
+        // Legacy schema-2 settings remain solely so existing XML configuration
+        // deserializes without data loss. Evidence model v2 ignores these weights.
         public double FilmographyWeight { get; set; } = 0.45;
         public double BirthdayWeight { get; set; } = 0.25;
         public double ExactNameWeight { get; set; } = 0.20;

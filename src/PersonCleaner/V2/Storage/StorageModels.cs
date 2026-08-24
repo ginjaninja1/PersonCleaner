@@ -18,6 +18,7 @@ namespace PersonCleaner.V2.Storage
         public string PayloadHash { get; set; }
         public string RelativePath { get; set; }
         public long LastFetchedUnix { get; set; }
+        public int MaterializerVersion { get; set; }
     }
 
     internal sealed class PersonSeedSummary
@@ -38,7 +39,9 @@ namespace PersonCleaner.V2.Storage
         public string Person { get; set; }
         public string EmbyAnchor { get; set; }
         public string ProviderIdentities { get; set; }
+        public string CurrentProviderIds { get; set; }
         public string Confidence { get; set; }
+        public string LocalAnchorConfidence { get; set; }
         public int ImpactedTitles { get; set; }
         public string Decision { get; set; }
         public string Why { get; set; }
@@ -54,6 +57,13 @@ namespace PersonCleaner.V2.Storage
         public string Verdict { get; set; }
         public string Explanation { get; set; }
         public string RawMetric { get; set; }
+        public long? EmbyMediaId { get; set; }
+        public string MediaType { get; set; }
+        public string TmdbId { get; set; }
+        public string TvdbId { get; set; }
+        public string TvdbSlug { get; set; }
+        public string ImdbId { get; set; }
+        public string ProviderObjects { get; set; }
     }
 
     public sealed class RunStatus

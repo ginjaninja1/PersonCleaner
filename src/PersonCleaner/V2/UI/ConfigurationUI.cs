@@ -59,20 +59,12 @@ namespace PersonCleaner.V2.UI
         [DisplayName("TVDB minimum interval (milliseconds)")]
         public int TvdbMinimumRequestIntervalMilliseconds { get; set; } = 150;
 
-        public CaptionItem ScoringHeading { get; set; } = new CaptionItem("Evidence scoring");
-        [DisplayName("Filmography overlap weight")]
-        public double FilmographyWeight { get; set; }
-        [DisplayName("Birthday match weight")]
-        public double BirthdayWeight { get; set; }
-        [DisplayName("Exact normalized-name weight")]
-        public double ExactNameWeight { get; set; }
-        [DisplayName("Provider-alias weight")]
-        public double AliasWeight { get; set; }
-        [DisplayName("Birthday mismatch penalty")]
-        public double BirthdayMismatchPenalty { get; set; }
+        public CaptionItem ScoringHeading { get; set; } = new CaptionItem("Evidence decision thresholds");
         [DisplayName("Automatic alignment threshold")]
+        [Description("The evidence contributions are fixed and versioned. This threshold controls when a conflict-free pair may join the constrained shadow graph.")]
         public double AutomaticMatchThreshold { get; set; }
         [DisplayName("Human-review threshold")]
+        [Description("Conflict-free candidates below the automatic threshold but at or above this value are retained for review.")]
         public double HumanReviewThreshold { get; set; }
 
         public GenericItemList ScheduledTaskLink { get; set; } = new GenericItemList();
@@ -119,11 +111,6 @@ namespace PersonCleaner.V2.UI
             target.TvdbMaximumConcurrentRequests = Clamp(source.TvdbMaximumConcurrentRequests, 1, 8);
             target.TmdbMinimumRequestIntervalMilliseconds = Clamp(source.TmdbMinimumRequestIntervalMilliseconds, 0, 10000);
             target.TvdbMinimumRequestIntervalMilliseconds = Clamp(source.TvdbMinimumRequestIntervalMilliseconds, 0, 10000);
-            target.FilmographyWeight = Unit(source.FilmographyWeight);
-            target.BirthdayWeight = Unit(source.BirthdayWeight);
-            target.ExactNameWeight = Unit(source.ExactNameWeight);
-            target.AliasWeight = Unit(source.AliasWeight);
-            target.BirthdayMismatchPenalty = Unit(source.BirthdayMismatchPenalty);
             target.AutomaticMatchThreshold = Unit(source.AutomaticMatchThreshold);
             target.HumanReviewThreshold = Math.Min(Unit(source.HumanReviewThreshold), target.AutomaticMatchThreshold);
             Plugin.Instance.SaveConfiguration();
@@ -141,7 +128,6 @@ namespace PersonCleaner.V2.UI
                 TmdbApiKey = c.TmdbApiKey, TvdbApiKey = c.TvdbApiKey, TvdbSubscriberPin = c.TvdbSubscriberPin, CacheTtlDays = c.CacheTtlDays, FailureRetryMinutes = c.FailureRetryMinutes,
                 TmdbMaximumConcurrentRequests = c.TmdbMaximumConcurrentRequests, TvdbMaximumConcurrentRequests = c.TvdbMaximumConcurrentRequests,
                 TmdbMinimumRequestIntervalMilliseconds = c.TmdbMinimumRequestIntervalMilliseconds, TvdbMinimumRequestIntervalMilliseconds = c.TvdbMinimumRequestIntervalMilliseconds,
-                FilmographyWeight = c.FilmographyWeight, BirthdayWeight = c.BirthdayWeight, ExactNameWeight = c.ExactNameWeight, AliasWeight = c.AliasWeight, BirthdayMismatchPenalty = c.BirthdayMismatchPenalty,
                 AutomaticMatchThreshold = c.AutomaticMatchThreshold, HumanReviewThreshold = c.HumanReviewThreshold,
                 ScheduledTaskLink = new GenericItemList { new GenericListItem { PrimaryText = "Run or schedule evidence calculation", SecondaryText = "Hydration and calculation are background work; the dashboard stays query-only.", Icon = IconNames.schedule, Status = ItemStatus.Succeeded, HyperLink = link, HyperLinkTargetExternal = false } }
             };

@@ -6,11 +6,21 @@ using System.Linq;
 internal static class Program
 {
     private static int passed;
+    private static int failed;
     public static int Main()
     {
         Run("normalizes human names", NormalizesNames);
+        Run("Wikipedia slug is not a Wikidata person ID", WikipediaIsNotWikidata);
+        Run("typed external IDs reject the wrong entity shape", TypedExternalIdsRejectWrongShape);
+        Run("Johnny Depp remains a hard external-ID match", JohnnyDeppIsHardMatch);
         Run("hard identifier bridge selects gravitational anchor", HardBridgeSelectsAnchor);
         Run("ambiguous overlap stays in human review", AmbiguousOverlapRequiresReview);
+        Run("Neil subset with matching role joins without penalizing missing TVDB credit", NeilSubsetRoleEvidenceMatches);
+        Run("two shared credits accumulate enough evidence without birthdays", TwoSharedCreditsAccumulateEvidence);
+        Run("asymmetric media IDs resolve through the full crosswalk graph", AsymmetricMediaIdsResolveTransitively);
+        Run("missing external ids are neutral", MissingExternalIdsAreNeutral);
+        Run("conflicting external ids prevent merge", ConflictingExternalIdsPreventMerge);
+        Run("competing same-name attribution prevents automatic merge", CompetingAttributionRequiresReview);
         Run("birthday conflict prevents merge and exposes split", BirthdayConflictExposesSplit);
         Run("local media mass survives provider id drift", MediaMassSurvivesIdDrift);
         Run("operator bridge joins disconnected provider records", OperatorBridgeJoinsRecords);
@@ -19,13 +29,54 @@ internal static class Program
         Run("same name alone never establishes identity", SameNameAloneDoesNotMerge);
         Run("shared title alone never creates a person candidate", SharedTitleAloneDoesNotCreateCandidate);
         Run("one uncertain alignment produces review without duplicate split", ReviewDoesNotDuplicateSplit);
-        Console.WriteLine("Passed " + passed + " entity-resolution tests.");
-        return 0;
+        Run("stable singleton binding is not emitted as a 100 percent provider match", StableSingletonIsNotProviderMatch);
+        Run("same-provider collision is blocked at component boundary", SameProviderCollisionIsBlocked);
+        Run("manual rejection survives a transitive path", ManualRejectionSurvivesTransitivePath);
+        Console.WriteLine("Passed " + passed + " entity-resolution tests; failed " + failed + ".");
+        return failed == 0 ? 0 : 1;
     }
 
     private static void NormalizesNames()
     {
         Equal("jose o connor jr", TextNormalizer.PersonName("  José O’Connor, Jr. "));
+    }
+
+    private static void WikipediaIsNotWikidata()
+    {
+        string provider; string value;
+        True(ExternalIdNormalizer.TryPersonId("Wikidata", "Q37175", out provider, out value));
+        Equal(ProviderNames.Wikidata, provider);
+        Equal("Q37175", value);
+        True(!ExternalIdNormalizer.TryPersonId("Wikipedia", "Johnny_Depp", out provider, out value));
+    }
+
+    private static void TypedExternalIdsRejectWrongShape()
+    {
+        string provider; string value;
+        True(ExternalIdNormalizer.TryPersonId("IMDB", "NM0000136", out provider, out value));
+        Equal("nm0000136", value);
+        True(!ExternalIdNormalizer.TryPersonId("IMDB", "tt0325980", out provider, out value));
+        True(ExternalIdNormalizer.TryMediaId("IMDB", "TT0325980", out provider, out value));
+        Equal("tt0325980", value);
+        True(!ExternalIdNormalizer.TryPersonId("Wikidata", "Johnny_Depp", out provider, out value));
+    }
+
+    private static void JohnnyDeppIsHardMatch()
+    {
+        var tmdb = Person(ProviderNames.Tmdb, "85", "Johnny Depp", ProviderNames.Imdb, "nm0000136", "one", "two", "three");
+        tmdb.ExternalIds[ProviderNames.Wikidata] = "Q37175";
+        tmdb.Birthday = "1963-06-09";
+        var tvdb = Person(ProviderNames.Tvdb, "259154", "Johnny Depp", ProviderNames.Imdb, "nm0000136", "one", "two", "three");
+        tvdb.ExternalIds[ProviderNames.Wikidata] = "Q37175";
+        tvdb.Birthday = "1963-06-09";
+        AddObservedCredit(tmdb, "one", "Actor", "Jack Sparrow"); AddObservedCredit(tvdb, "one", "Actor", "Jack Sparrow");
+        AddObservedCredit(tmdb, "two", "Actor", "Role A"); AddObservedCredit(tvdb, "two", "Actor", "Role B");
+        AddObservedCredit(tmdb, "three", "Actor", "Role C"); AddObservedCredit(tvdb, "three", "Actor", "Role D");
+        var score = ResolutionEngine.Score(tmdb, tvdb, new ResolutionSettings());
+        True(score.HardIdentifierMatch);
+        True(!score.IdentifierConflict);
+        Equal("exact", score.ExternalIdState);
+        Equal(1.0, score.Score);
     }
 
     private static void HardBridgeSelectsAnchor()
@@ -50,7 +101,119 @@ internal static class Program
         var decisions = new ResolutionEngine().Resolve(BaseInput(tmdb, tvdb), new ResolutionSettings());
         var review = decisions.Single(x => x.Action == "HUMAN_REVIEW" && x.Status == "CONFLATION");
         True(review.Confidence >= 0.40 && review.Confidence < 0.75);
-        True(review.Headline.Contains("not strong enough"));
+        True(review.Headline.Contains("below the automatic threshold"));
+    }
+
+    private static void NeilSubsetRoleEvidenceMatches()
+    {
+        var tmdb = Person(ProviderNames.Tmdb, "85970", "Neil Edmond", ProviderNames.Imdb, "nm0249467", "imdb:tt2567026", "imdb:tt21994906");
+        var tvdb = Person(ProviderNames.Tvdb, "484902", "Neil Edmond", null, null, "imdb:tt2567026");
+        AddObservedCredit(tmdb, "imdb:tt2567026", "Actor", "Footman");
+        AddObservedCredit(tmdb, "imdb:tt21994906", "Actor", "Middle Aged Man");
+        AddObservedCredit(tvdb, "imdb:tt2567026", "Actor", "Footman");
+        tmdb.Birthday = "1970-12-01";
+        var input = BaseInput(tmdb, tvdb);
+        input.ProviderCredits.AddRange(tmdb.Credits.Concat(tvdb.Credits));
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 40924, Name = "Neil Edmond", TmdbId = "85970", TvdbId = "484902" });
+        input.Media.AddRange(new[] { Media(1, "Alice Through the Looking Glass"), Media(2, "Your Christmas or Mine?") });
+        input.LocalCredits.AddRange(new[] { Credit(40924, 1), Credit(40924, 2) });
+        var engine = new ResolutionEngine();
+        var match = engine.Resolve(input, new ResolutionSettings()).Single(x => x.Status == "MATCH");
+        var score = engine.PairEvaluations.Single().Score;
+        Equal(1, score.SharedMediaCount);
+        Equal(0.5, score.FilmographyJaccard);
+        Equal(1.0, score.FilmographyContainment);
+        Equal(1, score.ExactRoleMatches);
+        Equal("missing-opposite", score.ExternalIdState);
+        Equal("missing", score.BirthdayState);
+        True(score.Score >= 0.75);
+        True(match.Evidence.Any(x => x.SignalType == "FILMOGRAPHY" && x.Narrative.Contains("not negative evidence")));
+    }
+
+    private static void TwoSharedCreditsAccumulateEvidence()
+    {
+        var left = Person(ProviderNames.Tmdb, "two-left", "Taylor Evidence", null, null, "one", "two");
+        var right = Person(ProviderNames.Tvdb, "two-right", "Taylor Evidence", null, null, "one", "two");
+        var score = ResolutionEngine.Score(left, right, new ResolutionSettings());
+        True(score.Score >= 0.75);
+    }
+
+    private static void AsymmetricMediaIdsResolveTransitively()
+    {
+        var media = new[]
+        {
+            ProviderMedia(ProviderNames.Tmdb, "67928", External(ProviderNames.Imdb, "tt0781574"), External(ProviderNames.Wikidata, "Q7906940")),
+            ProviderMedia(ProviderNames.Tvdb, "78640", External(ProviderNames.Tmdb, "67928")),
+            ProviderMedia(ProviderNames.Tmdb, "31107", External(ProviderNames.Imdb, "tt1556240")),
+            ProviderMedia(ProviderNames.Tvdb, "63457", External(ProviderNames.Imdb, "tt1556240"), External(ProviderNames.Tmdb, "31107"))
+        };
+        var keys = MediaIdentityResolver.Resolve(media);
+        Equal(keys[MediaIdentityResolver.RecordKey(ProviderNames.Tmdb, MediaTypes.Movie, "67928")], keys[MediaIdentityResolver.RecordKey(ProviderNames.Tvdb, MediaTypes.Movie, "78640")]);
+        Equal(keys[MediaIdentityResolver.RecordKey(ProviderNames.Tmdb, MediaTypes.Movie, "31107")], keys[MediaIdentityResolver.RecordKey(ProviderNames.Tvdb, MediaTypes.Movie, "63457")]);
+
+        var left = Person(ProviderNames.Tmdb, "107618", "Patti Scialfa", ProviderNames.Imdb, "nm0778393",
+            keys[MediaIdentityResolver.RecordKey(ProviderNames.Tmdb, MediaTypes.Movie, "67928")],
+            keys[MediaIdentityResolver.RecordKey(ProviderNames.Tmdb, MediaTypes.Movie, "31107")]);
+        var right = Person(ProviderNames.Tvdb, "334647", "Patti Scialfa", null, null,
+            keys[MediaIdentityResolver.RecordKey(ProviderNames.Tvdb, MediaTypes.Movie, "78640")],
+            keys[MediaIdentityResolver.RecordKey(ProviderNames.Tvdb, MediaTypes.Movie, "63457")]);
+        AddObservedCredit(left, left.CanonicalMediaKeys.ElementAt(0), "Actor", "Self");
+        AddObservedCredit(left, left.CanonicalMediaKeys.ElementAt(1), "Actor", "Self");
+        AddObservedCredit(right, right.CanonicalMediaKeys.ElementAt(0), "Actor", "Herself");
+        AddObservedCredit(right, right.CanonicalMediaKeys.ElementAt(1), "Actor", "Herself");
+        var input = BaseInput(left, right);
+        input.ProviderCredits.AddRange(left.Credits.Concat(right.Credits));
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 290806, Name = "Patti Scialfa", TmdbId = "107618", TvdbId = "334647", ImdbId = "nm0778393" });
+        var engine = new ResolutionEngine();
+        var decisions = engine.Resolve(input, new ResolutionSettings());
+        var score = engine.PairEvaluations.Single().Score;
+        Equal(2, score.SharedMediaCount);
+        Equal(1.0, score.FilmographyContainment);
+        True(score.Score >= 0.75);
+        True(decisions.Any(x => x.Status == "MATCH"));
+    }
+
+    private static void MissingExternalIdsAreNeutral()
+    {
+        var withId = Person(ProviderNames.Tmdb, "id-left", "Neutral Missing", ProviderNames.Imdb, "nm100", "shared");
+        var withoutId = Person(ProviderNames.Tvdb, "id-right", "Neutral Missing", null, null, "shared");
+        AddObservedCredit(withId, "shared", "Actor", "Clerk");
+        AddObservedCredit(withoutId, "shared", "Actor", "Clerk");
+        var score = ResolutionEngine.Score(withId, withoutId, new ResolutionSettings());
+        Equal("missing-opposite", score.ExternalIdState);
+        True(!score.IdentifierConflict);
+        True(score.Score >= 0.75);
+    }
+
+    private static void ConflictingExternalIdsPreventMerge()
+    {
+        var left = Person(ProviderNames.Tmdb, "conflict-left", "Identifier Conflict", ProviderNames.Imdb, "nm-left", "shared");
+        var right = Person(ProviderNames.Tvdb, "conflict-right", "Identifier Conflict", ProviderNames.Imdb, "nm-right", "shared");
+        AddObservedCredit(left, "shared", "Actor", "Clerk");
+        AddObservedCredit(right, "shared", "Actor", "Clerk");
+        var input = BaseInput(left, right);
+        input.ProviderCredits.AddRange(left.Credits.Concat(right.Credits));
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 810, Name = "Identifier Conflict", TmdbId = "conflict-left", TvdbId = "conflict-right" });
+        var engine = new ResolutionEngine();
+        var decisions = engine.Resolve(input, new ResolutionSettings());
+        True(engine.PairEvaluations.Single().Score.IdentifierConflict);
+        True(engine.PairEvaluations.Single().Score.Score < 0.40);
+        True(decisions.Any(x => x.Status == "SPLIT" && x.Evidence.Any(e => e.SignalType == "EXTERNAL_ID" && e.Verdict == "conflicts")));
+    }
+
+    private static void CompetingAttributionRequiresReview()
+    {
+        var left = Person(ProviderNames.Tmdb, "primary-left", "Jordan Credit", null, null, "shared", "exclusive");
+        var right = Person(ProviderNames.Tvdb, "primary-right", "Jordan Credit", null, null, "shared");
+        var competitor = Person(ProviderNames.Tvdb, "competitor", "Jordan Credit", null, null, "exclusive");
+        AddObservedCredit(left, "shared", "Actor", "A"); AddObservedCredit(left, "exclusive", "Actor", "B");
+        AddObservedCredit(right, "shared", "Actor", "A"); AddObservedCredit(competitor, "exclusive", "Actor", "B");
+        var input = BaseInput(left, right, competitor);
+        input.ProviderCredits.AddRange(left.Credits.Concat(right.Credits).Concat(competitor.Credits));
+        var engine = new ResolutionEngine(); engine.Resolve(input, new ResolutionSettings());
+        var pair = engine.PairEvaluations.Single(x => x.LeftProviderId == "primary-left" && x.RightProviderId == "primary-right");
+        Equal(1, pair.Score.CompetingAttributionCount);
+        Equal("human-review", pair.Disposition);
     }
 
     private static void BirthdayConflictExposesSplit()
@@ -62,7 +225,7 @@ internal static class Program
         input.Media.Add(Media(1, "Shared")); input.LocalCredits.Add(Credit(300, 1));
         var decisions = new ResolutionEngine().Resolve(input, new ResolutionSettings());
         var split = decisions.Single(x => x.Status == "SPLIT");
-        True(split.Headline.Contains("2 disconnected"));
+        True(split.Headline.Contains("2 constraint-separated"));
         True(!decisions.Any(x => x.Action == "AUTO_MERGE_SHADOW"));
     }
 
@@ -92,8 +255,50 @@ internal static class Program
         var input = BaseInput(left, right);
         input.LocalPeople.Add(new LocalPerson { EmbyId = 800, Name = "Robin Review", TmdbId = "17", TvdbId = "27" });
         var decisions = new ResolutionEngine().Resolve(input, new ResolutionSettings());
-        Equal(1, decisions.Count(x => x.Status == "CONFLATION"));
+        var review = decisions.Single(x => x.Status == "CONFLATION");
+        Equal(800L, review.AnchorEmbyPersonId.Value);
         True(!decisions.Any(x => x.Status == "SPLIT"));
+    }
+
+    private static void StableSingletonIsNotProviderMatch()
+    {
+        var provider = Person(ProviderNames.Tmdb, "singleton", "Stable Singleton", null, null, "tmdb:movie:1");
+        var input = BaseInput(provider);
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 820, Name = "Stable Singleton", TmdbId = "singleton" });
+        input.Media.Add(Media(1, "Only title")); input.LocalCredits.Add(Credit(820, 1));
+        var decisions = new ResolutionEngine().Resolve(input, new ResolutionSettings());
+        True(!decisions.Any(x => x.Status == "MATCH"));
+    }
+
+    private static void SameProviderCollisionIsBlocked()
+    {
+        var leftOne = Person(ProviderNames.Tmdb, "same-provider-1", "Collision Name", null, null, "shared");
+        var leftTwo = Person(ProviderNames.Tmdb, "same-provider-2", "Collision Name", null, null, "shared");
+        var right = Person(ProviderNames.Tvdb, "same-provider-right", "Collision Name", null, null, "shared");
+        AddObservedCredit(leftOne, "shared", "Actor", "Role"); AddObservedCredit(leftTwo, "shared", "Actor", "Role"); AddObservedCredit(right, "shared", "Actor", "Role");
+        var input = BaseInput(leftOne, leftTwo, right); input.ProviderCredits.AddRange(leftOne.Credits.Concat(leftTwo.Credits).Concat(right.Credits));
+        var engine = new ResolutionEngine(); engine.Resolve(input, new ResolutionSettings());
+        Equal(1, engine.Diagnostics.ConstraintBlockedCandidates);
+        Equal(1, engine.PairEvaluations.Count(x => x.Disposition == "automatic"));
+        Equal(1, engine.PairEvaluations.Count(x => x.Disposition == "constraint-blocked"));
+    }
+
+    private static void ManualRejectionSurvivesTransitivePath()
+    {
+        var a = Person(ProviderNames.Tmdb, "a", "Path Person", null, null, "a-d");
+        var d = Person(ProviderNames.Tvdb, "d", "Path Person", null, null, "a-d", "c-d");
+        var c = Person(ProviderNames.Tmdb, "c", "Path Person", ProviderNames.Imdb, "nm-path", "c-d", "b-c");
+        var b = Person(ProviderNames.Tvdb, "b", "Path Person", ProviderNames.Imdb, "nm-path", "b-c");
+        AddObservedCredit(c, "b-c", "Actor", "Role"); AddObservedCredit(b, "b-c", "Actor", "Role");
+        var input = BaseInput(a, d, c, b); input.ProviderCredits.AddRange(a.Credits.Concat(d.Credits).Concat(c.Credits).Concat(b.Credits));
+        input.Bridges.Add(new ManualBridge { ProviderA = ProviderNames.Tmdb, ProviderIdA = "a", ProviderB = ProviderNames.Tvdb, ProviderIdB = "d" });
+        input.Bridges.Add(new ManualBridge { ProviderA = ProviderNames.Tmdb, ProviderIdA = "c", ProviderB = ProviderNames.Tvdb, ProviderIdB = "d" });
+        input.Bridges.Add(new ManualBridge { ProviderA = ProviderNames.Tmdb, ProviderIdA = "a", ProviderB = ProviderNames.Tvdb, ProviderIdB = "b", IsRejected = true });
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 830, Name = "Path Person", TmdbId = "a", TvdbId = "b" });
+        var engine = new ResolutionEngine(); var decisions = engine.Resolve(input, new ResolutionSettings());
+        var bc = engine.PairEvaluations.Single(x => x.LeftProviderId == "c" && x.RightProviderId == "b");
+        Equal("constraint-blocked", bc.Disposition);
+        True(decisions.Any(x => x.Status == "SPLIT"));
     }
 
     private static void MediaMassSurvivesIdDrift()
@@ -105,7 +310,7 @@ internal static class Program
         var decisions = new ResolutionEngine().Resolve(input, new ResolutionSettings());
         var drift = decisions.Single(x => x.Status == "DRIFT");
         Equal(400L, drift.AnchorEmbyPersonId.Value);
-        True(drift.Headline.Contains("pull the new provider profile back"));
+        True(drift.Headline.Contains("pull the provider profile back"));
         True(!decisions.Any(x => x.Status == "ORPHAN"));
     }
 
@@ -151,9 +356,15 @@ internal static class Program
         if (externalProvider != null) result.ExternalIds[externalProvider] = externalId;
         return result;
     }
+    private static void AddObservedCredit(ProviderPerson person, string media, string category, string role)
+    {
+        person.Credits.Add(new ObservedProviderCredit { Provider = person.Provider, ProviderPersonId = person.ProviderId, PersonName = person.Name, CanonicalMediaKey = media, RoleCategory = category, RoleName = role, Role = category + ": " + role });
+    }
     private static MediaSeed Media(long id, string name) => new MediaSeed { EmbyId = id, MediaType = MediaTypes.Movie, Name = name, TmdbId = id.ToString() };
     private static LocalCredit Credit(long person, long media) => new LocalCredit { PersonEmbyId = person, MediaEmbyId = media, Role = "Actor" };
-    private static void Run(string name, Action test) { try { test(); passed++; Console.WriteLine("PASS " + name); } catch (Exception ex) { Console.Error.WriteLine("FAIL " + name + ": " + ex.Message); throw; } }
+    private static ProviderMediaIdentity ProviderMedia(string provider, string id, params MediaExternalIdentity[] externalIds) => new ProviderMediaIdentity { Provider = provider, MediaType = MediaTypes.Movie, ProviderMediaId = id, ExternalIds = externalIds.ToList() };
+    private static MediaExternalIdentity External(string provider, string id) => new MediaExternalIdentity { Provider = provider, Id = id };
+    private static void Run(string name, Action test) { try { test(); passed++; Console.WriteLine("PASS " + name); } catch (Exception ex) { failed++; Console.Error.WriteLine("FAIL " + name + ": " + ex.Message); } }
     private static void True(bool condition) { if (!condition) throw new InvalidOperationException("Expected true."); }
     private static void Equal<T>(T expected, T actual) { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException("Expected '" + expected + "' but got '" + actual + "'."); }
 }

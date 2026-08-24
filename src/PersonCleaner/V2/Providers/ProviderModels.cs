@@ -55,6 +55,7 @@ namespace PersonCleaner.V2.Providers
     {
         public int id { get; set; }
         public string name { get; set; }
+        public string slug { get; set; }
         public string birth { get; set; }
         public List<TvdbRemoteId> remoteIds { get; set; } = new List<TvdbRemoteId>();
         public List<TvdbAlias> aliases { get; set; } = new List<TvdbAlias>();

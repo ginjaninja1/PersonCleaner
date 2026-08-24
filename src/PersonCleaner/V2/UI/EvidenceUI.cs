@@ -55,10 +55,11 @@ namespace PersonCleaner.V2.UI
         private readonly IJsonSerializer json;
         private readonly ILogger logger;
         private readonly PluginInfo plugin;
+        private readonly IServerApplicationHost host;
         private string overrideResult;
         public EvidencePageView(PluginInfo plugin, IServerApplicationHost host, ILogger logger) : base(plugin.Id)
         {
-            this.plugin = plugin; this.paths = host.Resolve<IApplicationPaths>(); this.json = host.Resolve<IJsonSerializer>(); this.logger = logger; ShowSave = false; Rebuild();
+            this.plugin = plugin; this.host = host; this.paths = host.Resolve<IApplicationPaths>(); this.json = host.Resolve<IJsonSerializer>(); this.logger = logger; ShowSave = false; Rebuild();
         }
 
         public override Task<IPluginUIView> RunCommand(string itemId, string commandId, string data)
@@ -66,7 +67,7 @@ namespace PersonCleaner.V2.UI
             try
             {
                 if (commandId == "open-evidence")
-                    return Task.FromResult<IPluginUIView>(new EvidenceDialogView(plugin, paths, logger));
+                    return Task.FromResult<IPluginUIView>(new EvidenceDialogView(plugin, host, logger));
 
                 if ((commandId == "confirm-bridge" || commandId == "reject-bridge") && !string.IsNullOrWhiteSpace(data))
                 {
@@ -79,9 +80,10 @@ namespace PersonCleaner.V2.UI
                         if (run != null)
                         {
                             var c = Plugin.Instance.Configuration;
-                            var settings = new ResolutionSettings { FilmographyWeight = c.FilmographyWeight, BirthdayWeight = c.BirthdayWeight, ExactNameWeight = c.ExactNameWeight, AliasWeight = c.AliasWeight, BirthdayMismatchPenalty = c.BirthdayMismatchPenalty, AutomaticMatchThreshold = c.AutomaticMatchThreshold, HumanReviewThreshold = c.HumanReviewThreshold, MaximumMediaExamples = c.MaximumMediaExamplesPerDecision };
-                            var decisions = new ResolutionEngine().Resolve(repository.LoadResolutionInput(), settings);
-                            repository.SaveDecisions(run.RunId, decisions);
+                            var settings = new ResolutionSettings { AutomaticMatchThreshold = c.AutomaticMatchThreshold, HumanReviewThreshold = c.HumanReviewThreshold, MaximumMediaExamples = c.MaximumMediaExamplesPerDecision };
+                            var engine = new ResolutionEngine();
+                            var decisions = engine.Resolve(repository.LoadResolutionInput(), settings);
+                            repository.SaveDecisions(run.RunId, decisions, engine.PairEvaluations, engine.Clusters);
                         }
                     }
                     overrideResult = commandId == "reject-bridge" ? "Alignment rejected and cached decisions recalculated." : "Alignment confirmed and cached decisions recalculated.";

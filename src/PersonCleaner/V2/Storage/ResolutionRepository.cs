@@ -12,6 +12,7 @@ namespace PersonCleaner.V2.Storage
 {
     internal sealed class ResolutionRepository : IDisposable
     {
+        private const int SchemaVersion = 4;
         private readonly object sync = new object();
         private IDatabaseConnection db;
         public string WorkspacePath { get; }
@@ -39,8 +40,21 @@ namespace PersonCleaner.V2.Storage
                 db.Execute("PRAGMA synchronous=NORMAL");
                 db.Execute("PRAGMA foreign_keys=ON");
                 db.Execute("PRAGMA busy_timeout=30000");
+                db.Execute(Schema[0]);
+                int? version = null;
+                using (var s = db.PrepareStatement("SELECT version FROM schema_info WHERE singleton=1")) foreach (var r in s.Rows()) version = r.GetInt(0);
+                if (version.HasValue && version.Value != SchemaVersion)
+                {
+                    db.Dispose(); db = null;
+                    throw new InvalidOperationException("PersonCleaner database schema " + version.Value + " is not schema " + SchemaVersion + ". Stop Emby and apply the remaining numbered SQL files in migrations\\ offline before restarting Emby.");
+                }
                 foreach (var sql in Schema) db.Execute(sql);
-                db.Execute("INSERT OR IGNORE INTO schema_info(singleton,version) VALUES(1,1)");
+                if (!version.HasValue) db.Execute("INSERT INTO schema_info(singleton,version) VALUES(1," + SchemaVersion.ToString(CultureInfo.InvariantCulture) + ")");
+                if (!ColumnExists("provider_media", "slug") || !ColumnExists("provider_media_credit", "role_category") || !ColumnExists("resolution_decision", "local_anchor_confidence") || !ColumnExists("cache_manifest", "materializer_version") || !ColumnExists("provider_media_observation", "materializer_version") || !TableExists("resolution_pair") || !TableExists("resolution_cluster"))
+                {
+                    db.Dispose(); db = null;
+                    throw new InvalidOperationException("PersonCleaner schema 4 is incomplete. Stop Emby and restore the most recent pre-migration backup before applying the numbered migrations again.");
+                }
                 // v2 originally represented the non-media dimension of person
                 // work as an empty string. Emby's SQLite binder can coerce an
                 // empty bound string to NULL, which violates these key columns.
@@ -181,17 +195,22 @@ JOIN current_media m ON m.media_type=c.media_type AND ((c.provider='tmdb' AND m.
 
         public CacheEntry GetCache(string provider, string entityType, string mediaType, string providerId)
         {
-            lock (sync) using (var s = db.PrepareStatement("SELECT payload_hash,relative_path,last_fetched_utc FROM cache_manifest WHERE provider=@provider AND entity_type=@entity AND media_type=@media AND provider_id=@id"))
+            lock (sync) using (var s = db.PrepareStatement("SELECT payload_hash,relative_path,last_fetched_utc,materializer_version FROM cache_manifest WHERE provider=@provider AND entity_type=@entity AND media_type=@media AND provider_id=@id"))
             {
                 s.Bind("@provider", provider); s.Bind("@entity", entityType); s.Bind("@media", Dimension(entityType, mediaType)); s.Bind("@id", providerId);
-                foreach (var r in s.Rows()) return new CacheEntry { Provider = provider, EntityType = entityType, MediaType = mediaType, ProviderId = providerId, PayloadHash = r.GetString(0), RelativePath = r.GetString(1), LastFetchedUnix = r.GetInt64(2) };
+                foreach (var r in s.Rows()) return new CacheEntry { Provider = provider, EntityType = entityType, MediaType = mediaType, ProviderId = providerId, PayloadHash = r.GetString(0), RelativePath = r.GetString(1), LastFetchedUnix = r.GetInt64(2), MaterializerVersion = r.GetInt(3) };
             }
             return null;
         }
 
         public void SaveCache(CacheEntry entry)
         {
-            lock (sync) Statement("INSERT OR REPLACE INTO cache_manifest VALUES(@provider,@entity,@media,@id,@hash,@path,@fetched)", s => { s.Bind("@provider", entry.Provider); s.Bind("@entity", entry.EntityType); s.Bind("@media", Dimension(entry.EntityType, entry.MediaType)); s.Bind("@id", entry.ProviderId); s.Bind("@hash", entry.PayloadHash); s.Bind("@path", entry.RelativePath); s.Bind("@fetched", entry.LastFetchedUnix); });
+            lock (sync) db.RunInTransaction(x =>
+            {
+                Statement(x, "INSERT OR REPLACE INTO cache_manifest(provider,entity_type,media_type,provider_id,payload_hash,relative_path,last_fetched_utc,materializer_version) VALUES(@provider,@entity,@media,@id,@hash,@path,@fetched,@materializer)", s => { s.Bind("@provider", entry.Provider); s.Bind("@entity", entry.EntityType); s.Bind("@media", Dimension(entry.EntityType, entry.MediaType)); s.Bind("@id", entry.ProviderId); s.Bind("@hash", entry.PayloadHash); s.Bind("@path", entry.RelativePath); s.Bind("@fetched", entry.LastFetchedUnix); s.Bind("@materializer", entry.MaterializerVersion); });
+                if (entry.EntityType == "media")
+                    Statement(x, "INSERT OR REPLACE INTO provider_media_observation(provider,media_type,provider_media_id,payload_hash,observed_utc,endpoint_shape,credit_scope,is_complete,materializer_version) VALUES(@provider,@type,@id,@hash,@fetched,@endpoint,'screen-roles',1,@materializer)", s => { s.Bind("@provider", entry.Provider); s.Bind("@type", entry.MediaType); s.Bind("@id", entry.ProviderId); s.Bind("@hash", entry.PayloadHash); s.Bind("@fetched", entry.LastFetchedUnix); s.Bind("@endpoint", entry.Provider == ProviderNames.Tvdb ? "extended-full" : "details-with-credits"); s.Bind("@materializer", entry.MaterializerVersion); });
+            }, TransactionMode.Immediate);
         }
 
         public void MarkQueue(QueueItem item, string status, string error = null)
@@ -203,13 +222,13 @@ JOIN current_media m ON m.media_type=c.media_type AND ((c.provider='tmdb' AND m.
         {
             lock (sync) db.RunInTransaction(x =>
             {
-                Statement(x, "INSERT OR REPLACE INTO provider_media VALUES(@provider,@type,@id,@name,@now)", s => { s.Bind("@provider", media.Provider); s.Bind("@type", media.MediaType); s.Bind("@id", media.ProviderMediaId); s.Bind("@name", media.Name); s.Bind("@now", Now()); });
+                Statement(x, "INSERT OR REPLACE INTO provider_media(provider,media_type,provider_media_id,name,updated_utc,slug) VALUES(@provider,@type,@id,@name,@now,@slug)", s => { s.Bind("@provider", media.Provider); s.Bind("@type", media.MediaType); s.Bind("@id", media.ProviderMediaId); s.Bind("@name", media.Name); s.Bind("@now", Now()); s.Bind("@slug", media.Slug); });
                 DeleteForMedia(x, "media_external_id", media); DeleteForMedia(x, "provider_media_credit", media);
                 foreach (var id in media.ExternalIds.Where(x => !string.IsNullOrWhiteSpace(x.Value)))
                     Statement(x, "INSERT OR IGNORE INTO media_external_id VALUES(@provider,@type,@id,@source,@external)", s => { s.Bind("@provider", media.Provider); s.Bind("@type", media.MediaType); s.Bind("@id", media.ProviderMediaId); s.Bind("@source", id.Key.ToLowerInvariant()); s.Bind("@external", id.Value); });
                 foreach (var credit in media.Credits.Where(x => !string.IsNullOrWhiteSpace(x.ProviderPersonId)).GroupBy(x => x.ProviderPersonId + "|" + x.Role, StringComparer.Ordinal).Select(x => x.First()))
                 {
-                    Statement(x, "INSERT OR IGNORE INTO provider_media_credit VALUES(@provider,@type,@media,@person,@name,@role)", s => { s.Bind("@provider", media.Provider); s.Bind("@type", media.MediaType); s.Bind("@media", media.ProviderMediaId); s.Bind("@person", credit.ProviderPersonId); s.Bind("@name", credit.PersonName); s.Bind("@role", credit.Role); });
+                    Statement(x, "INSERT OR IGNORE INTO provider_media_credit(provider,media_type,provider_media_id,provider_person_id,person_name,role,role_category,role_name) VALUES(@provider,@type,@media,@person,@name,@role,@category,@roleName)", s => { s.Bind("@provider", media.Provider); s.Bind("@type", media.MediaType); s.Bind("@media", media.ProviderMediaId); s.Bind("@person", credit.ProviderPersonId); s.Bind("@name", credit.PersonName); s.Bind("@role", credit.Role); s.Bind("@category", Required(credit.RoleCategory, "Unknown")); s.Bind("@roleName", credit.RoleName); });
                 }
             }, TransactionMode.Immediate);
         }
@@ -241,34 +260,78 @@ JOIN current_media m ON m.media_type=c.media_type AND ((c.provider='tmdb' AND m.
                 var byKey = input.ProviderPeople.ToDictionary(x => x.Key, StringComparer.Ordinal);
                 using (var s = db.PrepareStatement("SELECT provider,provider_person_id,external_provider,external_id FROM person_external_id")) foreach (var r in s.Rows()) if (byKey.TryGetValue(r.GetString(0) + ":" + r.GetString(1), out var p)) p.ExternalIds[r.GetString(2)] = r.GetString(3);
                 using (var s = db.PrepareStatement("SELECT provider,provider_person_id,alias FROM person_alias")) foreach (var r in s.Rows()) if (byKey.TryGetValue(r.GetString(0) + ":" + r.GetString(1), out var p)) p.Aliases.Add(r.GetString(2));
-                const string mediaSql = "SELECT c.provider,c.provider_person_id,c.media_type,c.provider_media_id,e.external_provider,e.external_id FROM provider_media_credit c JOIN current_provider_media m ON m.provider=c.provider AND m.media_type=c.media_type AND m.provider_media_id=c.provider_media_id LEFT JOIN media_external_id e ON e.provider=c.provider AND e.media_type=c.media_type AND e.provider_media_id=c.provider_media_id";
-                var attributions = new Dictionary<string, CanonicalMediaBuilder>(StringComparer.Ordinal);
+                const string mediaSql = "SELECT m.provider,m.media_type,m.provider_media_id,e.external_provider,e.external_id FROM current_provider_media m LEFT JOIN media_external_id e ON e.provider=m.provider AND e.media_type=m.media_type AND e.provider_media_id=m.provider_media_id";
+                var providerMedia = new Dictionary<string, CanonicalMediaBuilder>(StringComparer.Ordinal);
                 using (var s = db.PrepareStatement(mediaSql)) foreach (var r in s.Rows())
                 {
-                    var personKey = r.GetString(0) + ":" + r.GetString(1);
-                    if (!byKey.ContainsKey(personKey)) continue;
-                    var attributionKey = personKey + "|" + r.GetString(2) + "|" + r.GetString(3);
-                    if (!attributions.TryGetValue(attributionKey, out var value)) attributions[attributionKey] = value = new CanonicalMediaBuilder { PersonKey = personKey, Provider = r.GetString(0), MediaType = r.GetString(2), NativeId = r.GetString(3) };
-                    if (!r.IsDBNull(4) && !r.IsDBNull(5)) value.ExternalIds[r.GetString(4)] = r.GetString(5);
+                    var mediaKey = MediaIdentityResolver.RecordKey(r.GetString(0), r.GetString(1), r.GetString(2));
+                    if (!providerMedia.TryGetValue(mediaKey, out var value)) providerMedia[mediaKey] = value = new CanonicalMediaBuilder { Provider = r.GetString(0), MediaType = r.GetString(1), NativeId = r.GetString(2) };
+                    if (!r.IsDBNull(3) && !r.IsDBNull(4)) value.ExternalIds.Add(new MediaExternalIdentity { Provider = r.GetString(3), Id = r.GetString(4) });
                 }
-                foreach (var value in attributions.Values) byKey[value.PersonKey].CanonicalMediaKeys.Add(value.CanonicalKey());
+                var canonicalMedia = MediaIdentityResolver.Resolve(providerMedia.Values.Select(x => x.Identity()));
+                const string creditSql = "SELECT c.provider,c.provider_person_id,c.person_name,c.media_type,c.provider_media_id,c.role,c.role_category,c.role_name FROM provider_media_credit c JOIN current_provider_media m ON m.provider=c.provider AND m.media_type=c.media_type AND m.provider_media_id=c.provider_media_id";
+                using (var s = db.PrepareStatement(creditSql)) foreach (var r in s.Rows())
+                {
+                    var mediaKey = MediaIdentityResolver.RecordKey(r.GetString(0), r.GetString(3), r.GetString(4));
+                    if (!providerMedia.TryGetValue(mediaKey, out var media)) continue;
+                    var credit = new ObservedProviderCredit
+                    {
+                        Provider = r.GetString(0), ProviderPersonId = r.GetString(1), PersonName = Null(r, 2), CleanPersonName = TextNormalizer.PersonName(Null(r, 2)),
+                        MediaType = r.GetString(3), ProviderMediaId = r.GetString(4), CanonicalMediaKey = canonicalMedia[mediaKey], Role = r.GetString(5),
+                        RoleCategory = r.GetString(6), RoleName = Null(r, 7)
+                    };
+                    input.ProviderCredits.Add(credit);
+                    if (byKey.TryGetValue(credit.PersonKey, out var person))
+                    {
+                        person.CanonicalMediaKeys.Add(credit.CanonicalMediaKey);
+                        person.Credits.Add(credit);
+                    }
+                }
                 using (var s = db.PrepareStatement("SELECT provider_a,provider_id_a,provider_b,provider_id_b,disposition FROM manual_bridge")) foreach (var r in s.Rows()) input.Bridges.Add(new ManualBridge { ProviderA = r.GetString(0), ProviderIdA = r.GetString(1), ProviderB = r.GetString(2), ProviderIdB = r.GetString(3), IsRejected = r.GetString(4) == "reject" });
             }
             return input;
         }
 
-        public void SaveDecisions(long runId, IReadOnlyCollection<ResolutionDecision> decisions)
+        public void SaveDecisions(long runId, IReadOnlyCollection<ResolutionDecision> decisions, IReadOnlyCollection<ResolutionPairEvaluation> pairs = null, IReadOnlyCollection<ResolutionClusterSnapshot> clusters = null)
         {
             lock (sync) db.RunInTransaction(x =>
             {
                 Statement(x, "DELETE FROM resolution_decision WHERE run_id=@run", s => s.Bind("@run", runId));
+                Statement(x, "DELETE FROM resolution_pair WHERE run_id=@run", s => s.Bind("@run", runId));
+                Statement(x, "DELETE FROM resolution_cluster WHERE run_id=@run", s => s.Bind("@run", runId));
                 foreach (var decision in decisions)
                 {
-                    Statement(x, "INSERT OR REPLACE INTO resolution_decision VALUES(@run,@id,@status,@action,@name,@anchor,@keys,@confidence,@impact,@headline,@explanation)", s => { s.Bind("@run", runId); s.Bind("@id", Required(decision.DecisionId, "decision-id-missing")); s.Bind("@status", Required(decision.Status, "UNKNOWN")); s.Bind("@action", Required(decision.Action, "HUMAN_REVIEW")); s.Bind("@name", Required(decision.DisplayName, "Unnamed person")); s.Bind("@anchor", decision.AnchorEmbyPersonId); s.Bind("@keys", Required(decision.ProviderKeys, "No current provider person ID")); s.Bind("@confidence", decision.Confidence); s.Bind("@impact", decision.ImpactedMediaCount); s.Bind("@headline", Required(decision.Headline, "Decision summary unavailable")); s.Bind("@explanation", Required(decision.Explanation, "No additional explanation was generated.")); });
+                    Statement(x, "INSERT OR REPLACE INTO resolution_decision(run_id,decision_id,status,action,display_name,anchor_emby_id,provider_keys,confidence,impact_media_count,headline,explanation,local_anchor_confidence) VALUES(@run,@id,@status,@action,@name,@anchor,@keys,@confidence,@impact,@headline,@explanation,@localConfidence)", s => { s.Bind("@run", runId); s.Bind("@id", Required(decision.DecisionId, "decision-id-missing")); s.Bind("@status", Required(decision.Status, "UNKNOWN")); s.Bind("@action", Required(decision.Action, "HUMAN_REVIEW")); s.Bind("@name", Required(decision.DisplayName, "Unnamed person")); s.Bind("@anchor", decision.AnchorEmbyPersonId); s.Bind("@keys", Required(decision.ProviderKeys, "No current provider person ID")); s.Bind("@confidence", decision.Confidence); s.Bind("@impact", decision.ImpactedMediaCount); s.Bind("@headline", Required(decision.Headline, "Decision summary unavailable")); s.Bind("@explanation", Required(decision.Explanation, "No additional explanation was generated.")); s.Bind("@localConfidence", decision.LocalAnchorConfidence); });
                     foreach (var evidence in decision.Evidence)
                         Statement(x, "INSERT OR REPLACE INTO resolution_evidence VALUES(@run,@decision,@sort,@signal,@verdict,@narrative,@metric)", s => { s.Bind("@run", runId); s.Bind("@decision", Required(decision.DecisionId, "decision-id-missing")); s.Bind("@sort", evidence.SortOrder); s.Bind("@signal", Required(evidence.SignalType, "UNSPECIFIED")); s.Bind("@verdict", Required(evidence.Verdict, "unknown")); s.Bind("@narrative", Required(evidence.Narrative, "No narrative was generated.")); s.Bind("@metric", Required(evidence.Metric, "-")); });
                     foreach (var media in decision.ImpactedMedia)
                         Statement(x, "INSERT OR REPLACE INTO resolution_media VALUES(@run,@decision,@media,@type,@name,@role)", s => { s.Bind("@run", runId); s.Bind("@decision", Required(decision.DecisionId, "decision-id-missing")); s.Bind("@media", media.EmbyMediaId); s.Bind("@type", Required(media.MediaType, "unknown")); s.Bind("@name", Required(media.DisplayName, "Unnamed media")); s.Bind("@role", Required(media.Role, "Unspecified role")); });
+                }
+                foreach (var pair in pairs ?? new ResolutionPairEvaluation[0])
+                {
+                    var score = pair.Score ?? new ScoreBreakdown();
+                    Statement(x, "INSERT OR REPLACE INTO resolution_pair VALUES(@run,@pair,@leftProvider,@leftId,@rightProvider,@rightId,@model,@disposition,@confidence)", s => { s.Bind("@run", runId); s.Bind("@pair", pair.PairId); s.Bind("@leftProvider", pair.LeftProvider); s.Bind("@leftId", pair.LeftProviderId); s.Bind("@rightProvider", pair.RightProvider); s.Bind("@rightId", pair.RightProviderId); s.Bind("@model", Required(score.ModelVersion, "unknown")); s.Bind("@disposition", Required(pair.Disposition, "unknown")); s.Bind("@confidence", score.Score); });
+                    PairFeature(x, runId, pair.PairId, "shared_media_count", score.SharedMediaCount, null);
+                    PairFeature(x, runId, pair.PairId, "left_media_count", score.LeftMediaCount, null);
+                    PairFeature(x, runId, pair.PairId, "right_media_count", score.RightMediaCount, null);
+                    PairFeature(x, runId, pair.PairId, "filmography_containment", score.FilmographyContainment, null);
+                    PairFeature(x, runId, pair.PairId, "filmography_jaccard", score.FilmographyJaccard, null);
+                    PairFeature(x, runId, pair.PairId, "role_agreement", score.RoleAgreement, null);
+                    PairFeature(x, runId, pair.PairId, "exact_role_matches", score.ExactRoleMatches, null);
+                    PairFeature(x, runId, pair.PairId, "compatible_role_matches", score.CompatibleRoleMatches, null);
+                    PairFeature(x, runId, pair.PairId, "name_frequency", score.NameFrequency, score.ExactNameMatch ? "exact" : score.AliasMatch ? "alias" : "none");
+                    PairFeature(x, runId, pair.PairId, "birthday", null, score.BirthdayState);
+                    PairFeature(x, runId, pair.PairId, "external_id", null, score.ExternalIdState);
+                    PairFeature(x, runId, pair.PairId, "competing_attributions", score.CompetingAttributionCount, null);
+                }
+                foreach (var cluster in clusters ?? new ResolutionClusterSnapshot[0])
+                {
+                    Statement(x, "INSERT OR REPLACE INTO resolution_cluster VALUES(@run,@cluster,@anchor,@identity,@local)", s => { s.Bind("@run", runId); s.Bind("@cluster", cluster.ClusterId); s.Bind("@anchor", cluster.AnchorEmbyPersonId); s.Bind("@identity", cluster.IdentityConfidence); s.Bind("@local", cluster.LocalAnchorConfidence); });
+                    foreach (var key in cluster.ProviderKeys)
+                    {
+                        var separator = key.IndexOf(':'); if (separator <= 0) continue;
+                        Statement(x, "INSERT OR IGNORE INTO resolution_cluster_member VALUES(@run,@cluster,@provider,@id)", s => { s.Bind("@run", runId); s.Bind("@cluster", cluster.ClusterId); s.Bind("@provider", key.Substring(0, separator)); s.Bind("@id", key.Substring(separator + 1)); });
+                    }
                 }
                 Statement(x, "UPDATE resolution_run SET decisions=@count,updated_utc=@now WHERE run_id=@run", s => { s.Bind("@count", decisions.Count); s.Bind("@now", Now()); s.Bind("@run", runId); });
             }, TransactionMode.Immediate);
@@ -312,10 +375,26 @@ JOIN current_media m ON m.media_type=c.media_type AND ((c.provider='tmdb' AND m.
             {
                 var latest = 0L; using (var q = db.PrepareStatement("SELECT max(run_id) FROM resolution_run WHERE status='completed'")) foreach (var r in q.Rows()) if (!r.IsDBNull(0)) latest = r.GetInt64(0);
                 const string visible = "SELECT decision_id FROM (SELECT decision_id,status,confidence,impact_media_count,ROW_NUMBER() OVER(PARTITION BY status ORDER BY confidence ASC,impact_media_count DESC,decision_id) AS status_row FROM resolution_decision WHERE run_id=@run) WHERE status_row<=@summaryLimit";
-                using (var s = db.PrepareStatement("WITH visible AS (" + visible + ") SELECT d.decision_id,d.status,d.action,d.display_name,d.anchor_emby_id,d.provider_keys,d.confidence,d.impact_media_count,d.headline,d.explanation FROM resolution_decision d JOIN visible v ON v.decision_id=d.decision_id WHERE d.run_id=@run ORDER BY CASE d.status WHEN 'SPLIT' THEN 0 WHEN 'CONFLATION' THEN 1 WHEN 'DRIFT' THEN 2 WHEN 'ORPHAN' THEN 3 ELSE 4 END,d.confidence ASC,d.impact_media_count DESC,d.decision_id"))
+                using (var s = db.PrepareStatement("WITH visible AS (" + visible + ") SELECT d.decision_id,d.status,d.action,d.display_name,d.anchor_emby_id,d.provider_keys,d.confidence,d.impact_media_count,d.headline,d.explanation,d.local_anchor_confidence FROM resolution_decision d JOIN visible v ON v.decision_id=d.decision_id WHERE d.run_id=@run ORDER BY CASE d.status WHEN 'SPLIT' THEN 0 WHEN 'CONFLATION' THEN 1 WHEN 'DRIFT' THEN 2 WHEN 'ORPHAN' THEN 3 ELSE 4 END,d.confidence ASC,d.impact_media_count DESC,d.decision_id"))
                 {
                     s.Bind("@run", latest); s.Bind("@summaryLimit", Math.Max(1, maximumRows));
-                    foreach (var r in s.Rows()) result.Add(new DashboardDecision { DecisionId = r.GetString(0), Status = r.GetString(1), Action = r.GetString(2), Person = r.GetString(3), EmbyAnchor = r.IsDBNull(4) ? "—" : r.GetInt64(4).ToString(CultureInfo.InvariantCulture), ProviderIdentities = r.GetString(5), Confidence = r.GetDouble(6).ToString("P0", CultureInfo.InvariantCulture), ImpactedTitles = r.GetInt(7), Decision = r.GetString(8), Why = r.GetString(9) });
+                    foreach (var r in s.Rows()) result.Add(new DashboardDecision { DecisionId = r.GetString(0), Status = r.GetString(1), Action = r.GetString(2), Person = r.GetString(3), EmbyAnchor = r.IsDBNull(4) ? "—" : r.GetInt64(4).ToString(CultureInfo.InvariantCulture), ProviderIdentities = r.GetString(5), Confidence = r.GetDouble(6).ToString("P0", CultureInfo.InvariantCulture), ImpactedTitles = r.GetInt(7), Decision = r.GetString(8), Why = r.GetString(9), LocalAnchorConfidence = r.GetDouble(10).ToString("P0", CultureInfo.InvariantCulture) });
+                }
+                var localPeople = new List<LocalPerson>();
+                using (var s = db.PrepareStatement("SELECT emby_id,name,tmdb_id,tvdb_id,imdb_id FROM current_local_person"))
+                    foreach (var r in s.Rows()) localPeople.Add(new LocalPerson { EmbyId = r.GetInt64(0), Name = r.GetString(1), TmdbId = Null(r, 2), TvdbId = Null(r, 3), ImdbId = Null(r, 4) });
+                foreach (var decision in result)
+                {
+                    LocalPerson local = null;
+                    if (long.TryParse(decision.EmbyAnchor, NumberStyles.Integer, CultureInfo.InvariantCulture, out var anchor))
+                        local = localPeople.FirstOrDefault(x => x.EmbyId == anchor);
+                    if (local == null)
+                    {
+                        var keys = new HashSet<string>((decision.ProviderIdentities ?? string.Empty).Split(',').Select(x => x.Trim()), StringComparer.OrdinalIgnoreCase);
+                        var matches = localPeople.Where(x => (!string.IsNullOrWhiteSpace(x.TmdbId) && keys.Contains(ProviderNames.Tmdb + ":" + x.TmdbId)) || (!string.IsNullOrWhiteSpace(x.TvdbId) && keys.Contains(ProviderNames.Tvdb + ":" + x.TvdbId))).ToList();
+                        if (matches.Count == 1) { local = matches[0]; decision.EmbyAnchor = local.EmbyId.ToString(CultureInfo.InvariantCulture); }
+                    }
+                    if (local != null) decision.CurrentProviderIds = ProviderIdText(local);
                 }
                 var byDecision = result.ToDictionary(x => x.DecisionId, StringComparer.Ordinal);
                 using (var s = db.PrepareStatement("WITH visible AS (" + visible + ") SELECT e.decision_id,e.sort_order,e.signal_type,e.verdict,e.narrative,e.metric_raw FROM resolution_evidence e JOIN visible v ON v.decision_id=e.decision_id WHERE e.run_id=@run ORDER BY e.decision_id,e.sort_order,e.signal_type"))
@@ -324,15 +403,41 @@ JOIN current_media m ON m.media_type=c.media_type AND ((c.provider='tmdb' AND m.
                     foreach (var r in s.Rows()) if (byDecision.TryGetValue(r.GetString(0), out var decision))
                         decision.Details = decision.Details.Concat(new[] { new DashboardDetail { DetailId = r.GetString(0) + ":e:" + r.GetInt(1).ToString(CultureInfo.InvariantCulture) + ":" + r.GetString(2), Section = "Evidence", Order = r.GetInt(1), Signal = r.GetString(2), Verdict = r.GetString(3), Explanation = r.GetString(4), RawMetric = r.GetString(5) } }).ToArray();
                 }
-                const string mediaSql = "WITH visible AS (" + visible + "), ranked AS (SELECT m.*,ROW_NUMBER() OVER(PARTITION BY m.decision_id ORDER BY m.media_type,m.display_name,m.emby_media_id) AS row_number FROM resolution_media m JOIN visible v ON v.decision_id=m.decision_id WHERE m.run_id=@run) SELECT decision_id,row_number,media_type,display_name,role FROM ranked WHERE row_number<=@mediaLimit ORDER BY decision_id,row_number";
+                const string mediaSql = "WITH visible AS (" + visible + "), ranked AS (SELECT m.*,ROW_NUMBER() OVER(PARTITION BY m.decision_id ORDER BY m.media_type,m.display_name,m.emby_media_id) AS row_number FROM resolution_media m JOIN visible v ON v.decision_id=m.decision_id WHERE m.run_id=@run) SELECT r.decision_id,r.row_number,r.media_type,r.display_name,r.role,r.emby_media_id,c.tmdb_id,c.tvdb_id,c.imdb_id,t.slug FROM ranked r LEFT JOIN current_media c ON c.emby_id=r.emby_media_id LEFT JOIN provider_media t ON t.provider='tvdb' AND t.media_type=r.media_type AND t.provider_media_id=c.tvdb_id WHERE r.row_number<=@mediaLimit ORDER BY r.decision_id,r.row_number";
                 using (var s = db.PrepareStatement(mediaSql))
                 {
                     s.Bind("@run", latest); s.Bind("@summaryLimit", Math.Max(1, maximumRows)); s.Bind("@mediaLimit", Math.Max(0, mediaExamples));
                     foreach (var r in s.Rows()) if (byDecision.TryGetValue(r.GetString(0), out var decision))
-                        decision.Details = decision.Details.Concat(new[] { new DashboardDetail { DetailId = r.GetString(0) + ":m:" + r.GetInt(1).ToString(CultureInfo.InvariantCulture), Section = "Impacted titles", Order = 10000 + r.GetInt(1), Signal = r.GetString(2), Verdict = r.GetString(4), Explanation = r.GetString(3), RawMetric = string.Empty } }).ToArray();
+                        decision.Details = decision.Details.Concat(new[] { new DashboardDetail { DetailId = r.GetString(0) + ":m:" + r.GetInt(1).ToString(CultureInfo.InvariantCulture), Section = "Impacted titles", Order = 10000 + r.GetInt(1), Signal = r.GetString(2), Verdict = r.GetString(4), Explanation = r.GetString(3), RawMetric = string.Empty, EmbyMediaId = r.GetInt64(5), MediaType = r.GetString(2), TmdbId = Null(r, 6), TvdbId = Null(r, 7), ImdbId = Null(r, 8), TvdbSlug = Null(r, 9) } }).ToArray();
                 }
             }
             return result.ToArray();
+        }
+
+        private static string ProviderIdText(LocalPerson person)
+        {
+            var ids = new List<string>();
+            if (!string.IsNullOrWhiteSpace(person.TmdbId)) ids.Add(ProviderNames.Tmdb + ":" + person.TmdbId);
+            if (!string.IsNullOrWhiteSpace(person.TvdbId)) ids.Add(ProviderNames.Tvdb + ":" + person.TvdbId);
+            if (!string.IsNullOrWhiteSpace(person.ImdbId)) ids.Add(ProviderNames.Imdb + ":" + person.ImdbId);
+            return ids.Count == 0 ? "No current provider IDs" : string.Join(", ", ids);
+        }
+
+        private bool ColumnExists(string table, string column)
+        {
+            using (var s = db.PrepareStatement("PRAGMA table_info(" + table + ")"))
+                foreach (var r in s.Rows()) if (string.Equals(r.GetString(1), column, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        private bool TableExists(string table)
+        {
+            using (var s = db.PrepareStatement("SELECT 1 FROM sqlite_master WHERE type='table' AND name=@name"))
+            {
+                s.Bind("@name", table);
+                foreach (var ignored in s.Rows()) return true;
+            }
+            return false;
         }
 
         private static void SeedMedia(IDatabaseConnection x, long runId, string provider, string type, string id)
@@ -347,6 +452,10 @@ JOIN current_media m ON m.media_type=c.media_type AND ((c.provider='tmdb' AND m.
         private static string Required(string value, string fallback) => string.IsNullOrWhiteSpace(value) ? fallback : value;
         private static string Null(IResultSet r, int index) => r.IsDBNull(index) ? null : r.GetString(index);
         private static void DeleteForMedia(IDatabaseConnection x, string table, FlattenedMedia media) => Statement(x, "DELETE FROM " + table + " WHERE provider=@provider AND media_type=@type AND provider_media_id=@id", s => { s.Bind("@provider", media.Provider); s.Bind("@type", media.MediaType); s.Bind("@id", media.ProviderMediaId); });
+        private static void PairFeature(IDatabaseConnection x, long runId, string pairId, string name, double? numeric, string text)
+        {
+            Statement(x, "INSERT OR REPLACE INTO resolution_pair_feature VALUES(@run,@pair,@name,@numeric,@text)", s => { s.Bind("@run", runId); s.Bind("@pair", pairId); s.Bind("@name", name); s.Bind("@numeric", numeric); s.Bind("@text", text); });
+        }
         private void Statement(string sql, Action<IStatement> bind) => Statement(db, sql, bind);
         private static void Statement(IDatabaseConnection connection, string sql, Action<IStatement> bind) { using (var s = connection.PrepareStatement(sql)) { bind(s); s.MoveNext(); } }
         private static long Now() => DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -381,18 +490,13 @@ JOIN current_media m ON m.media_type=c.media_type AND ((c.provider='tmdb' AND m.
 
         private sealed class CanonicalMediaBuilder
         {
-            public string PersonKey { get; set; }
             public string Provider { get; set; }
             public string MediaType { get; set; }
             public string NativeId { get; set; }
-            public Dictionary<string, string> ExternalIds { get; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            public string CanonicalKey()
+            public List<MediaExternalIdentity> ExternalIds { get; } = new List<MediaExternalIdentity>();
+            public ProviderMediaIdentity Identity()
             {
-                if (ExternalIds.TryGetValue(ProviderNames.Imdb, out var imdb) && !string.IsNullOrWhiteSpace(imdb)) return ProviderNames.Imdb + ":" + imdb;
-                if (Provider == ProviderNames.Tmdb) return ProviderNames.Tmdb + ":" + MediaType + ":" + NativeId;
-                if (ExternalIds.TryGetValue(ProviderNames.Tmdb, out var tmdb) && !string.IsNullOrWhiteSpace(tmdb)) return ProviderNames.Tmdb + ":" + MediaType + ":" + tmdb;
-                if (Provider == ProviderNames.Tvdb) return ProviderNames.Tvdb + ":" + MediaType + ":" + NativeId;
-                return Provider + ":" + MediaType + ":" + NativeId;
+                return new ProviderMediaIdentity { Provider = Provider, MediaType = MediaType, ProviderMediaId = NativeId, ExternalIds = ExternalIds };
             }
         }
 
@@ -406,12 +510,13 @@ JOIN current_media m ON m.media_type=c.media_type AND ((c.provider='tmdb' AND m.
             "CREATE TABLE IF NOT EXISTS current_provider_media(provider TEXT NOT NULL,media_type TEXT NOT NULL,provider_media_id TEXT NOT NULL,PRIMARY KEY(provider,media_type,provider_media_id)) WITHOUT ROWID",
             "CREATE TABLE IF NOT EXISTS work_queue(provider TEXT NOT NULL,entity_type TEXT NOT NULL,media_type TEXT NOT NULL,provider_id TEXT NOT NULL,priority INTEGER NOT NULL,status TEXT NOT NULL,attempts INTEGER NOT NULL,error TEXT,updated_utc INTEGER NOT NULL,PRIMARY KEY(provider,entity_type,media_type,provider_id)) WITHOUT ROWID",
             "CREATE INDEX IF NOT EXISTS idx_work_queue_status ON work_queue(status,entity_type,priority DESC)",
-            "CREATE TABLE IF NOT EXISTS cache_manifest(provider TEXT NOT NULL,entity_type TEXT NOT NULL,media_type TEXT NOT NULL,provider_id TEXT NOT NULL,payload_hash TEXT NOT NULL,relative_path TEXT NOT NULL,last_fetched_utc INTEGER NOT NULL,PRIMARY KEY(provider,entity_type,media_type,provider_id)) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS cache_manifest(provider TEXT NOT NULL,entity_type TEXT NOT NULL,media_type TEXT NOT NULL,provider_id TEXT NOT NULL,payload_hash TEXT NOT NULL,relative_path TEXT NOT NULL,last_fetched_utc INTEGER NOT NULL,materializer_version INTEGER NOT NULL,PRIMARY KEY(provider,entity_type,media_type,provider_id)) WITHOUT ROWID",
             "CREATE TABLE IF NOT EXISTS fetch_failure(provider TEXT NOT NULL,entity_type TEXT NOT NULL,media_type TEXT NOT NULL,provider_id TEXT NOT NULL,last_failed_utc INTEGER NOT NULL,error TEXT NOT NULL,PRIMARY KEY(provider,entity_type,media_type,provider_id)) WITHOUT ROWID",
-            "CREATE TABLE IF NOT EXISTS provider_media(provider TEXT NOT NULL,media_type TEXT NOT NULL,provider_media_id TEXT NOT NULL,name TEXT,updated_utc INTEGER NOT NULL,PRIMARY KEY(provider,media_type,provider_media_id)) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS provider_media(provider TEXT NOT NULL,media_type TEXT NOT NULL,provider_media_id TEXT NOT NULL,name TEXT,slug TEXT,updated_utc INTEGER NOT NULL,PRIMARY KEY(provider,media_type,provider_media_id)) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS provider_media_observation(provider TEXT NOT NULL,media_type TEXT NOT NULL,provider_media_id TEXT NOT NULL,payload_hash TEXT NOT NULL,observed_utc INTEGER NOT NULL,endpoint_shape TEXT NOT NULL,credit_scope TEXT NOT NULL,is_complete INTEGER NOT NULL CHECK(is_complete IN(0,1)),materializer_version INTEGER NOT NULL,PRIMARY KEY(provider,media_type,provider_media_id)) WITHOUT ROWID",
             "CREATE TABLE IF NOT EXISTS media_external_id(provider TEXT NOT NULL,media_type TEXT NOT NULL,provider_media_id TEXT NOT NULL,external_provider TEXT NOT NULL,external_id TEXT NOT NULL,PRIMARY KEY(provider,media_type,provider_media_id,external_provider,external_id)) WITHOUT ROWID",
             "CREATE INDEX IF NOT EXISTS idx_media_external_reverse ON media_external_id(media_type,external_provider,external_id)",
-            "CREATE TABLE IF NOT EXISTS provider_media_credit(provider TEXT NOT NULL,media_type TEXT NOT NULL,provider_media_id TEXT NOT NULL,provider_person_id TEXT NOT NULL,person_name TEXT,role TEXT NOT NULL,PRIMARY KEY(provider,media_type,provider_media_id,provider_person_id,role)) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS provider_media_credit(provider TEXT NOT NULL,media_type TEXT NOT NULL,provider_media_id TEXT NOT NULL,provider_person_id TEXT NOT NULL,person_name TEXT,role TEXT NOT NULL,role_category TEXT NOT NULL,role_name TEXT,PRIMARY KEY(provider,media_type,provider_media_id,provider_person_id,role)) WITHOUT ROWID",
             "CREATE INDEX IF NOT EXISTS idx_provider_credit_person ON provider_media_credit(provider,provider_person_id)",
             "CREATE TABLE IF NOT EXISTS provider_person(provider TEXT NOT NULL,provider_person_id TEXT NOT NULL,name TEXT NOT NULL,clean_name TEXT NOT NULL,birthday TEXT,updated_utc INTEGER NOT NULL,PRIMARY KEY(provider,provider_person_id)) WITHOUT ROWID",
             "CREATE INDEX IF NOT EXISTS idx_provider_person_name ON provider_person(clean_name)",
@@ -420,10 +525,15 @@ JOIN current_media m ON m.media_type=c.media_type AND ((c.provider='tmdb' AND m.
             "CREATE TABLE IF NOT EXISTS person_alias(provider TEXT NOT NULL,provider_person_id TEXT NOT NULL,alias TEXT NOT NULL,clean_alias TEXT NOT NULL,PRIMARY KEY(provider,provider_person_id,alias)) WITHOUT ROWID",
             "CREATE INDEX IF NOT EXISTS idx_person_alias_clean ON person_alias(clean_alias)",
             "CREATE TABLE IF NOT EXISTS manual_bridge(provider_a TEXT NOT NULL,provider_id_a TEXT NOT NULL,provider_b TEXT NOT NULL,provider_id_b TEXT NOT NULL,disposition TEXT NOT NULL CHECK(disposition IN('confirm','reject')),created_utc INTEGER NOT NULL,PRIMARY KEY(provider_a,provider_id_a,provider_b,provider_id_b)) WITHOUT ROWID",
-            "CREATE TABLE IF NOT EXISTS resolution_decision(run_id INTEGER NOT NULL,decision_id TEXT NOT NULL,status TEXT NOT NULL,action TEXT NOT NULL,display_name TEXT NOT NULL,anchor_emby_id INTEGER,provider_keys TEXT NOT NULL,confidence REAL NOT NULL,impact_media_count INTEGER NOT NULL,headline TEXT NOT NULL,explanation TEXT NOT NULL,PRIMARY KEY(run_id,decision_id),FOREIGN KEY(run_id) REFERENCES resolution_run(run_id) ON DELETE CASCADE) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS resolution_decision(run_id INTEGER NOT NULL,decision_id TEXT NOT NULL,status TEXT NOT NULL,action TEXT NOT NULL,display_name TEXT NOT NULL,anchor_emby_id INTEGER,provider_keys TEXT NOT NULL,confidence REAL NOT NULL,impact_media_count INTEGER NOT NULL,headline TEXT NOT NULL,explanation TEXT NOT NULL,local_anchor_confidence REAL NOT NULL,PRIMARY KEY(run_id,decision_id),FOREIGN KEY(run_id) REFERENCES resolution_run(run_id) ON DELETE CASCADE) WITHOUT ROWID",
             "CREATE INDEX IF NOT EXISTS idx_decision_ui ON resolution_decision(run_id,status,confidence,impact_media_count DESC)",
             "CREATE TABLE IF NOT EXISTS resolution_evidence(run_id INTEGER NOT NULL,decision_id TEXT NOT NULL,sort_order INTEGER NOT NULL,signal_type TEXT NOT NULL,verdict TEXT NOT NULL,narrative TEXT NOT NULL,metric_raw TEXT NOT NULL,PRIMARY KEY(run_id,decision_id,sort_order,signal_type),FOREIGN KEY(run_id,decision_id) REFERENCES resolution_decision(run_id,decision_id) ON DELETE CASCADE) WITHOUT ROWID",
-            "CREATE TABLE IF NOT EXISTS resolution_media(run_id INTEGER NOT NULL,decision_id TEXT NOT NULL,emby_media_id INTEGER NOT NULL,media_type TEXT NOT NULL,display_name TEXT NOT NULL,role TEXT NOT NULL,PRIMARY KEY(run_id,decision_id,emby_media_id,role),FOREIGN KEY(run_id,decision_id) REFERENCES resolution_decision(run_id,decision_id) ON DELETE CASCADE) WITHOUT ROWID"
+            "CREATE TABLE IF NOT EXISTS resolution_media(run_id INTEGER NOT NULL,decision_id TEXT NOT NULL,emby_media_id INTEGER NOT NULL,media_type TEXT NOT NULL,display_name TEXT NOT NULL,role TEXT NOT NULL,PRIMARY KEY(run_id,decision_id,emby_media_id,role),FOREIGN KEY(run_id,decision_id) REFERENCES resolution_decision(run_id,decision_id) ON DELETE CASCADE) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS resolution_pair(run_id INTEGER NOT NULL,pair_id TEXT NOT NULL,left_provider TEXT NOT NULL,left_provider_person_id TEXT NOT NULL,right_provider TEXT NOT NULL,right_provider_person_id TEXT NOT NULL,model_version TEXT NOT NULL,disposition TEXT NOT NULL,confidence REAL NOT NULL,PRIMARY KEY(run_id,pair_id),FOREIGN KEY(run_id) REFERENCES resolution_run(run_id) ON DELETE CASCADE) WITHOUT ROWID",
+            "CREATE INDEX IF NOT EXISTS idx_resolution_pair_disposition ON resolution_pair(run_id,disposition,confidence)",
+            "CREATE TABLE IF NOT EXISTS resolution_pair_feature(run_id INTEGER NOT NULL,pair_id TEXT NOT NULL,feature_name TEXT NOT NULL,numeric_value REAL,text_value TEXT,PRIMARY KEY(run_id,pair_id,feature_name),FOREIGN KEY(run_id,pair_id) REFERENCES resolution_pair(run_id,pair_id) ON DELETE CASCADE) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS resolution_cluster(run_id INTEGER NOT NULL,cluster_id TEXT NOT NULL,anchor_emby_id INTEGER,identity_confidence REAL NOT NULL,local_anchor_confidence REAL NOT NULL,PRIMARY KEY(run_id,cluster_id),FOREIGN KEY(run_id) REFERENCES resolution_run(run_id) ON DELETE CASCADE) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS resolution_cluster_member(run_id INTEGER NOT NULL,cluster_id TEXT NOT NULL,provider TEXT NOT NULL,provider_person_id TEXT NOT NULL,PRIMARY KEY(run_id,cluster_id,provider,provider_person_id),FOREIGN KEY(run_id,cluster_id) REFERENCES resolution_cluster(run_id,cluster_id) ON DELETE CASCADE) WITHOUT ROWID"
         };
     }
 }

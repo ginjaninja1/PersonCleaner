@@ -77,11 +77,6 @@ namespace PersonCleaner.V2.Tasks
                     repository.UpdateRun(runId, "resolution", "Calculating provider graph, uncertainty and local-media anchors");
                     var settings = new ResolutionSettings
                     {
-                        FilmographyWeight = configuration.FilmographyWeight,
-                        BirthdayWeight = configuration.BirthdayWeight,
-                        ExactNameWeight = configuration.ExactNameWeight,
-                        AliasWeight = configuration.AliasWeight,
-                        BirthdayMismatchPenalty = configuration.BirthdayMismatchPenalty,
                         AutomaticMatchThreshold = configuration.AutomaticMatchThreshold,
                         HumanReviewThreshold = configuration.HumanReviewThreshold,
                         MaximumMediaExamples = configuration.MaximumMediaExamplesPerDecision
@@ -91,9 +86,9 @@ namespace PersonCleaner.V2.Tasks
                     var engine = new ResolutionEngine();
                     var decisions = engine.Resolve(resolutionInput, settings).ToList();
                     var diagnostic = engine.Diagnostics;
-                    logger.Info("PersonCleaner run {0} candidate gate: examined {1} cross-provider blocked pair(s), admitted {2} ({3} hard external-ID, {4} shared-title plus compatible-name/alias), operator-rejected={5}; scoring produced automatic={6}, human-review={7}, below-review={8}, graph-components={9}.", runId, diagnostic.BlockedCrossProviderPairs, diagnostic.AdmittedCandidates, diagnostic.HardIdentityCandidates, diagnostic.NameCompatibleCandidates, diagnostic.RejectedByOperator, diagnostic.AutomaticCandidates, diagnostic.ReviewCandidates, diagnostic.BelowReviewCandidates, diagnostic.GraphComponents);
+                    logger.Info("PersonCleaner run {0} candidate gate: examined {1} cross-provider blocked pair(s), admitted {2} ({3} hard external-ID, {4} shared-title plus compatible-name/alias), operator-rejected={5}; evidence model v2 produced automatic={6}, human-review={7}, below-review={8}, constraint-blocked={9}, graph-components={10}.", runId, diagnostic.BlockedCrossProviderPairs, diagnostic.AdmittedCandidates, diagnostic.HardIdentityCandidates, diagnostic.NameCompatibleCandidates, diagnostic.RejectedByOperator, diagnostic.AutomaticCandidates, diagnostic.ReviewCandidates, diagnostic.BelowReviewCandidates, diagnostic.ConstraintBlockedCandidates, diagnostic.GraphComponents);
                     logger.Info("PersonCleaner run {0} offline resolution calculated {1} decision summaries ({2}); persisting pre-rendered decisions, evidence and impacted media.", runId, decisions.Count, DecisionBreakdown(decisions));
-                    repository.SaveDecisions(runId, decisions);
+                    repository.SaveDecisions(runId, decisions, engine.PairEvaluations, engine.Clusters);
                     repository.FinishRun(runId, "completed", "Evidence is ready. The dashboard reads only pre-calculated rows; live Emby was not changed.", decisions.Count);
                     progress.Report(100);
                     logger.Info("PersonCleaner run {0} completed with {1} decision summaries ({2}). Workspace: {3}", runId, decisions.Count, DecisionBreakdown(decisions), repository.DatabasePath);

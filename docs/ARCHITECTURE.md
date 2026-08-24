@@ -8,6 +8,7 @@
 4. **Network work is scheduled.** The UI executes bounded indexed reads and offline recalculation only.
 5. **A name is never proof.** Normalized names and aliases can corroborate an already media-blocked candidate; they cannot create a candidate edge alone.
 6. **Missing evidence is not destructive evidence.** Missing provider support becomes a review state.
+7. **Pairs and clusters are different facts.** Pair evidence is retained independently; cluster joins must also satisfy every component-level constraint.
 
 ## Runtime flow
 
@@ -51,8 +52,9 @@ Important table groups:
 |---|---|---|
 | Runs and cohort | `resolution_run`, `current_media`, `current_local_person`, `current_local_credit`, `current_provider_media` | Reproducible active snapshot and task telemetry |
 | Acquisition | `work_queue`, `cache_manifest`, `fetch_failure` | Queue state, payload hashes/TTL, negative caching |
-| Flattened provider index | `provider_media`, `media_external_id`, `provider_media_credit`, `provider_person`, `person_external_id`, `person_alias` | Compact queryable evidence; no UI JSON parsing |
+| Flattened provider index | `provider_media`, `provider_media_observation`, `media_external_id`, `provider_media_credit`, `provider_person`, `person_external_id`, `person_alias` | Compact queryable evidence, structured roles and acquisition scope; no UI JSON parsing |
 | Human truth | `manual_bridge` | Confirmed or rejected cross-provider pairings |
+| Pair and cluster audit | `resolution_pair`, `resolution_pair_feature`, `resolution_cluster`, `resolution_cluster_member` | Versioned pair features, disposition, component membership and separate identity/anchor confidence |
 | Presentation/audit | `resolution_decision`, `resolution_evidence`, `resolution_media` | Pre-rendered summaries, raw metrics and complete impacted-title attribution |
 
 The schema is created idempotently by `ResolutionRepository`. It uses WAL, normal synchronous mode, foreign keys, a 30-second busy timeout, narrow primary keys, and reverse indexes for external-ID and person-credit lookup.
@@ -61,13 +63,16 @@ The schema is created idempotently by `ResolutionRepository`. It uses WAL, norma
 
 For `(provider, entity type, media type, provider ID)`:
 
-1. A manifest younger than the configured TTL plus an existing payload file is a complete cache hit: no network and no parsing.
-2. An expired or missing manifest causes a provider fetch with bounded exponential retry and provider-specific request spacing.
-3. SHA-256 is calculated over the exact response text.
-4. An unchanged hash refreshes `last_fetched_utc` and skips parsing/flattening.
-5. A changed hash is parsed and replaces only that entity's flattened rows.
-6. A failure is recorded independently. Subsequent scheduled runs defer the entity until the configured retry window expires; an otherwise-fresh payload always wins over the negative cache.
-7. Queue reconstruction from existing flattened media credits makes interrupted runs resumable even when the next run is all cache hits.
+1. A manifest younger than the configured TTL plus an existing payload file is a complete cache hit when its `materializer_version` is current: no network and no parsing.
+2. An older materializer version parses the raw cache once, transactionally replaces the flattened entity rows, and advances the manifest version without a provider request. Parser changes therefore repair stored interpretations even when the provider payload hash is unchanged.
+3. An expired or missing manifest causes a provider fetch with bounded exponential retry and provider-specific request spacing.
+4. SHA-256 is calculated over the exact response text.
+5. An unchanged hash at the current materializer version refreshes `last_fetched_utc` and skips parsing/flattening.
+6. A changed hash is parsed and replaces only that entity's flattened rows.
+7. A failure is recorded independently. Subsequent scheduled runs defer the entity until the configured retry window expires; an otherwise-fresh payload always wins over the negative cache.
+8. Queue reconstruction from existing flattened media credits makes interrupted runs resumable even when the next run is all cache hits.
+
+External IDs are source-typed before storage. Wikipedia page slugs are not Wikidata identities; person IMDb IDs must match `nm<digits>`, media IMDb IDs must match `tt<digits>`, Wikidata IDs must match `Q<digits>`, and TMDB/TVDB IDs must be numeric. Unknown or malformed remote identifiers are ignored rather than coerced into a stable namespace.
 
 ### Parallel acquisition
 
@@ -90,35 +95,41 @@ This makes candidate construction proportional to observed cross-provider edges 
 
 ## Graph and scoring
 
-Union-Find creates immutable graph components from:
+Every media/name or external-ID blocked pair is scored and persisted before clustering. Automatic edges are considered strongest-first. Union-Find may join two components only when the proposed component contains:
 
-- shared IMDb or Wikidata person IDs;
-- operator-confirmed bridges; and
-- probabilistic candidates at or above the automatic threshold.
+- no operator-rejected pair, including a rejection reached transitively;
+- no two different identities from the same provider;
+- no conflicting known birth dates; and
+- no conflicting stable IMDb or Wikidata person IDs.
 
-Operator-rejected bridges remove that pair from consideration before scoring.
+Operator-confirmed bridges are explicit identity evidence, but still cannot cross an operator rejection. Automatic candidates must also be free of observed identity conflicts and competing same-name role attributions.
 
-For remaining media-blocked candidates:
+Evidence model `person-evidence-v3` first resolves provider media records through the transitive equivalence graph of every observed native and external media ID. This avoids false filmography gaps when providers expose different subsets of the same crosswalk. It then uses fixed contributions so scores remain comparable between runs:
 
 ```text
-score = 0.45 × filmography Jaccard
-      + 0.25 × exact birthday
-      + 0.20 × exact normalized primary name
-      + 0.10 × matching provider alias
-      - 0.50 × conflicting known birthdays
+score = 0.35 × exact normalized name / sqrt(name frequency)
+      or 0.20 × matching alias / sqrt(name frequency)
+      + 0.25 × shared-credit containment
+      + 0.20 × (1 - exp(-shared-credit count))
+      + 0.15 × role agreement
+      + 0.20 × exact known birthday
 ```
 
-Scores are clamped to `[0, 1]`. A shared stable person external ID is a hard score of `1.0`. Default interpretation:
+Containment is `shared / min(left credit count, right credit count)`. Jaccard is retained as a diagnostic but does not penalize a provider for returning a smaller credit set. Exact role names score fully; a compatible role category scores partially. Missing birthdays, external IDs, roles and unmatched titles add neither support nor a penalty.
+
+A shared stable person external ID is hard support. Different values in a comparable stable-ID namespace cap the score at `0.15` (or `0.50` if another namespace matches); different known birthdays cap it at `0.25`; and a same-name, role-compatible attribution to a different provider person caps it at `0.55`. Any explicit identity conflict blocks automatic clustering regardless of the numeric score. Scores are clamped to `[0, 1]`. Default interpretation:
 
 - `>= 0.75`: join the shadow graph;
 - `0.40–0.749...`: human review;
 - `< 0.40`: do not propose an alignment.
 
-Diacritics, punctuation and whitespace are normalized for name comparison. Name equality never creates a candidate by itself.
+Diacritics, punctuation and whitespace are normalized for name comparison. Name equality never creates a candidate by itself. The configurable values are decision thresholds only; the feature contributions are part of the versioned model.
 
 ## Gravitational resolution
 
 Provider components are mapped to local Emby people through indexed current provider IDs, IMDb IDs, compatible normalized names, and overlapping local media. The local person with the greatest count of distinct matching media becomes the anchor. Provider drift therefore survives when the old provider key disappears but the person's local media footprint stays stable.
+
+Cluster identity confidence is the weakest accepted pair edge needed by the component. Local-anchor confidence is stored separately: a direct current-ID binding is `1.0`; a media-mass-only binding is `mass / (mass + 1)`. Ordinary stable singleton bindings are omitted from provider-identity decisions because they contain no cross-provider identity inference.
 
 The result remains a proposal in plugin shadow storage. No `BaseItem`, provider ID, person record, relationship, image or Emby database row is mutated.
 
@@ -129,7 +140,7 @@ The evidence page loads at most the configured summary limit (default 100), orde
 - decision status and proposed shadow action;
 - ordinary-language headline and explanation;
 - chosen Emby anchor and provider identities;
-- confidence and impacted-title count;
+- provider-identity confidence, local-anchor confidence and impacted-title count;
 - expandable ordered evidence with verdicts and stored raw metrics; and
 - a capped display set of impacted titles, while all impacted rows remain stored.
 
