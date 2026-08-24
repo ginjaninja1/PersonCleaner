@@ -131,6 +131,7 @@ namespace PersonCleaner.V2.UI
 
     internal sealed class EmbyDecisionChangeExecutor
     {
+        private const string ResolverTokenProvider = "PersonCleanerMergeToken";
         private readonly ILibraryManager library;
         public EmbyDecisionChangeExecutor(ILibraryManager library) { this.library = library ?? throw new ArgumentNullException(nameof(library)); }
 
@@ -138,8 +139,10 @@ namespace PersonCleaner.V2.UI
         {
             if (plan == null) throw new ArgumentNullException(nameof(plan));
             Preflight(plan);
+            foreach (var personGroup in plan.Changes.Where(x => x.Kind == EmbyChangeKinds.RemovePersonProviderId).GroupBy(x => x.SourcePersonId)) ApplyProviderIds(personGroup.Key, personGroup.ToList());
+            foreach (var personGroup in plan.Changes.Where(x => x.Kind == EmbyChangeKinds.SetPersonProviderId).GroupBy(x => x.SourcePersonId)) ApplyProviderIds(personGroup.Key, personGroup.ToList());
             foreach (var mediaGroup in plan.Changes.Where(x => x.Kind == EmbyChangeKinds.MoveCredit).GroupBy(x => x.MediaId.Value)) ApplyCreditMoves(mediaGroup.Key, mediaGroup.ToList());
-            foreach (var personGroup in plan.Changes.Where(x => x.Kind == EmbyChangeKinds.SetPersonProviderId || x.Kind == EmbyChangeKinds.RemovePersonProviderId).GroupBy(x => x.SourcePersonId)) ApplyProviderIds(personGroup.Key, personGroup.ToList());
+            Postflight(plan);
         }
 
         private void Preflight(DecisionChangePlan plan)
@@ -186,18 +189,48 @@ namespace PersonCleaner.V2.UI
         {
             var media = library.GetItemById(mediaId) ?? throw new InvalidOperationException("Emby media " + mediaId + " no longer exists.");
             var people = ReadPeople(mediaId);
-            foreach (var change in changes)
+            var targets = changes.Select(x => x.TargetPersonId.Value).Distinct().ToDictionary(x => x, x => (Person)library.GetItemById(x));
+            var tokens = targets.ToDictionary(x => x.Key, x => Guid.NewGuid().ToString("N"));
+            try
             {
-                var target = (Person)library.GetItemById(change.TargetPersonId.Value);
-                var sourceRows = people.Where(x => x.Id == change.SourcePersonId && RoleText(x) == (change.Role ?? string.Empty)).ToList();
-                foreach (var source in sourceRows)
+                foreach (var target in targets)
                 {
-                    var targetAlreadyPresent = people.Any(x => x.Id == target.InternalId && x.Type == source.Type && string.Equals(x.Role ?? string.Empty, source.Role ?? string.Empty, StringComparison.Ordinal));
-                    if (targetAlreadyPresent) people.Remove(source);
-                    else { source.Id = target.InternalId; source.Guid = target.Id; source.Name = target.Name; source.ProviderIds = target.ProviderIds; }
+                    target.Value.ProviderIds[ResolverTokenProvider] = tokens[target.Key];
+                    library.UpdateItem(target.Value, null, ItemUpdateType.MetadataEdit);
+                }
+                foreach (var row in people.Where(x => targets.ContainsKey(x.Id))) SetResolverIdentity(row, targets[row.Id], tokens[row.Id]);
+
+                foreach (var change in changes)
+                {
+                    var target = targets[change.TargetPersonId.Value];
+                    var sourceRows = people.Where(x => x.Id == change.SourcePersonId && RoleText(x) == (change.Role ?? string.Empty)).ToList();
+                    foreach (var source in sourceRows)
+                    {
+                        var targetAlreadyPresent = people.Any(x => x.Id == target.InternalId && x.Type == source.Type && string.Equals(x.Role ?? string.Empty, source.Role ?? string.Empty, StringComparison.Ordinal));
+                        if (targetAlreadyPresent) people.Remove(source);
+                        else SetResolverIdentity(source, target, tokens[target.InternalId]);
+                    }
+                }
+                library.UpdatePeople(media, people, false);
+            }
+            finally
+            {
+                foreach (var targetId in targets.Keys)
+                {
+                    var target = library.GetItemById(targetId) as Person;
+                    if (target == null) continue;
+                    target.ProviderIds.Remove(ResolverTokenProvider);
+                    library.UpdateItem(target, null, ItemUpdateType.MetadataEdit);
                 }
             }
-            library.UpdatePeople(media, people, false);
+        }
+
+        private static void SetResolverIdentity(PersonInfo row, Person target, string token)
+        {
+            row.Id = target.InternalId;
+            row.Guid = target.Id;
+            row.Name = target.Name;
+            row.ProviderIds = new ProviderIdDictionary { [ResolverTokenProvider] = token };
         }
 
         private void ApplyProviderIds(long personId, List<EmbyChangeProposal> changes)
@@ -210,6 +243,28 @@ namespace PersonCleaner.V2.UI
                 else person.SetProviderId(provider, change.ProposedValue);
             }
             library.UpdateItem(person, null, ItemUpdateType.MetadataEdit);
+        }
+
+        private void Postflight(DecisionChangePlan plan)
+        {
+            foreach (var change in plan.Changes)
+            {
+                if (change.Kind == EmbyChangeKinds.SetPersonProviderId || change.Kind == EmbyChangeKinds.RemovePersonProviderId)
+                {
+                    var person = library.GetItemById(change.SourcePersonId) as Person ?? throw new InvalidOperationException("Post-update verification failed: Emby person " + change.SourcePersonId + " no longer exists.");
+                    var expected = change.Kind == EmbyChangeKinds.RemovePersonProviderId ? string.Empty : change.ProposedValue ?? string.Empty;
+                    var actual = ProviderId(person, change.Provider) ?? string.Empty;
+                    if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException("Post-update verification failed: Emby person " + change.SourcePersonId + " has " + change.Provider.ToUpperInvariant() + " ID '" + actual + "' instead of expected '" + expected + "'. No success was recorded.");
+                }
+                else if (change.Kind == EmbyChangeKinds.MoveCredit)
+                {
+                    var people = ReadPeople(change.MediaId.Value);
+                    var expectedRole = change.Role ?? string.Empty;
+                    if (people.Any(x => x.Id == change.SourcePersonId && RoleText(x) == expectedRole) || !people.Any(x => x.Id == change.TargetPersonId.Value && RoleText(x) == expectedRole))
+                        throw new InvalidOperationException("Post-update verification failed: Emby media " + change.MediaId.Value + " did not move '" + expectedRole + "' from person " + change.SourcePersonId + " to person " + change.TargetPersonId.Value + ". No success was recorded.");
+                }
+            }
         }
 
         private List<PersonInfo> ReadPeople(long mediaId) => library.GetItemPeople(new InternalPeopleQuery

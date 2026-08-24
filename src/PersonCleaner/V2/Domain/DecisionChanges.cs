@@ -102,6 +102,8 @@ namespace PersonCleaner.V2.Domain
 
             if ((decision.Action ?? string.Empty).StartsWith("AUTO_MERGE_SHADOW", StringComparison.Ordinal) || decision.Action == ResolutionActions.AutoRealignCredits)
             {
+                if ((decision.Action ?? string.Empty).StartsWith("AUTO_MERGE_SHADOW", StringComparison.Ordinal) && anchor != null)
+                    AddShadowProviderReleases(plan, context, anchor, keys);
                 foreach (var assignment in context.CreditAssignments.Where(x => x.Disposition == "MOVE").OrderBy(x => x.MediaEmbyId).ThenBy(x => x.Role, StringComparer.Ordinal).ThenBy(x => x.SourcePersonEmbyId))
                 {
                     plan.Changes.Add(new EmbyChangeProposal
@@ -128,6 +130,38 @@ namespace PersonCleaner.V2.Domain
                 plan.RecommendedCorrection = EvidenceCorrection(decision);
 
             return Complete(plan, decision, context, anchor, keys);
+        }
+
+        private static void AddShadowProviderReleases(DecisionChangePlan plan, DecisionChangeContext context, LocalPerson anchor, IEnumerable<ProviderKey> keys)
+        {
+            var finalBindings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var provider in new[] { ProviderNames.Tmdb, ProviderNames.Tvdb, ProviderNames.Imdb })
+            {
+                var current = Binding(anchor, provider);
+                if (!string.IsNullOrWhiteSpace(current)) finalBindings[provider] = current;
+            }
+            foreach (var key in ProposedBindings(context, keys)) finalBindings[key.Provider] = key.Id;
+
+            var sources = new HashSet<long>(context.CreditAssignments.Where(x => x.Disposition == "MOVE").Select(x => x.SourcePersonEmbyId));
+            foreach (var source in context.LocalPeople.Where(x => sources.Contains(x.EmbyId) && x.EmbyId != anchor.EmbyId).OrderBy(x => x.EmbyId))
+            {
+                foreach (var provider in new[] { ProviderNames.Tmdb, ProviderNames.Tvdb, ProviderNames.Imdb })
+                {
+                    var current = Binding(source, provider);
+                    string survivor;
+                    if (string.IsNullOrWhiteSpace(current) || !finalBindings.TryGetValue(provider, out survivor) || !string.Equals(current, survivor, StringComparison.OrdinalIgnoreCase)) continue;
+                    plan.Changes.Add(new EmbyChangeProposal
+                    {
+                        ChangeId = "provider-release:" + source.EmbyId.ToString(CultureInfo.InvariantCulture) + ":" + provider,
+                        Kind = EmbyChangeKinds.RemovePersonProviderId,
+                        SourcePersonId = source.EmbyId,
+                        Provider = provider,
+                        CurrentValue = current,
+                        Summary = "Release duplicate " + provider.ToUpperInvariant() + " person ID " + current + " from shadow Emby person " + source.EmbyId + " before moving its credits.",
+                        EvidenceNote = "Emby resolves UpdatePeople by provider identity rather than the supplied PersonInfo ID. The survivor retains this binding; releasing it from the shadow is required for an unambiguous credit move."
+                    });
+                }
+            }
         }
 
         private static DecisionChangePlan Complete(DecisionChangePlan plan, ResolutionDecision decision, DecisionChangeContext context, LocalPerson anchor, IEnumerable<ProviderKey> keys)

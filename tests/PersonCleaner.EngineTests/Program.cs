@@ -593,8 +593,9 @@ internal static class Program
             CreditAssignments = new List<ResolutionCreditAssignment> { new ResolutionCreditAssignment { SourcePersonEmbyId = 11, TargetPersonEmbyId = 10, MediaEmbyId = 20, Role = "Actor: Lead", Disposition = "MOVE", ComponentKey = "tmdb:100, tvdb:200", Rationale = "Persisted test assignment." } }
         };
         var plan = DecisionChangePlanner.Build(context);
-        Equal(2, plan.Changes.Count);
+        Equal(3, plan.Changes.Count);
         True(plan.Changes.Any(x => x.Kind == EmbyChangeKinds.SetPersonProviderId && x.SourcePersonId == 10 && x.Provider == ProviderNames.Tvdb && x.ProposedValue == "200"));
+        True(plan.Changes.Any(x => x.Kind == EmbyChangeKinds.RemovePersonProviderId && x.SourcePersonId == 11 && x.Provider == ProviderNames.Tvdb && x.CurrentValue == "200"));
         True(plan.Changes.Any(x => x.Kind == EmbyChangeKinds.MoveCredit && x.SourcePersonId == 11 && x.TargetPersonId == 10 && x.MediaId == 20));
     }
 

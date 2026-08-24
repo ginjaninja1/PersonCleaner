@@ -21,6 +21,7 @@ namespace PersonCleaner.V2.Tasks
     {
         private const string ProbeMarker = "[PersonCleaner-V2-MutationProbe]";
         private const string OrphanMarker = ProbeMarker + " Orphan sentinel ";
+        private const string ResolverTokenProvider = "PersonCleanerMergeToken";
         private readonly ILibraryManager library;
         private readonly ILogger logger;
 
@@ -62,7 +63,10 @@ namespace PersonCleaner.V2.Tasks
                 progress.Report(70);
 
                 ProbeDuplicateCollapse(media, source, target);
-                progress.Report(82);
+                progress.Report(80);
+
+                ProbeSharedProviderIdRelease(media, source, target);
+                progress.Report(88);
 
                 var sentinelId = ProbeImplicitPersonCreationAndOrphanLifecycle(media, suffix, cancellationToken);
                 created.Remove(sentinelId); // Deliberately leave it for Emby's own dead-person cleanup.
@@ -183,6 +187,71 @@ namespace PersonCleaner.V2.Tasks
             Require(after.Count(x => x.Id == target.InternalId && x.Type == PersonType.Actor && x.Role == "Duplicate Role") == 1, "Duplicate target relationship was not collapsed to one row.");
             Require(after.Any(x => x.Id == target.InternalId && x.Type == PersonType.Writer && x.Role == "Preserve Writer"), "Unrelated writer relationship was lost during duplicate collapse.");
             logger.Info("{0} PASS duplicate handling: existing target relationship retained once; source duplicate removed; unrelated row preserved.", ProbeMarker);
+        }
+
+        private void ProbeSharedProviderIdRelease(Series media, Person source, Person target)
+        {
+            const string sharedId = "pc-probe-shared-identity";
+            source = (Person)library.GetItemById(source.InternalId);
+            target = (Person)library.GetItemById(target.InternalId);
+            source.SetProviderId(MetadataProviders.Tmdb, sharedId);
+            target.SetProviderId(MetadataProviders.Tmdb, sharedId);
+            library.UpdateItem(source, null, ItemUpdateType.MetadataEdit);
+            library.UpdateItem(target, null, ItemUpdateType.MetadataEdit);
+
+            library.UpdatePeople(media, new List<PersonInfo> { Info(source, PersonType.Actor, "Shared Identity Role") }, false);
+            var initiallyResolved = ReadPeople(media.InternalId).Single();
+            logger.Info("{0} Shared-ID setup resolved the relationship to Person {1}; requested source was {2}, survivor is {3}.", ProbeMarker, initiallyResolved.Id, source.InternalId, target.InternalId);
+
+            source = (Person)library.GetItemById(source.InternalId);
+            source.ProviderIds.Remove(MetadataProviders.Tmdb.ToString());
+            library.UpdateItem(source, null, ItemUpdateType.MetadataEdit);
+            target = (Person)library.GetItemById(target.InternalId);
+
+            var releasedRows = ReadPeople(media.InternalId);
+            var releasedRow = releasedRows.Single();
+            releasedRow.Id = target.InternalId;
+            releasedRow.Guid = target.Id;
+            releasedRow.Name = target.Name;
+            releasedRow.ProviderIds = target.ProviderIds;
+            library.UpdatePeople(media, releasedRows, false);
+            var releaseOnlyResult = ReadPeople(media.InternalId).Single().Id;
+            logger.Info("{0} Shared-ID release without a resolver token resolved to Person {1}; expected survivor {2}. This records whether Emby's provider resolver cache remained stale.", ProbeMarker, releaseOnlyResult, target.InternalId);
+
+            // The failed control rewrite can restore the shared ID onto the cached
+            // shadow through UpdateValuesIfNeeded. Re-establish the production
+            // precondition before testing the tokenized path.
+            source = (Person)library.GetItemById(source.InternalId);
+            source.ProviderIds.Remove(MetadataProviders.Tmdb.ToString());
+            library.UpdateItem(source, null, ItemUpdateType.MetadataEdit);
+            Require(string.IsNullOrWhiteSpace(((Person)library.GetItemById(source.InternalId)).GetProviderId(MetadataProviders.Tmdb)), "Could not re-release the shared provider ID after the cache-control rewrite.");
+
+            var token = Guid.NewGuid().ToString("N");
+            target = (Person)library.GetItemById(target.InternalId);
+            target.ProviderIds[ResolverTokenProvider] = token;
+            library.UpdateItem(target, null, ItemUpdateType.MetadataEdit);
+            try
+            {
+                var rows = ReadPeople(media.InternalId);
+                var row = rows.Single();
+                row.Id = target.InternalId;
+                row.Guid = target.Id;
+                row.Name = target.Name;
+                row.ProviderIds = new ProviderIdDictionary { [ResolverTokenProvider] = token };
+                library.UpdatePeople(media, rows, false);
+            }
+            finally
+            {
+                target = (Person)library.GetItemById(target.InternalId);
+                target.ProviderIds.Remove(ResolverTokenProvider);
+                library.UpdateItem(target, null, ItemUpdateType.MetadataEdit);
+            }
+
+            var after = ReadPeople(media.InternalId);
+            Require(after.Count == 1 && after[0].Id == target.InternalId && after[0].Role == "Shared Identity Role", "The temporary resolver token did not make UpdatePeople resolve the credit to the survivor.");
+            Require(string.IsNullOrWhiteSpace(((Person)library.GetItemById(source.InternalId)).GetProviderId(MetadataProviders.Tmdb)), "Shared provider ID reappeared on the shadow person.");
+            Require(!((Person)library.GetItemById(target.InternalId)).ProviderIds.ContainsKey(ResolverTokenProvider), "Temporary resolver token remained on the survivor.");
+            logger.Info("{0} PASS shared-ID resolver token: UpdatePeople resolved the relationship to survivor Person {1}, and the temporary token was removed.", ProbeMarker, target.InternalId);
         }
 
         private long ProbeImplicitPersonCreationAndOrphanLifecycle(Series media, string suffix, CancellationToken cancellationToken)
