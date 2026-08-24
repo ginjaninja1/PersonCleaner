@@ -327,8 +327,8 @@ namespace PersonCleaner.V2.Domain
 
             var identifier = IdentifierEvidence(left, right);
             var roles = RoleEvidence(left, right, sharedKeys);
-            var competing = CountCompetingAttributions(left, right, creditIndex, aliases.Union(otherAliases));
-            var mediaAttributionDominant = (exactName || aliasMatch) && intersection > 0 && roles.Agreement > 0 && competing == 0;
+            var competing = CompetingAttributions(left, right, creditIndex, aliases.Union(otherAliases));
+            var mediaAttributionDominant = (exactName || aliasMatch) && intersection > 0 && roles.Agreement > 0 && competing.Count == 0;
 
             var rarity = 1.0 / Math.Sqrt(Math.Max(1, nameFrequency));
             var positiveScore = identifier.Match ? 1.0 :
@@ -343,7 +343,7 @@ namespace PersonCleaner.V2.Domain
             if (birthdayConflict) metadataPenalty += identifier.Match ? CorroboratedMetadataConflictPenalty : BirthdayConflictPenalty;
             if (mediaAttributionDominant) metadataPenalty = Math.Min(metadataPenalty, DominantMediaConflictPenaltyCap);
             var score = positiveScore - metadataPenalty;
-            if (competing > 0) score = Math.Min(score, 0.55);
+            if (competing.Count > 0) score = Math.Min(score, 0.55);
 
             return new ScoreBreakdown
             {
@@ -358,7 +358,8 @@ namespace PersonCleaner.V2.Domain
                 ExactRoleMatches = roles.Exact,
                 CompatibleRoleMatches = roles.Compatible,
                 RoleAgreement = roles.Agreement,
-                CompetingAttributionCount = competing,
+                CompetingAttributionCount = competing.Count,
+                CompetingAttributions = competing,
                 NameFrequency = Math.Max(1, nameFrequency),
                 BirthdayState = birthdayMatch ? "exact" : birthdayConflict ? "conflict" : "missing",
                 BirthdayDetail = birthdayKnown ? left.Provider + ":" + left.Birthday + ";" + right.Provider + ":" + right.Birthday : null,
@@ -661,8 +662,8 @@ namespace PersonCleaner.V2.Domain
                     ? "The provider confirmed the current ID is absent, while " + winner.Mass + " sampled title(s) support a media-backed replacement identity for Emby person " + winner.Person.EmbyId + "."
                     : "The current provider key does not reach this media-backed identity; " + winner.Mass + " sampled title(s) support review of the proposed continuity for Emby person " + winner.Person.EmbyId + "."
                     : metadataConflict
-                    ? component.Count + " provider profiles resolve to one identity despite " + conflictCount + " provider metadata disagreement(s); the disagreement remains visible for correction."
-                    : component.Count + " provider profiles resolve to one identity anchored to Emby person " + winner.Person.EmbyId + ".",
+                    ? component.Count + " provider person records resolve to one identity despite " + conflictCount + " provider metadata disagreement(s); the disagreement remains visible for correction."
+                    : component.Count + " provider person records resolve to one identity anchored to Emby person " + winner.Person.EmbyId + ".",
                 Explanation = merge
                     ? "Exact local credit assignments are calculated from this provider component and persisted with the decision; the preview does not infer source people from provider keys."
                     : drift
@@ -696,6 +697,7 @@ namespace PersonCleaner.V2.Domain
         {
             var conflict = candidate.Score.HasMetadataConflict || candidate.Score.CompetingAttributionCount > 0;
             var uncorroboratedNativeCrosswalk = candidate.Score.NativeProviderCrosswalkMatch && !candidate.Score.StableIdentifierMatch && !candidate.Score.MediaAttributionDominant;
+            var recommendation = BuildReviewCorrection(candidate);
             var decision = new ResolutionDecision
             {
                 DecisionId = StableId("review", candidate.PairKey),
@@ -705,21 +707,180 @@ namespace PersonCleaner.V2.Domain
                 ProviderKeys = candidate.Left.Key + ", " + candidate.Right.Key,
                 Confidence = candidate.Score.Score,
                 Headline = uncorroboratedNativeCrosswalk
-                    ? "A provider-native person cross-reference exists, but role-aware shared-media attribution does not corroborate it."
+                    ? ProviderPerson(candidate.Right) + " links to " + ProviderPerson(candidate.Left) + ", but their media credits do not confirm that they are the same person."
                     : conflict
-                    ? "The profiles share identity evidence, but a conflicting or competing attribution prevents an automatic join."
-                    : "The providers share " + candidate.Score.SharedMediaCount + " role-aware title attribution(s), but the evidence strength remains below the automatic threshold.",
+                    ? ReviewConflictHeadline(candidate, input)
+                    : ProviderPerson(candidate.Left) + " and " + ProviderPerson(candidate.Right) + " share " + candidate.Score.SharedMediaCount + " role-compatible title credit(s), but that is not enough to identify them as the same person automatically.",
                 Explanation = uncorroboratedNativeCrosswalk
-                    ? "Native provider cross-references are useful candidate evidence but cannot establish identity alone; review compatible naming and media attribution before confirming the link."
+                    ? "A provider person cross-reference is useful evidence, but PersonCleaner also requires corroboration from names, stable IDs, birth dates, or role-compatible credits before joining the records."
                     : conflict
-                    ? "Review the explicit conflict below. Missing fields are neutral; only observed disagreement or competing attribution reduces confidence."
-                    : "Containment, evidence count, name rarity and role agreement are evaluated independently; missing provider fields do not reduce the score."
+                    ? ReviewConflictExplanation(candidate, input, recommendation)
+                    : "The providers do not explicitly disagree. The observed support is simply below the automatic threshold; a missing provider field does not count against either person."
             };
             AddPairEvidence(decision, candidate.Score);
+            if (recommendation != null) decision.Evidence.Add(RecommendationEvidence(recommendation, input));
             var localIds = input.LocalPeople.Where(x => CurrentProviderKeys(x).Contains(candidate.Left.Key) || CurrentProviderKeys(x).Contains(candidate.Right.Key)).Select(x => x.EmbyId).Distinct().ToList();
             if (localIds.Count == 1) { decision.AnchorEmbyPersonId = localIds[0]; decision.LocalAnchorConfidence = 1; }
             AddMediaExamples(decision, localIds, input, settings.MaximumMediaExamples);
             return decision;
+        }
+
+        private static string ReviewConflictHeadline(Candidate candidate, ResolutionInput input)
+        {
+            var score = candidate.Score;
+            var people = ProviderPerson(candidate.Left) + " and " + ProviderPerson(candidate.Right);
+            var competing = CompetingAttributionSummary(score, input);
+            if (score.IdentifierConflict && score.CompetingAttributionCount > 0)
+                return people + " use conflicting identity IDs: " + FriendlyIdentifierConflicts(score.IdentifierConflictDetail) + ". " + competing;
+            if (score.IdentifierConflict)
+                return people + " use conflicting identity IDs: " + FriendlyIdentifierConflicts(score.IdentifierConflictDetail) + ".";
+            if (score.BirthdayConflict && score.CompetingAttributionCount > 0)
+                return people + " have different birth dates (" + FriendlyBirthdays(score.BirthdayDetail) + "). " + competing;
+            if (score.BirthdayConflict)
+                return people + " have different birth dates (" + FriendlyBirthdays(score.BirthdayDetail) + ").";
+            if (score.CompetingAttributionCount > 0)
+                return score.HardIdentifierMatch
+                    ? people + " have matching identity evidence, but " + LowerFirst(competing)
+                    : competing;
+            return people + " have observed provider metadata that disagrees.";
+        }
+
+        private static string ReviewConflictExplanation(Candidate candidate, ResolutionInput input, ReviewCorrectionHint recommendation)
+        {
+            if (recommendation != null)
+                return "The disagreement is specific to a provider credit on " + Quoted(MediaName(input, recommendation.Provider, recommendation.MediaType, recommendation.ProviderMediaId, recommendation.CanonicalMediaKey)) + ". Review the pre-filled provider correction below; opening it is immediate, and recalculation happens only if the correction is saved.";
+            if (candidate.Score.IdentifierConflict)
+                return "These are concrete provider-ID disagreements, so PersonCleaner keeps the records separate instead of guessing which provider value is wrong. Missing fields are not counted as disagreements.";
+            if (candidate.Score.BirthdayConflict)
+                return "The providers supplied two concrete birth dates. PersonCleaner keeps the records separate until an operator confirms whether one date is wrong or the records describe different people.";
+            return "At least one provider assigns the same name and compatible role on the same title to a different person ID. PersonCleaner keeps the records separate until that provider attribution is corrected or confirmed.";
+        }
+
+        private static ReviewCorrectionHint BuildReviewCorrection(Candidate candidate)
+        {
+            var details = (candidate.Score.CompetingAttributions ?? new List<CompetingAttribution>())
+                .Where(UsableCorrectionDetail).ToList();
+            if (candidate.Score.HardIdentifierMatch && details.Count == 1)
+            {
+                var detail = details[0];
+                return new ReviewCorrectionHint
+                {
+                    Provider = detail.ExpectedProvider,
+                    MediaType = detail.MediaType,
+                    ProviderMediaId = detail.ProviderMediaId,
+                    CurrentPersonId = detail.CompetingProviderPersonId,
+                    ReplacementPersonId = detail.ExpectedProviderPersonId,
+                    CanonicalMediaKey = detail.CanonicalMediaKey
+                };
+            }
+
+            if (!candidate.Score.IdentifierConflict || candidate.Score.HardIdentifierMatch) return null;
+            var alternative = details.GroupBy(x => x.ExpectedProvider + "|" + x.CompetingProviderPersonId, StringComparer.Ordinal)
+                .OrderByDescending(x => x.Count()).ThenBy(x => x.Key, StringComparer.Ordinal).FirstOrDefault();
+            if (alternative == null || alternative.Count() < 2) return null;
+            var first = alternative.First();
+            var current = candidate.Left.Provider == first.ExpectedProvider ? candidate.Left : candidate.Right.Provider == first.ExpectedProvider ? candidate.Right : null;
+            var opposite = current == candidate.Left ? candidate.Right : candidate.Left;
+            if (current == null || opposite == null) return null;
+            var shared = new HashSet<string>(current.CanonicalMediaKeys.Intersect(opposite.CanonicalMediaKeys, StringComparer.Ordinal), StringComparer.Ordinal);
+            var attributed = current.Credits.Where(x => shared.Contains(x.CanonicalMediaKey) && !string.IsNullOrWhiteSpace(x.MediaType) && !string.IsNullOrWhiteSpace(x.ProviderMediaId)).ToList();
+            if (attributed.Count != 1) return null;
+            return new ReviewCorrectionHint
+            {
+                Provider = current.Provider,
+                MediaType = attributed[0].MediaType,
+                ProviderMediaId = attributed[0].ProviderMediaId,
+                CurrentPersonId = current.ProviderId,
+                ReplacementPersonId = first.CompetingProviderPersonId,
+                CanonicalMediaKey = attributed[0].CanonicalMediaKey
+            };
+        }
+
+        private static EvidenceLine RecommendationEvidence(ReviewCorrectionHint correction, ResolutionInput input)
+        {
+            var title = MediaName(input, correction.Provider, correction.MediaType, correction.ProviderMediaId, correction.CanonicalMediaKey);
+            return new EvidenceLine
+            {
+                SortOrder = 3,
+                SignalType = "RECOMMENDED_PROVIDER_CORRECTION",
+                Verdict = "action",
+                Narrative = correction.Provider.ToUpperInvariant() + " credits " + Quoted(title) + " to person " + correction.CurrentPersonId + ". The surrounding identity and title evidence supports person " + correction.ReplacementPersonId + " instead; the correction form is pre-filled but is not saved automatically.",
+                Metric = "kind=" + CorrectionKinds.MediaCredit + ";operation=" + CorrectionOperations.Replace + ";provider=" + correction.Provider + ";media_type=" + correction.MediaType + ";provider_media_id=" + correction.ProviderMediaId + ";provider_person_id=" + correction.CurrentPersonId + ";replacement_value=" + correction.ReplacementPersonId
+            };
+        }
+
+        private static bool UsableCorrectionDetail(CompetingAttribution detail) => detail != null &&
+            !string.IsNullOrWhiteSpace(detail.ExpectedProvider) && !string.IsNullOrWhiteSpace(detail.ExpectedProviderPersonId) &&
+            !string.IsNullOrWhiteSpace(detail.MediaType) && !string.IsNullOrWhiteSpace(detail.ProviderMediaId) &&
+            !string.IsNullOrWhiteSpace(detail.CompetingProviderPersonId);
+
+        private static string CompetingAttributionSummary(ScoreBreakdown score, ResolutionInput input)
+        {
+            var details = score.CompetingAttributions ?? new List<CompetingAttribution>();
+            if (details.Count == 0) return score.CompetingAttributionCount + " role-compatible provider credit(s) use a different person ID.";
+            var first = details[0];
+            var title = MediaName(input, first.ExpectedProvider, first.MediaType, first.ProviderMediaId, first.CanonicalMediaKey);
+            if (details.Count == 1)
+                return first.ExpectedProvider.ToUpperInvariant() + " credits " + Quoted(title) + " to a different " + (string.IsNullOrWhiteSpace(first.CompetingPersonName) ? "person" : first.CompetingPersonName) + " record (person " + first.CompetingProviderPersonId + ") instead of person " + first.ExpectedProviderPersonId + ".";
+            var people = details.Select(x => x.CompetingProviderPersonId).Distinct(StringComparer.Ordinal).ToList();
+            return details.Count + " role-compatible " + first.ExpectedProvider.ToUpperInvariant() + " title credits, including " + Quoted(title) + ", use " + (people.Count == 1 ? "person " + people[0] : people.Count + " other person IDs") + " instead of person " + first.ExpectedProviderPersonId + ".";
+        }
+
+        private static string CompetingAttributionNarrative(ScoreBreakdown score)
+        {
+            var details = score.CompetingAttributions ?? new List<CompetingAttribution>();
+            if (details.Count == 0) return score.CompetingAttributionCount + " role-compatible credit(s) on the same media use a different provider person ID.";
+            var examples = details.Take(3).Select(x => x.ExpectedProvider.ToUpperInvariant() + " " + (string.IsNullOrWhiteSpace(x.MediaType) ? "media" : x.MediaType) + " " + (string.IsNullOrWhiteSpace(x.ProviderMediaId) ? x.CanonicalMediaKey : x.ProviderMediaId) + " credits person " + x.CompetingProviderPersonId + " instead of person " + x.ExpectedProviderPersonId).ToList();
+            return string.Join("; ", examples) + (details.Count > examples.Count ? "; plus " + (details.Count - examples.Count) + " more" : string.Empty) + ".";
+        }
+
+        private static string MediaName(ResolutionInput input, string provider, string mediaType, string providerMediaId, string canonicalKey)
+        {
+            var mediaRows = input.Media ?? new List<MediaSeed>();
+            var direct = mediaRows.FirstOrDefault(x => x.MediaType == mediaType &&
+                (provider == ProviderNames.Tmdb && x.TmdbId == providerMediaId || provider == ProviderNames.Tvdb && x.TvdbId == providerMediaId));
+            if (direct != null) return direct.Name + (direct.Year.HasValue ? " (" + direct.Year.Value + ")" : string.Empty);
+            var related = (input.ProviderCredits ?? new List<ObservedProviderCredit>()).Where(x => x.CanonicalMediaKey == canonicalKey).ToList();
+            foreach (var credit in related)
+            {
+                var media = mediaRows.FirstOrDefault(x => x.MediaType == credit.MediaType &&
+                    (credit.Provider == ProviderNames.Tmdb && x.TmdbId == credit.ProviderMediaId || credit.Provider == ProviderNames.Tvdb && x.TvdbId == credit.ProviderMediaId));
+                if (media != null) return media.Name + (media.Year.HasValue ? " (" + media.Year.Value + ")" : string.Empty);
+            }
+            return (string.IsNullOrWhiteSpace(mediaType) ? "media" : mediaType) + " " + provider.ToUpperInvariant() + ":" + providerMediaId;
+        }
+
+        private static string ProviderPerson(ProviderPerson person) => person.Provider.ToUpperInvariant() + " person " + person.ProviderId;
+        private static string Quoted(string value) => "'" + value + "'";
+        private static string LowerFirst(string value) => string.IsNullOrEmpty(value) ? value : char.ToLowerInvariant(value[0]) + value.Substring(1);
+        private static string FriendlyBirthdays(string detail) => string.Join("; ", (detail ?? string.Empty).Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries).Select(x => x.Replace(ProviderNames.Tmdb + ":", "TMDB ").Replace(ProviderNames.Tvdb + ":", "TVDB ")));
+
+        private static string FriendlyIdentifierConflicts(string detail)
+        {
+            var result = new List<string>();
+            foreach (var token in (detail ?? string.Empty).Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var unequal = token.IndexOf("!=", StringComparison.Ordinal);
+                if (unequal < 0) { result.Add(token); continue; }
+                var left = token.Substring(0, unequal); var right = token.Substring(unequal + 2);
+                var arrow = left.IndexOf("->", StringComparison.Ordinal); var colon = left.IndexOf(':');
+                if (arrow >= 0 && colon > arrow)
+                    result.Add(left.Substring(0, arrow).ToUpperInvariant() + " points to " + left.Substring(arrow + 2, colon - arrow - 2).ToUpperInvariant() + " " + left.Substring(colon + 1) + " rather than " + right);
+                else if (colon > 0)
+                    result.Add(left.Substring(0, colon).ToUpperInvariant() + " is " + left.Substring(colon + 1) + " versus " + right);
+                else result.Add(token);
+            }
+            return string.Join("; ", result);
+        }
+
+        private sealed class ReviewCorrectionHint
+        {
+            public string Provider { get; set; }
+            public string MediaType { get; set; }
+            public string ProviderMediaId { get; set; }
+            public string CurrentPersonId { get; set; }
+            public string ReplacementPersonId { get; set; }
+            public string CanonicalMediaKey { get; set; }
         }
 
         private static ResolutionDecision BuildSplitDecision(LocalPerson local, List<List<ProviderPerson>> components, ResolutionInput input, List<Candidate> candidates, ResolutionSettings settings)
@@ -784,9 +945,9 @@ namespace PersonCleaner.V2.Domain
             decision.Evidence.Add(new EvidenceLine { SortOrder = 10, SignalType = "FILMOGRAPHY", Verdict = score.SharedMediaCount > 0 ? "supports" : "neutral", Narrative = score.SharedMediaCount + " shared canonical title(s); containment " + score.FilmographyContainment.ToString("0.000", CultureInfo.InvariantCulture) + "; Jaccard " + score.FilmographyJaccard.ToString("0.000", CultureInfo.InvariantCulture) + ". Unmatched titles are not negative evidence.", Metric = "shared=" + score.SharedMediaCount + ";left=" + score.LeftMediaCount + ";right=" + score.RightMediaCount + ";containment=" + score.FilmographyContainment.ToString("0.000000", CultureInfo.InvariantCulture) + ";jaccard=" + score.FilmographyJaccard.ToString("0.000000", CultureInfo.InvariantCulture) });
             decision.Evidence.Add(new EvidenceLine { SortOrder = 15, SignalType = "ROLE_AGREEMENT", Verdict = score.RoleAgreement > 0 ? "supports" : "unknown", Narrative = score.ExactRoleMatches + " exact and " + score.CompatibleRoleMatches + " compatible shared-title role match(es).", Metric = "exact=" + score.ExactRoleMatches + ";compatible=" + score.CompatibleRoleMatches + ";agreement=" + score.RoleAgreement.ToString("0.000000", CultureInfo.InvariantCulture) });
             decision.Evidence.Add(new EvidenceLine { SortOrder = 20, SignalType = "BIRTHDAY", Verdict = score.BirthdayConflict ? "conflicts" : score.BirthdayMatch ? "supports" : "missing", Narrative = score.BirthdayConflict ? "Both providers supplied different birth dates (" + score.BirthdayDetail + "). This is negative metadata evidence, not by itself proof of separate identities." : score.BirthdayMatch ? "Both providers supplied the same birth date (" + score.BirthdayDetail + ")." : "A comparable birth date was not available; this contributes neither support nor a penalty.", Metric = score.BirthdayState + (string.IsNullOrWhiteSpace(score.BirthdayDetail) ? string.Empty : ";" + score.BirthdayDetail) });
-            decision.Evidence.Add(new EvidenceLine { SortOrder = 25, SignalType = "EXTERNAL_ID", Verdict = score.IdentifierConflict ? score.HardIdentifierMatch ? "mixed" : "conflicts" : score.HardIdentifierMatch ? "proves" : "missing", Narrative = score.IdentifierConflict && score.HardIdentifierMatch ? "Identity support (" + score.IdentifierMatchDetail + ") coexists with an external-ID disagreement (" + score.IdentifierConflictDetail + "); the disagreement reduces evidence strength but does not erase the independent match." : score.IdentifierConflict ? "The profiles supply different known values in a comparable external-ID namespace (" + score.IdentifierConflictDetail + "); this is negative evidence." : score.NativeProviderCrosswalkMatch ? "A provider explicitly cross-references the other provider's person ID (" + score.IdentifierMatchDetail + ")." : score.HardIdentifierMatch ? "The profiles share a stable IMDb or Wikidata identifier (" + score.IdentifierMatchDetail + ")." : "No comparable stable person identifier was available; this is neutral.", Metric = score.ExternalIdState + (string.IsNullOrWhiteSpace(score.IdentifierMatchDetail) ? string.Empty : ";matches=" + score.IdentifierMatchDetail) + (string.IsNullOrWhiteSpace(score.IdentifierConflictDetail) ? string.Empty : ";conflicts=" + score.IdentifierConflictDetail) });
+            decision.Evidence.Add(new EvidenceLine { SortOrder = 25, SignalType = "EXTERNAL_ID", Verdict = score.IdentifierConflict ? score.HardIdentifierMatch ? "mixed" : "conflicts" : score.HardIdentifierMatch ? "proves" : "missing", Narrative = score.IdentifierConflict && score.HardIdentifierMatch ? "Identity support (" + score.IdentifierMatchDetail + ") coexists with an external-ID disagreement (" + score.IdentifierConflictDetail + "); the disagreement reduces evidence strength but does not erase the independent match." : score.IdentifierConflict ? "The provider person records supply different IDs in the same namespace (" + score.IdentifierConflictDetail + "); this is negative evidence." : score.NativeProviderCrosswalkMatch ? "A provider explicitly cross-references the other provider's person ID (" + score.IdentifierMatchDetail + ")." : score.HardIdentifierMatch ? "The provider person records share a stable IMDb or Wikidata identifier (" + score.IdentifierMatchDetail + ")." : "No comparable stable person identifier was available; this is neutral.", Metric = score.ExternalIdState + (string.IsNullOrWhiteSpace(score.IdentifierMatchDetail) ? string.Empty : ";matches=" + score.IdentifierMatchDetail) + (string.IsNullOrWhiteSpace(score.IdentifierConflictDetail) ? string.Empty : ";conflicts=" + score.IdentifierConflictDetail) });
             decision.Evidence.Add(new EvidenceLine { SortOrder = 30, SignalType = "NAME", Verdict = score.ExactNameMatch || score.AliasMatch ? "supports" : "neutral", Narrative = score.ExactNameMatch ? "Normalized primary names match exactly; cohort frequency " + score.NameFrequency + "." : score.AliasMatch ? "A provider alias matches the other provider's name." : "Names did not add positive evidence.", Metric = (score.ExactNameMatch ? "exact" : score.AliasMatch ? "alias" : "none") + ";frequency=" + score.NameFrequency });
-            if (score.CompetingAttributionCount > 0) decision.Evidence.Add(new EvidenceLine { SortOrder = 5, SignalType = "COMPETING_ATTRIBUTION", Verdict = "conflicts", Narrative = score.CompetingAttributionCount + " same-envelope, role-compatible attribution(s) point to a different provider person on observed media.", Metric = "count=" + score.CompetingAttributionCount });
+            if (score.CompetingAttributionCount > 0) decision.Evidence.Add(new EvidenceLine { SortOrder = 5, SignalType = "COMPETING_ATTRIBUTION", Verdict = "conflicts", Narrative = CompetingAttributionNarrative(score), Metric = "count=" + score.CompetingAttributionCount });
             if (score.MediaAttributionDominant) decision.Evidence.Add(new EvidenceLine { SortOrder = 8, SignalType = "MEDIA_ATTRIBUTION_DOMINANCE", Verdict = "supports", Narrative = "Compatible normalized naming and role-aware shared-media attribution identify this pair, with no competing same-envelope person attribution in the observed provider credits.", Metric = "dominant=true;shared=" + score.SharedMediaCount + ";role_agreement=" + score.RoleAgreement.ToString("0.000000", CultureInfo.InvariantCulture) + ";competing=0" });
             decision.Evidence.Add(new EvidenceLine { SortOrder = 40, SignalType = "EVIDENCE_MODEL", Verdict = "info", Narrative = "Evidence strength is a deterministic, versioned decision score rather than a calibrated probability. Missing observations are neutral; metadata disagreements reduce the score, while dominant role-aware media attribution and structural cluster constraints are evaluated explicitly.", Metric = "model=" + score.ModelVersion + ";positive=" + score.PositiveEvidenceScore.ToString("0.000000", CultureInfo.InvariantCulture) + ";metadata_penalty=" + score.MetadataConflictPenalty.ToString("0.000000", CultureInfo.InvariantCulture) + ";score=" + score.Score.ToString("0.000000", CultureInfo.InvariantCulture) });
         }
@@ -890,20 +1051,36 @@ namespace PersonCleaner.V2.Domain
             return new RoleResult { Exact = exact, Compatible = compatible, Agreement = sharedKeys.Count == 0 ? 0 : (exact + compatible * 0.67) / sharedKeys.Count };
         }
 
-        private static int CountCompetingAttributions(ProviderPerson left, ProviderPerson right, ProviderCreditIndex creditIndex, IEnumerable<string> compatibleNames)
+        private static List<CompetingAttribution> CompetingAttributions(ProviderPerson left, ProviderPerson right, ProviderCreditIndex creditIndex, IEnumerable<string> compatibleNames)
         {
             var names = new HashSet<string>(compatibleNames.Where(x => !string.IsNullOrWhiteSpace(x)), StringComparer.Ordinal);
-            var conflicts = new HashSet<string>(StringComparer.Ordinal);
+            var conflicts = new Dictionary<string, CompetingAttribution>(StringComparer.Ordinal);
             CountCompeting(left, right, creditIndex, names, conflicts);
             CountCompeting(right, left, creditIndex, names, conflicts);
-            return conflicts.Count;
+            return conflicts.OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => x.Value).ToList();
         }
 
-        private static void CountCompeting(ProviderPerson source, ProviderPerson expected, ProviderCreditIndex creditIndex, HashSet<string> names, HashSet<string> conflicts)
+        private static void CountCompeting(ProviderPerson source, ProviderPerson expected, ProviderCreditIndex creditIndex, HashSet<string> names, IDictionary<string, CompetingAttribution> conflicts)
         {
             foreach (var sourceCredit in source.Credits)
             foreach (var other in creditIndex.Find(expected.Provider, sourceCredit.CanonicalMediaKey).Where(x => x.PersonKey != expected.Key && names.Contains(x.CleanPersonName)))
-                if (RoleCompatibility(sourceCredit, other) > 0) conflicts.Add(other.PersonKey + "|" + other.CanonicalMediaKey);
+                if (RoleCompatibility(sourceCredit, other) > 0)
+                {
+                    var key = other.PersonKey + "|" + other.CanonicalMediaKey;
+                    if (!conflicts.ContainsKey(key)) conflicts[key] = new CompetingAttribution
+                    {
+                        SourceProvider = source.Provider,
+                        SourceProviderPersonId = source.ProviderId,
+                        ExpectedProvider = expected.Provider,
+                        ExpectedProviderPersonId = expected.ProviderId,
+                        MediaType = other.MediaType,
+                        ProviderMediaId = other.ProviderMediaId,
+                        CompetingProviderPersonId = other.ProviderPersonId,
+                        CompetingPersonName = other.PersonName,
+                        Role = other.Role,
+                        CanonicalMediaKey = other.CanonicalMediaKey
+                    };
+                }
         }
 
         private static int RoleCompatibility(ObservedProviderCredit left, ObservedProviderCredit right)

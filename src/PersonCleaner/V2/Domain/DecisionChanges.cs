@@ -90,7 +90,7 @@ namespace PersonCleaner.V2.Domain
                         AddProviderChange(plan, anchor.EmbyId, key.Provider, current, key.Id,
                             decision.Action == "HUMAN_REVIEW" || decision.Status == "DRIFT" && !currentAbsent,
                             key.IsExternal
-                                ? "The proposed " + key.SourceProvider.ToUpperInvariant() + " profile identifies this " + key.Provider.ToUpperInvariant() + " person ID. It is a dependent part of the same identity change."
+                                ? "The proposed " + key.SourceProvider.ToUpperInvariant() + " person record identifies this " + key.Provider.ToUpperInvariant() + " person ID. It is a dependent part of the same identity change."
                                 : decision.Status == "DRIFT" && !currentAbsent
                                     ? "The current provider record still exists. This replacement is offered for explicit manual approval because sampled media supports the proposed identity; it is not an automatic recommendation."
                                     : "The proposed provider binding follows the resolved media-backed identity.");
@@ -124,6 +124,8 @@ namespace PersonCleaner.V2.Domain
                 if (pair != null)
                     plan.RecommendedCorrection = new ProviderCorrection { Kind = CorrectionKinds.IdentityRelation, Operation = CorrectionOperations.Same, Provider = pair.left.Provider, ProviderPersonId = pair.left.Id, SecondaryProvider = pair.right.Provider, SecondaryId = pair.right.Id, Reason = "PROVIDER_MISMATCH", Note = "Recommended from decision " + decision.DecisionId + ": " + decision.Headline, Enabled = true };
             }
+            if (plan.RecommendedCorrection == null && decision.Status == "CONFLATION")
+                plan.RecommendedCorrection = EvidenceCorrection(decision);
 
             return Complete(plan, decision, context, anchor, keys);
         }
@@ -143,7 +145,43 @@ namespace PersonCleaner.V2.Domain
                 plan.NoChangeSummary = "No Emby changes are needed";
                 plan.NoChangeExplanation = "The current Emby provider IDs already match the resolved identity. The provider metadata disagreement remains visible as evidence and may have a separate correction recommendation.";
             }
+            else if (decision.Status == "CONFLATION")
+            {
+                plan.NoChangeSummary = "No direct Emby edit is proposed";
+                plan.NoChangeExplanation = plan.RecommendedCorrection == null
+                    ? "The provider records remain separate. The evidence identifies the disagreement, but it does not support a single safe provider correction."
+                    : "This is a provider-data attribution issue. Review the pre-filled provider correction; Emby itself does not need to be edited for this decision.";
+            }
             return plan;
+        }
+
+        private static ProviderCorrection EvidenceCorrection(ResolutionDecision decision)
+        {
+            var evidence = (decision.Evidence ?? new List<EvidenceLine>()).FirstOrDefault(x => x.SignalType == "RECOMMENDED_PROVIDER_CORRECTION");
+            if (evidence == null) return null;
+            var fields = (evidence.Metric ?? string.Empty).Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => new { Separator = x.IndexOf('='), Value = x })
+                .Where(x => x.Separator > 0)
+                .ToDictionary(x => x.Value.Substring(0, x.Separator), x => x.Value.Substring(x.Separator + 1), StringComparer.OrdinalIgnoreCase);
+            string kind; string operation; string provider; string mediaType; string mediaId; string personId; string replacement;
+            if (!fields.TryGetValue("kind", out kind) || kind != CorrectionKinds.MediaCredit ||
+                !fields.TryGetValue("operation", out operation) || operation != CorrectionOperations.Replace ||
+                !fields.TryGetValue("provider", out provider) || !fields.TryGetValue("media_type", out mediaType) ||
+                !fields.TryGetValue("provider_media_id", out mediaId) || !fields.TryGetValue("provider_person_id", out personId) ||
+                !fields.TryGetValue("replacement_value", out replacement)) return null;
+            return new ProviderCorrection
+            {
+                Kind = kind,
+                Operation = operation,
+                Provider = provider,
+                MediaType = mediaType,
+                ProviderMediaId = mediaId,
+                ProviderPersonId = personId,
+                ReplacementValue = replacement,
+                Reason = "PROVIDER_CREDIT_ATTRIBUTION",
+                Note = "Recommended from decision " + decision.DecisionId + ": " + evidence.Narrative,
+                Enabled = true
+            };
         }
 
         private static void AddAbsentRemoval(DecisionChangePlan plan, DecisionChangeContext context, LocalPerson person, string provider, string current)

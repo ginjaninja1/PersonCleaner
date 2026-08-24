@@ -160,6 +160,7 @@ namespace PersonCleaner.V2.Domain
         public int CompatibleRoleMatches { get; set; }
         public double RoleAgreement { get; set; }
         public int CompetingAttributionCount { get; set; }
+        public List<CompetingAttribution> CompetingAttributions { get; set; } = new List<CompetingAttribution>();
         public int NameFrequency { get; set; } = 1;
         public string BirthdayState { get; set; } = "missing";
         public string BirthdayDetail { get; set; }
@@ -177,6 +178,20 @@ namespace PersonCleaner.V2.Domain
         public bool MediaAttributionDominant { get; set; }
         public bool HasMetadataConflict => BirthdayConflict || IdentifierConflict;
         public double Score { get; set; }
+    }
+
+    public sealed class CompetingAttribution
+    {
+        public string SourceProvider { get; set; }
+        public string SourceProviderPersonId { get; set; }
+        public string ExpectedProvider { get; set; }
+        public string ExpectedProviderPersonId { get; set; }
+        public string MediaType { get; set; }
+        public string ProviderMediaId { get; set; }
+        public string CompetingProviderPersonId { get; set; }
+        public string CompetingPersonName { get; set; }
+        public string Role { get; set; }
+        public string CanonicalMediaKey { get; set; }
     }
 
     public sealed class ResolutionDiagnostics

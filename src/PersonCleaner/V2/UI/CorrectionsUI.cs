@@ -294,8 +294,8 @@ namespace PersonCleaner.V2.UI
                                 new ButtonItem("Media cross-reference") { CommandId = CorrectionCommands.AddMediaExternal },
                                 new ButtonItem("Person name or birthday") { CommandId = CorrectionCommands.AddPersonField },
                                 new ButtonItem("Local Emby provider binding") { CommandId = CorrectionCommands.AddLocalBinding },
-                                new ButtonItem("Profiles are the same person") { CommandId = CorrectionCommands.AddSame },
-                                new ButtonItem("Profiles are different people") { CommandId = CorrectionCommands.AddDifferent }
+                                new ButtonItem("Provider records are the same person") { CommandId = CorrectionCommands.AddSame },
+                                new ButtonItem("Provider records are different people") { CommandId = CorrectionCommands.AddDifferent }
                             }
                         }
                     }

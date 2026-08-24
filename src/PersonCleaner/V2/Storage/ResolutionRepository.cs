@@ -601,6 +601,11 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
                 }
                 if (decision == null) throw new InvalidOperationException("The selected decision is no longer present in the latest completed run.");
                 var context = new DecisionChangeContext { Decision = decision };
+                using (var s = db.PrepareStatement("SELECT sort_order,signal_type,verdict,narrative,metric_raw FROM resolution_evidence WHERE run_id=@run AND decision_id=@decision ORDER BY sort_order,signal_type"))
+                {
+                    s.Bind("@run", runId); s.Bind("@decision", decisionId);
+                    foreach (var r in s.Rows()) decision.Evidence.Add(new EvidenceLine { SortOrder = r.GetInt(0), SignalType = r.GetString(1), Verdict = r.GetString(2), Narrative = r.GetString(3), Metric = r.GetString(4) });
+                }
                 using (var s = db.PrepareStatement("SELECT emby_id,name,tmdb_id,tvdb_id,imdb_id FROM current_local_person"))
                     foreach (var r in s.Rows()) context.LocalPeople.Add(new LocalPerson { EmbyId = r.GetInt64(0), Name = r.GetString(1), TmdbId = Null(r, 2), TvdbId = Null(r, 3), ImdbId = Null(r, 4) });
                 using (var s = db.PrepareStatement("SELECT emby_id,name,tmdb_id,tvdb_id,imdb_id FROM global_local_person"))

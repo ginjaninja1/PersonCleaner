@@ -1,7 +1,5 @@
 using Emby.Web.GenericEdit;
-using Emby.Web.GenericEdit.Common;
 using Emby.Web.GenericEdit.Elements;
-using Emby.Web.GenericEdit.Elements.List;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Entities;
@@ -24,25 +22,35 @@ namespace PersonCleaner.V2.UI
     {
         public override string EditorTitle => null;
         public override string EditorDescription => null;
-        public GenericItemList DecisionSummary { get; set; } = new GenericItemList();
-        public GenericItemList ScopedChanges { get; set; } = new GenericItemList();
-        public GenericItemList ResultSummary { get; set; } = new GenericItemList();
+        public CaptionItem DecisionHeading { get; set; } = new CaptionItem("Decision");
+        public LabelItem DecisionName { get; set; }
+        public LabelItem DecisionSummary { get; set; }
+        public CaptionItem ScopedChangesHeading { get; set; } = new CaptionItem("Proposed action");
+        public LabelItem ScopedChanges { get; set; }
         public ButtonItem UpdateEmby { get; set; }
         public ButtonItem AddProviderCorrection { get; set; }
+        public CaptionItem ResultHeading { get; set; } = new CaptionItem("Result");
+        public LabelItem ResultSummary { get; set; }
 
         public static DecisionChangeDialogUI Build(DecisionChangePlan plan, string result)
         {
             var ui = new DecisionChangeDialogUI();
-            ui.DecisionSummary.Add(new GenericListItem { PrimaryText = plan.DisplayName ?? "Selected decision", SecondaryText = plan.DecisionSummary ?? "No summary is available.", Icon = IconNames.person, Status = ItemStatus.Succeeded });
-            foreach (var change in plan.Changes)
-                ui.ScopedChanges.Add(new GenericListItem { PrimaryText = change.Summary, SecondaryText = (change.ManualReviewOnly ? "Manual decision. " : string.Empty) + (change.EvidenceNote ?? string.Empty) + " Preconditions will be checked against live Emby immediately before the update.", Icon = IconNames.person, Status = change.ManualReviewOnly ? ItemStatus.Unavailable : ItemStatus.Succeeded });
+            ui.DecisionName = new LabelItem(plan.DisplayName ?? "Selected decision");
+            ui.DecisionSummary = new LabelItem(plan.DecisionSummary ?? "No summary is available.");
+            var changes = plan.Changes.Select((change, index) =>
+                (plan.Changes.Count > 1 ? (index + 1) + ". " : string.Empty) + change.Summary + " " +
+                (change.ManualReviewOnly ? "This requires a manual decision. " : string.Empty) +
+                (change.EvidenceNote ?? string.Empty) + " Preconditions will be checked against live Emby immediately before the update.").ToList();
             if (plan.Changes.Count == 0)
-                ui.ScopedChanges.Add(new GenericListItem { PrimaryText = plan.NoChangeSummary ?? "No safe Emby mutation is recommended", SecondaryText = plan.NoChangeExplanation ?? "This decision remains evidence for operator review; PersonCleaner will not infer a destructive change.", Icon = IconNames.person, Status = plan.NoChangeSummary == null ? ItemStatus.Unavailable : ItemStatus.Succeeded });
+                ui.ScopedChanges = new LabelItem((plan.NoChangeSummary ?? "No safe Emby change is recommended") + ". " + (plan.NoChangeExplanation ?? "This decision remains evidence for operator review; PersonCleaner will not infer a destructive change."));
             else
+            {
+                ui.ScopedChanges = new LabelItem(string.Join(Environment.NewLine + Environment.NewLine, changes));
                 ui.UpdateEmby = new ButtonItem("Update Emby") { CommandId = "decision-update-emby", ConfirmationPrompt = plan.Changes.Any(x => x.ManualReviewOnly) ? "Apply every listed change to live Emby? One or more changes are manual judgments rather than automatic recommendations." : "Apply every listed change to live Emby after validating the current records?" };
-            ui.ResultSummary.Add(new GenericListItem { PrimaryText = result == null ? "Nothing has been written" : "Result", SecondaryText = result ?? (plan.Changes.Count == 0 ? "No Emby update is available for this decision." : "Review the exact in-scope changes above. Nothing is written until Update Emby is pressed."), Icon = IconNames.person, Status = result == null ? ItemStatus.Unavailable : ItemStatus.Succeeded });
+            }
+            ui.ResultSummary = new LabelItem(result ?? (plan.Changes.Count == 0 ? "Nothing has been written to Emby." : "Nothing has been written. Review the exact changes above; they are applied only after Update Emby is pressed."));
             if (plan.RecommendedCorrection != null)
-                ui.AddProviderCorrection = new ButtonItem("Add recommended provider correction") { CommandId = "decision-add-correction" };
+                ui.AddProviderCorrection = new ButtonItem("Review suggested provider correction") { CommandId = "decision-add-correction" };
             return ui;
         }
     }
@@ -66,7 +74,7 @@ namespace PersonCleaner.V2.UI
         }
 
         public override bool ShowDialogFullScreen => false;
-        public override string Caption => "Review Emby changes";
+        public override string Caption => "Review decision and changes";
 
         public override Task<IPluginUIView> RunCommand(string itemId, string commandId, string data)
         {

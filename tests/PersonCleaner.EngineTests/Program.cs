@@ -26,6 +26,8 @@ internal static class Program
         Run("uncorroborated native crosswalk cannot establish identity", UncorroboratedNativeCrosswalkRequiresReview);
         Run("same-title competing attribution prevents media dominance", SameTitleCompetitorPreventsDominance);
         Run("competing same-name attribution prevents automatic merge", CompetingAttributionRequiresReview);
+        Run("specific competing attribution suggests a provider credit replacement", CompetingAttributionSuggestsProviderCorrection);
+        Run("identity conflicts name the disagreeing provider IDs", IdentityConflictNamesProviderIds);
         Run("unopposed birthday conflict remains reviewable negative evidence", BirthdayConflictRequiresReview);
         Run("Gerald Sim corroborated identity outweighs a birthday conflict", GeraldSimBirthdayConflictRetainsIdentity);
         Run("Kyle Hebert role-aware media dominance outweighs correlated TVDB conflicts", KyleHebertMediaDominanceOutweighsTvdbConflicts);
@@ -129,7 +131,7 @@ internal static class Program
         var decisions = new ResolutionEngine().Resolve(BaseInput(tmdb, tvdb), new ResolutionSettings());
         var review = decisions.Single(x => x.Action == "HUMAN_REVIEW" && x.Status == "CONFLATION");
         True(review.Confidence >= 0.40 && review.Confidence < 0.75);
-        True(review.Headline.Contains("below the automatic threshold"));
+        True(review.Headline.Contains("not enough to identify them as the same person automatically"));
     }
 
     private static void NeilSubsetRoleEvidenceMatches()
@@ -267,7 +269,7 @@ internal static class Program
         True(pair.Score.NativeProviderCrosswalkMatch);
         True(!pair.Score.MediaAttributionDominant);
         Equal("human-review", pair.Disposition);
-        True(decisions.Any(x => x.Status == "CONFLATION" && x.Headline.Contains("does not corroborate")));
+        True(decisions.Any(x => x.Status == "CONFLATION" && x.Headline.Contains("do not confirm")));
         True(!decisions.Any(x => x.Status == "MATCH" || x.Status == "MATCH_WITH_CONFLICT"));
     }
 
@@ -301,6 +303,58 @@ internal static class Program
         var pair = engine.PairEvaluations.Single(x => x.LeftProviderId == "primary-left" && x.RightProviderId == "primary-right");
         Equal(1, pair.Score.CompetingAttributionCount);
         Equal("human-review", pair.Disposition);
+    }
+
+    private static void CompetingAttributionSuggestsProviderCorrection()
+    {
+        var tmdb = Person(ProviderNames.Tmdb, "15739", "Alex Jennings", ProviderNames.Imdb, "nm0421105", "shared", "shared-two", "your-christmas-2");
+        var tvdb = Person(ProviderNames.Tvdb, "457122", "Alex Jennings", ProviderNames.Imdb, "nm0421105", "shared", "shared-two");
+        tvdb.ExternalIds[ProviderNames.Tmdb] = "15739";
+        var competitor = Person(ProviderNames.Tvdb, "8302951", "Alex Jennings", ProviderNames.Imdb, "nm4532245", "your-christmas-2");
+        competitor.ExternalIds[ProviderNames.Tmdb] = "2276924";
+        AddObservedCredit(tmdb, "shared", "Actor", "Horatio", MediaTypes.Movie, "9801");
+        AddObservedCredit(tvdb, "shared", "Actor", "Horatio", MediaTypes.Movie, "2715");
+        AddObservedCredit(tmdb, "shared-two", "Actor", "Alan Bennett", MediaTypes.Movie, "328589");
+        AddObservedCredit(tvdb, "shared-two", "Actor", "Alan Bennett", MediaTypes.Movie, "6629");
+        AddObservedCredit(tmdb, "your-christmas-2", "Actor", "Humphrey", MediaTypes.Movie, "1176139");
+        AddObservedCredit(competitor, "your-christmas-2", "Actor", "Humphrey", MediaTypes.Movie, "351731");
+        var input = BaseInput(tmdb, tvdb, competitor);
+        input.ProviderCredits.AddRange(tmdb.Credits.Concat(tvdb.Credits).Concat(competitor.Credits));
+        input.Media.Add(new MediaSeed { EmbyId = 381067, MediaType = MediaTypes.Movie, Name = "Your Christmas or Mine 2", Year = 2023, TmdbId = "1176139", TvdbId = "351731" });
+        var decision = new ResolutionEngine().Resolve(input, new ResolutionSettings()).Single(x => x.Status == "CONFLATION" && x.ProviderKeys.Contains("tvdb:457122"));
+        True(decision.Headline.Contains("Your Christmas or Mine 2"));
+        True(decision.Headline.Contains("TVDB"));
+        True(decision.Headline.Contains("8302951"));
+        var plan = DecisionChangePlanner.Build(new DecisionChangeContext { Decision = decision, ProposedProviderPeople = input.ProviderPeople });
+        Equal(CorrectionKinds.MediaCredit, plan.RecommendedCorrection.Kind);
+        Equal(ProviderNames.Tvdb, plan.RecommendedCorrection.Provider);
+        Equal("351731", plan.RecommendedCorrection.ProviderMediaId);
+        Equal("8302951", plan.RecommendedCorrection.ProviderPersonId);
+        Equal("457122", plan.RecommendedCorrection.ReplacementValue);
+        True(plan.NoChangeExplanation.Contains("pre-filled provider correction"));
+        var wrongDecision = new ResolutionEngine().Resolve(input, new ResolutionSettings()).Single(x => x.Status == "CONFLATION" && x.ProviderKeys.Contains("tvdb:8302951"));
+        var wrongPlan = DecisionChangePlanner.Build(new DecisionChangeContext { Decision = wrongDecision, ProposedProviderPeople = input.ProviderPeople });
+        Equal("351731", wrongPlan.RecommendedCorrection.ProviderMediaId);
+        Equal("8302951", wrongPlan.RecommendedCorrection.ProviderPersonId);
+        Equal("457122", wrongPlan.RecommendedCorrection.ReplacementValue);
+    }
+
+    private static void IdentityConflictNamesProviderIds()
+    {
+        var tmdb = Person(ProviderNames.Tmdb, "15739", "Alex Jennings", ProviderNames.Imdb, "nm0421105", "your-christmas-2");
+        var tvdb = Person(ProviderNames.Tvdb, "8302951", "Alex Jennings", ProviderNames.Imdb, "nm4532245", "your-christmas-2");
+        var competitor = Person(ProviderNames.Tvdb, "457122", "Alex Jennings", ProviderNames.Imdb, "nm0421105", "your-christmas-2");
+        tvdb.ExternalIds[ProviderNames.Tmdb] = "2276924";
+        AddObservedCredit(tmdb, "your-christmas-2", "Actor", "Humphrey");
+        AddObservedCredit(tvdb, "your-christmas-2", "Actor", "Humphrey");
+        AddObservedCredit(competitor, "your-christmas-2", "Actor", "Humphrey");
+        var input = BaseInput(tmdb, tvdb, competitor); input.ProviderCredits.AddRange(tmdb.Credits.Concat(tvdb.Credits).Concat(competitor.Credits));
+        var decision = new ResolutionEngine().Resolve(input, new ResolutionSettings()).Single(x => x.Status == "CONFLATION" && x.ProviderKeys.Contains("tvdb:8302951"));
+        True(decision.Headline.Contains("TMDB person 15739"));
+        True(decision.Headline.Contains("TVDB person 8302951"));
+        True(decision.Headline.Contains("nm0421105"));
+        True(decision.Headline.Contains("nm4532245"));
+        True(decision.Headline.Contains("2276924"));
     }
 
     private static void BirthdayConflictRequiresReview()
@@ -881,9 +935,9 @@ internal static class Program
         if (externalProvider != null) result.ExternalIds[externalProvider] = externalId;
         return result;
     }
-    private static void AddObservedCredit(ProviderPerson person, string media, string category, string role)
+    private static void AddObservedCredit(ProviderPerson person, string media, string category, string role, string mediaType = null, string providerMediaId = null)
     {
-        person.Credits.Add(new ObservedProviderCredit { Provider = person.Provider, ProviderPersonId = person.ProviderId, PersonName = person.Name, CanonicalMediaKey = media, RoleCategory = category, RoleName = role, Role = category + ": " + role });
+        person.Credits.Add(new ObservedProviderCredit { Provider = person.Provider, ProviderPersonId = person.ProviderId, PersonName = person.Name, CanonicalMediaKey = media, MediaType = mediaType, ProviderMediaId = providerMediaId, RoleCategory = category, RoleName = role, Role = category + ": " + role });
     }
     private static MediaSeed Media(long id, string name) => new MediaSeed { EmbyId = id, MediaType = MediaTypes.Movie, Name = name, TmdbId = id.ToString() };
     private static LocalCredit Credit(long person, long media) => new LocalCredit { PersonEmbyId = person, MediaEmbyId = media, Role = "Actor" };
