@@ -399,6 +399,8 @@ WHERE a.run_id=@run AND a.outcome='PRESENT'";
                     var score = pair.Score ?? new ScoreBreakdown();
                     Statement(x, "INSERT OR REPLACE INTO resolution_pair VALUES(@run,@pair,@leftProvider,@leftId,@rightProvider,@rightId,@model,@disposition,@confidence)", s => { s.Bind("@run", runId); s.Bind("@pair", pair.PairId); s.Bind("@leftProvider", pair.LeftProvider); s.Bind("@leftId", pair.LeftProviderId); s.Bind("@rightProvider", pair.RightProvider); s.Bind("@rightId", pair.RightProviderId); s.Bind("@model", Required(score.ModelVersion, "unknown")); s.Bind("@disposition", Required(pair.Disposition, "unknown")); s.Bind("@confidence", score.Score); });
                     PairFeature(x, runId, pair.PairId, "shared_media_count", score.SharedMediaCount, null);
+                    PairFeature(x, runId, pair.PairId, "positive_evidence_score", score.PositiveEvidenceScore, null);
+                    PairFeature(x, runId, pair.PairId, "metadata_conflict_penalty", score.MetadataConflictPenalty, null);
                     PairFeature(x, runId, pair.PairId, "left_media_count", score.LeftMediaCount, null);
                     PairFeature(x, runId, pair.PairId, "right_media_count", score.RightMediaCount, null);
                     PairFeature(x, runId, pair.PairId, "filmography_containment", score.FilmographyContainment, null);
@@ -413,6 +415,8 @@ WHERE a.run_id=@run AND a.outcome='PRESENT'";
                     PairFeature(x, runId, pair.PairId, "external_id_matches", null, score.IdentifierMatchDetail);
                     PairFeature(x, runId, pair.PairId, "external_id_conflicts", null, score.IdentifierConflictDetail);
                     PairFeature(x, runId, pair.PairId, "native_provider_crosswalk", score.NativeProviderCrosswalkMatch ? 1 : 0, score.NativeProviderCrosswalkMatch ? "exact" : "missing");
+                    PairFeature(x, runId, pair.PairId, "stable_identifier_match", score.StableIdentifierMatch ? 1 : 0, score.StableIdentifierMatch ? "exact" : "missing");
+                    PairFeature(x, runId, pair.PairId, "media_attribution_dominant", score.MediaAttributionDominant ? 1 : 0, score.MediaAttributionDominant ? "yes" : "no");
                     PairFeature(x, runId, pair.PairId, "competing_attributions", score.CompetingAttributionCount, null);
                 }
                 foreach (var cluster in clusters ?? new ResolutionClusterSnapshot[0])

@@ -19,11 +19,14 @@ internal static class Program
         Run("two shared credits accumulate enough evidence without birthdays", TwoSharedCreditsAccumulateEvidence);
         Run("asymmetric media IDs resolve through the full crosswalk graph", AsymmetricMediaIdsResolveTransitively);
         Run("missing external ids are neutral", MissingExternalIdsAreNeutral);
-        Run("unopposed external id conflict remains reviewable negative evidence", ConflictingExternalIdsRequireReview);
+        Run("role-aware media dominance outweighs an external id conflict", RoleAwareMediaDominanceOutweighsExternalIdConflict);
         Run("Derek Luh native crosswalk outweighs a secondary IMDb conflict", DerekLuhCrosswalkOutweighsImdbConflict);
+        Run("uncorroborated native crosswalk cannot establish identity", UncorroboratedNativeCrosswalkRequiresReview);
+        Run("same-title competing attribution prevents media dominance", SameTitleCompetitorPreventsDominance);
         Run("competing same-name attribution prevents automatic merge", CompetingAttributionRequiresReview);
         Run("unopposed birthday conflict remains reviewable negative evidence", BirthdayConflictRequiresReview);
         Run("Gerald Sim corroborated identity outweighs a birthday conflict", GeraldSimBirthdayConflictRetainsIdentity);
+        Run("Kyle Hebert role-aware media dominance outweighs correlated TVDB conflicts", KyleHebertMediaDominanceOutweighsTvdbConflicts);
         Run("local media mass survives provider id drift", MediaMassSurvivesIdDrift);
         Run("operator bridge joins disconnected provider records", OperatorBridgeJoinsRecords);
         Run("operator rejection keeps shared-media records separate", OperatorRejectionKeepsRecordsSeparate);
@@ -195,7 +198,7 @@ internal static class Program
         True(score.Score >= 0.75);
     }
 
-    private static void ConflictingExternalIdsRequireReview()
+    private static void RoleAwareMediaDominanceOutweighsExternalIdConflict()
     {
         var left = Person(ProviderNames.Tmdb, "conflict-left", "Identifier Conflict", ProviderNames.Imdb, "nm-left", "shared");
         var right = Person(ProviderNames.Tvdb, "conflict-right", "Identifier Conflict", ProviderNames.Imdb, "nm-right", "shared");
@@ -207,9 +210,8 @@ internal static class Program
         var engine = new ResolutionEngine();
         var decisions = engine.Resolve(input, new ResolutionSettings());
         True(engine.PairEvaluations.Single().Score.IdentifierConflict);
-        True(engine.PairEvaluations.Single().Score.Score >= 0.40);
-        True(engine.PairEvaluations.Single().Score.Score < 0.75);
-        True(decisions.Any(x => x.Status == "CONFLATION" && x.Evidence.Any(e => e.SignalType == "EXTERNAL_ID" && e.Verdict == "conflicts")));
+        True(engine.PairEvaluations.Single().Score.MediaAttributionDominant);
+        True(decisions.Any(x => x.Status == "MATCH_WITH_CONFLICT" && x.Evidence.Any(e => e.SignalType == "EXTERNAL_ID" && e.Verdict == "conflicts")));
         True(!decisions.Any(x => x.Status == "SPLIT"));
     }
 
@@ -237,6 +239,38 @@ internal static class Program
         True(decision.Evidence.Any(x => x.SignalType == "EXTERNAL_ID" && x.Verdict == "mixed"));
         True(decision.Evidence.Any(x => x.SignalType == "EXTERNAL_ID" && x.Metric.Contains("nm11221274") && x.Metric.Contains("nm1122127")));
         True(!engine.PairEvaluations.Any(x => x.Disposition == "constraint-blocked"));
+    }
+
+    private static void UncorroboratedNativeCrosswalkRequiresReview()
+    {
+        var tmdb = Person(ProviderNames.Tmdb, "571225", "Unrelated Person", null, null, "unrelated-title");
+        var tvdb = Person(ProviderNames.Tvdb, "505422", "Kyle Hebert", null, null, "alice");
+        tvdb.ExternalIds[ProviderNames.Tmdb] = "571225";
+        var engine = new ResolutionEngine();
+        var decisions = engine.Resolve(BaseInput(tmdb, tvdb), new ResolutionSettings());
+        var pair = engine.PairEvaluations.Single();
+        True(pair.Score.NativeProviderCrosswalkMatch);
+        True(!pair.Score.MediaAttributionDominant);
+        Equal("human-review", pair.Disposition);
+        True(decisions.Any(x => x.Status == "CONFLATION" && x.Headline.Contains("does not corroborate")));
+        True(!decisions.Any(x => x.Status == "MATCH" || x.Status == "MATCH_WITH_CONFLICT"));
+    }
+
+    private static void SameTitleCompetitorPreventsDominance()
+    {
+        var tmdb = Person(ProviderNames.Tmdb, "dominant-left", "Kyle Hebert", null, null, "alice");
+        var tvdb = Person(ProviderNames.Tvdb, "dominant-right", "Kyle Hebert", null, null, "alice");
+        var competitor = Person(ProviderNames.Tvdb, "same-title-competitor", "Kyle Hebert", null, null, "alice");
+        AddObservedCredit(tmdb, "alice", "Actor", "Young Bayard");
+        AddObservedCredit(tvdb, "alice", "Actor", "Young Bayard");
+        AddObservedCredit(competitor, "alice", "Actor", "Young Bayard");
+        var input = BaseInput(tmdb, tvdb, competitor);
+        input.ProviderCredits.AddRange(tmdb.Credits.Concat(tvdb.Credits).Concat(competitor.Credits));
+        var engine = new ResolutionEngine(); engine.Resolve(input, new ResolutionSettings());
+        var pair = engine.PairEvaluations.Single(x => x.LeftProviderId == "dominant-left" && x.RightProviderId == "dominant-right");
+        True(pair.Score.CompetingAttributionCount > 0);
+        True(!pair.Score.MediaAttributionDominant);
+        Equal("human-review", pair.Disposition);
     }
 
     private static void CompetingAttributionRequiresReview()
@@ -296,6 +330,33 @@ internal static class Program
         True(!decisions.Any(x => x.Status == "SPLIT"));
     }
 
+    private static void KyleHebertMediaDominanceOutweighsTvdbConflicts()
+    {
+        var tmdb = Person(ProviderNames.Tmdb, "114061", "Kyle Hebert", ProviderNames.Imdb, "nm1035500", "alice");
+        tmdb.ExternalIds[ProviderNames.Wikidata] = "Q1750744";
+        tmdb.Birthday = "1969-06-14";
+        var tvdb = Person(ProviderNames.Tvdb, "505422", "Kyle Hebert", ProviderNames.Tmdb, "571225", "alice");
+        tvdb.Birthday = "1969-07-14";
+        AddObservedCredit(tmdb, "alice", "Actor", "Bayard Hamar (Young) (voice)");
+        AddObservedCredit(tvdb, "alice", "Actor", "Young Bayard (voice)");
+        var input = BaseInput(tmdb, tvdb);
+        input.ProviderCredits.AddRange(tmdb.Credits.Concat(tvdb.Credits));
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 141817, Name = "Kyle Hebert", TmdbId = "114061", TvdbId = "505422", ImdbId = "nm1035500" });
+        input.Media.Add(Media(297178, "Alice Through the Looking Glass")); input.LocalCredits.Add(Credit(141817, 297178));
+        var engine = new ResolutionEngine();
+        var decisions = engine.Resolve(input, new ResolutionSettings());
+        var decision = decisions.Single(x => x.Status == "MATCH_WITH_CONFLICT");
+        var score = engine.PairEvaluations.Single().Score;
+        True(score.MediaAttributionDominant);
+        True(score.IdentifierConflict && score.BirthdayConflict);
+        True(score.PositiveEvidenceScore >= 0.75);
+        Equal(0.15, score.MetadataConflictPenalty);
+        True(score.Score < 0.75);
+        Equal("automatic", engine.PairEvaluations.Single().Disposition);
+        True(decision.Evidence.Any(x => x.SignalType == "MEDIA_ATTRIBUTION_DOMINANCE" && x.Verdict == "supports"));
+        True(!decisions.Any(x => x.Status == "SPLIT"));
+    }
+
     private static void SameNameAloneDoesNotMerge()
     {
         var left = Person(ProviderNames.Tmdb, "13", "Sam Lee", null, null, "a");
@@ -339,9 +400,10 @@ internal static class Program
 
     private static void SameProviderCollisionIsBlocked()
     {
-        var leftOne = Person(ProviderNames.Tmdb, "same-provider-1", "Collision Name", null, null, "shared");
-        var leftTwo = Person(ProviderNames.Tmdb, "same-provider-2", "Collision Name", null, null, "shared");
-        var right = Person(ProviderNames.Tvdb, "same-provider-right", "Collision Name", null, null, "shared");
+        var leftOne = Person(ProviderNames.Tmdb, "same-provider-1", "Collision One", ProviderNames.Imdb, "nm-collision", "shared");
+        var leftTwo = Person(ProviderNames.Tmdb, "same-provider-2", "Collision Two", ProviderNames.Wikidata, "Q-collision", "shared");
+        var right = Person(ProviderNames.Tvdb, "same-provider-right", "Bridge Profile", ProviderNames.Imdb, "nm-collision", "shared");
+        right.ExternalIds[ProviderNames.Wikidata] = "Q-collision";
         AddObservedCredit(leftOne, "shared", "Actor", "Role"); AddObservedCredit(leftTwo, "shared", "Actor", "Role"); AddObservedCredit(right, "shared", "Actor", "Role");
         var input = BaseInput(leftOne, leftTwo, right); input.ProviderCredits.AddRange(leftOne.Credits.Concat(leftTwo.Credits).Concat(right.Credits));
         var engine = new ResolutionEngine(); engine.Resolve(input, new ResolutionSettings());

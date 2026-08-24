@@ -131,7 +131,7 @@ Every media/name or external-ID blocked pair is scored and persisted before clus
 
 Operator-confirmed bridges are explicit identity evidence, but still cannot cross an operator rejection. A same-name, role-compatible attribution to a different provider person prevents automatic matching. Provider metadata disagreements remain negative evidence, but are not logical component constraints.
 
-Evidence model `person-evidence-v4` first resolves provider media records through the transitive equivalence graph of every observed native and external media ID. This avoids false filmography gaps when providers expose different subsets of the same crosswalk. It also recognizes an explicit TMDB-to-TVDB or TVDB-to-TMDB person cross-reference as direct identity support. It then uses fixed contributions so scores remain comparable between runs:
+Evidence model `person-evidence-v5` first resolves provider media records through the transitive equivalence graph of every observed native and external media ID. This avoids false filmography gaps when providers expose different subsets of the same crosswalk. It recognizes explicit TMDB-to-TVDB or TVDB-to-TMDB person cross-references as direct candidate evidence, but a native crosswalk cannot establish identity automatically without compatible role-aware shared-media attribution or an independently matching stable identifier. It then uses fixed contributions so scores remain comparable between runs:
 
 ```text
 score = 0.35 × exact normalized name / sqrt(name frequency)
@@ -143,17 +143,19 @@ score = 0.35 × exact normalized name / sqrt(name frequency)
 
 conflicting external ID: -0.30, or -0.15 when independent identifier evidence matches
 conflicting birthday:    -0.25, or -0.15 when independent identifier evidence matches
+
+dominant role-aware media attribution caps the combined metadata penalty at 0.15
 ```
 
 Containment is `shared / min(left credit count, right credit count)`. Jaccard is retained as a diagnostic but does not penalize a provider for returning a smaller credit set. Exact role names score fully; a compatible role category scores partially. Missing birthdays, external IDs, roles and unmatched titles add neither support nor a penalty.
 
-A shared stable person external ID or explicit provider-native person cross-reference starts from direct identity support. Conflicting birthdays and external IDs subtract deterministic penalties rather than erasing otherwise independent evidence. Automatic matching in the presence of such a disagreement additionally requires corroborating name/alias or shared-media evidence. A same-name, role-compatible attribution to a different provider person caps the score at `0.55` and prevents automatic matching. Scores are clamped to `[0, 1]`. Default interpretation:
+A shared stable person external ID or explicit provider-native person cross-reference starts from direct identity support. Conflicting birthdays and external IDs subtract deterministic penalties rather than erasing otherwise independent evidence. Role-aware media attribution is dominant when normalized primary/alias naming is compatible, at least one canonical title and role category agree, and no other same-envelope provider person has a compatible role attribution on any observed title. In that state, correlated metadata disagreements share a capped penalty and a positive evidence score above the automatic threshold may retain the link as `MATCH_WITH_CONFLICT`, even when the reduced displayed evidence strength falls below the ordinary threshold. A competing attribution caps the score at `0.55` and prevents automatic matching. Scores are clamped to `[0, 1]`. Default interpretation:
 
-- `>= 0.75`: join the shadow graph;
+- `>= 0.75`: ordinarily join the shadow graph;
 - `0.40–0.749...`: human review;
 - `< 0.40`: do not propose an alignment.
 
-Diacritics, punctuation and whitespace are normalized for name comparison. Name equality never creates a candidate by itself. The configurable values are decision thresholds only; the feature contributions are part of the versioned model. The persisted number is deterministic evidence strength, not a statistically calibrated probability.
+The role-aware dominance rule is an explicit deterministic policy exception to those scalar bands; its positive score, applied metadata penalty and final evidence strength are persisted separately. Diacritics, punctuation and whitespace are normalized for name comparison. Name equality never creates a candidate by itself. The configurable values are decision thresholds only; the feature contributions are part of the versioned model. The persisted number is deterministic evidence strength, not a statistically calibrated probability.
 
 ## Gravitational resolution
 

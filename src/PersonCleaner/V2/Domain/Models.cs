@@ -137,7 +137,9 @@ namespace PersonCleaner.V2.Domain
 
     public sealed class ScoreBreakdown
     {
-        public string ModelVersion { get; set; } = "person-evidence-v4";
+        public string ModelVersion { get; set; } = "person-evidence-v5";
+        public double PositiveEvidenceScore { get; set; }
+        public double MetadataConflictPenalty { get; set; }
         public double FilmographyJaccard { get; set; }
         public double FilmographyContainment { get; set; }
         public int LeftMediaCount { get; set; }
@@ -158,8 +160,10 @@ namespace PersonCleaner.V2.Domain
         public bool ExactNameMatch { get; set; }
         public bool AliasMatch { get; set; }
         public bool HardIdentifierMatch { get; set; }
+        public bool StableIdentifierMatch { get; set; }
         public bool NativeProviderCrosswalkMatch { get; set; }
         public bool IdentifierConflict { get; set; }
+        public bool MediaAttributionDominant { get; set; }
         public bool HasMetadataConflict => BirthdayConflict || IdentifierConflict;
         public double Score { get; set; }
     }
