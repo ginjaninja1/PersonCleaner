@@ -50,6 +50,7 @@ internal static class Program
         Run("provider corrections replace person facts and local bindings", ProviderCorrectionsReplaceFactsAndBindings);
         Run("provider identity correction becomes an operator bridge", ProviderIdentityCorrectionBecomesBridge);
         Run("Emby change planner scopes shadow credit moves and missing bindings", ChangePlannerScopesMerge);
+        Run("Emby change planner labels an already aligned match as requiring no changes", ChangePlannerLabelsAlignedMatch);
         Run("Emby change planner exposes present-ID drift as a manual replacement", ChangePlannerExposesManualDrift);
         Run("Emby change planner carries proposed IMDb identity with TMDB drift", ChangePlannerCarriesExternalIdentity);
         Run("Emby change planner removes only provider-confirmed stale bindings", ChangePlannerScopesStaleRemoval);
@@ -531,6 +532,28 @@ internal static class Program
         Equal(2, plan.Changes.Count);
         True(plan.Changes.Any(x => x.Kind == EmbyChangeKinds.SetPersonProviderId && x.SourcePersonId == 10 && x.Provider == ProviderNames.Tvdb && x.ProposedValue == "200"));
         True(plan.Changes.Any(x => x.Kind == EmbyChangeKinds.MoveCredit && x.SourcePersonId == 11 && x.TargetPersonId == 10 && x.MediaId == 20));
+    }
+
+    private static void ChangePlannerLabelsAlignedMatch()
+    {
+        var context = new DecisionChangeContext
+        {
+            Decision = new ResolutionDecision { DecisionId = "match", Status = "MATCH", Action = "CROSS_PROVIDER_IDENTITY", DisplayName = "Tom Taylor", AnchorEmbyPersonId = 118815, ProviderKeys = "tmdb:1696753, tvdb:431476", Headline = "Two provider profiles resolve to one identity." },
+            LocalPeople = new List<LocalPerson> { new LocalPerson { EmbyId = 118815, Name = "Tom Taylor", TmdbId = "1696753", TvdbId = "431476", ImdbId = "nm6999211" } },
+            ProposedProviderPeople = new List<ProviderPerson>
+            {
+                Person(ProviderNames.Tmdb, "1696753", "Tom Taylor", ProviderNames.Imdb, "nm6999211", "us"),
+                Person(ProviderNames.Tvdb, "431476", "Tom Taylor", null, null, "us")
+            }
+        };
+        var plan = DecisionChangePlanner.Build(context);
+        Equal(0, plan.Changes.Count);
+        Equal("Emby is already aligned; no changes are needed", plan.NoChangeSummary);
+        True(plan.NoChangeExplanation.Contains("No update or operator action is required."));
+        context.LocalPeople[0].TmdbId = "unexpected-live-value";
+        var changedSinceRun = DecisionChangePlanner.Build(context);
+        Equal(0, changedSinceRun.Changes.Count);
+        True(changedSinceRun.NoChangeSummary == null);
     }
 
     private static void ChangePlannerExposesManualDrift()

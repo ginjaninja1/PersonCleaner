@@ -50,6 +50,8 @@ namespace PersonCleaner.V2.Domain
         public string DecisionId { get; set; }
         public string DisplayName { get; set; }
         public string DecisionSummary { get; set; }
+        public string NoChangeSummary { get; set; }
+        public string NoChangeExplanation { get; set; }
         public List<long> InScopePersonIds { get; set; } = new List<long>();
         public List<EmbyChangeProposal> Changes { get; set; } = new List<EmbyChangeProposal>();
         public ProviderCorrection RecommendedCorrection { get; set; }
@@ -123,6 +125,24 @@ namespace PersonCleaner.V2.Domain
                     plan.RecommendedCorrection = new ProviderCorrection { Kind = CorrectionKinds.IdentityRelation, Operation = CorrectionOperations.Same, Provider = pair.left.Provider, ProviderPersonId = pair.left.Id, SecondaryProvider = pair.right.Provider, SecondaryId = pair.right.Id, Reason = "PROVIDER_MISMATCH", Note = "Recommended from decision " + decision.DecisionId + ": " + decision.Headline, Enabled = true };
             }
 
+            return Complete(plan, decision, context, anchor, keys);
+        }
+
+        private static DecisionChangePlan Complete(DecisionChangePlan plan, ResolutionDecision decision, DecisionChangeContext context, LocalPerson anchor, IEnumerable<ProviderKey> keys)
+        {
+            if (plan.Changes.Count != 0) return plan;
+            var proposed = anchor == null ? new List<ProviderKey>() : ProposedBindings(context, keys).ToList();
+            var alreadyAligned = proposed.Count > 0 && proposed.All(x => string.Equals(Binding(anchor, x.Provider), x.Id, StringComparison.OrdinalIgnoreCase));
+            if (alreadyAligned && decision.Status == "MATCH" && decision.Action == "CROSS_PROVIDER_IDENTITY")
+            {
+                plan.NoChangeSummary = "Emby is already aligned; no changes are needed";
+                plan.NoChangeExplanation = "The resolved provider identities already match the current Emby provider IDs, and no credit relationships need to move. No update or operator action is required.";
+            }
+            else if (alreadyAligned && decision.Status == "MATCH_WITH_CONFLICT" && decision.Action == "CROSS_PROVIDER_IDENTITY_WITH_METADATA_CONFLICT")
+            {
+                plan.NoChangeSummary = "No Emby changes are needed";
+                plan.NoChangeExplanation = "The current Emby provider IDs already match the resolved identity. The provider metadata disagreement remains visible as evidence and may have a separate correction recommendation.";
+            }
             return plan;
         }
 

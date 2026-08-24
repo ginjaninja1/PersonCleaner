@@ -39,6 +39,9 @@ namespace PersonCleaner.V2.UI
         [DisplayName("Always include Emby person IDs")]
         [Description("Optional comma- or space-separated Emby person IDs. Movies/series directly associated with these people are added explicitly; this never expands transitively to further titles.")]
         public string SandboxIncludedPersonIds { get; set; }
+        [DisplayName("Auto-expand affected-person media")]
+        [Description("Recommended. After selecting the sandbox subset, add every provider-addressable movie and series credited to its affected people. Recommendations remain limited to those people; co-credited people encountered only during expansion do not enter the decision scope.")]
+        public bool SandboxAutoExpandPersonMedia { get; set; } = true;
 
         public CaptionItem ProviderHeading { get; set; } = new CaptionItem("Provider access and caching");
         [DisplayName("TMDB v3 API key")]
@@ -110,6 +113,7 @@ namespace PersonCleaner.V2.UI
             target.SandboxSeed = source.SandboxSeed;
             target.SandboxIncludedMediaIds = NormalizeIdList(source.SandboxIncludedMediaIds);
             target.SandboxIncludedPersonIds = NormalizeIdList(source.SandboxIncludedPersonIds);
+            target.SandboxAutoExpandPersonMedia = source.SandboxAutoExpandPersonMedia;
             target.TmdbApiKey = (source.TmdbApiKey ?? string.Empty).Trim();
             target.TvdbApiKey = (source.TvdbApiKey ?? string.Empty).Trim();
             target.TvdbSubscriberPin = (source.TvdbSubscriberPin ?? string.Empty).Trim();
@@ -122,7 +126,7 @@ namespace PersonCleaner.V2.UI
             target.AutomaticMatchThreshold = Unit(source.AutomaticMatchThreshold);
             target.HumanReviewThreshold = Math.Min(Unit(source.HumanReviewThreshold), target.AutomaticMatchThreshold);
             Plugin.Instance.SaveConfiguration();
-            logger.Info("PersonCleaner configuration saved: mode={0}, sample={1}+{1}, explicit media={2}, explicit people={3}, TMDB key={4}, TVDB key={5}, TMDB concurrency={6}, TVDB concurrency={7}", target.ExecutionMode, target.SandboxSampleSizePerMediaType, CountIds(target.SandboxIncludedMediaIds), CountIds(target.SandboxIncludedPersonIds), !string.IsNullOrWhiteSpace(target.TmdbApiKey), !string.IsNullOrWhiteSpace(target.TvdbApiKey), target.TmdbMaximumConcurrentRequests, target.TvdbMaximumConcurrentRequests);
+            logger.Info("PersonCleaner configuration saved: mode={0}, sample={1}+{1}, explicit media={2}, explicit people={3}, complete affected people={4}, TMDB key={5}, TVDB key={6}, TMDB concurrency={7}, TVDB concurrency={8}", target.ExecutionMode, target.SandboxSampleSizePerMediaType, CountIds(target.SandboxIncludedMediaIds), CountIds(target.SandboxIncludedPersonIds), target.SandboxAutoExpandPersonMedia, !string.IsNullOrWhiteSpace(target.TmdbApiKey), !string.IsNullOrWhiteSpace(target.TvdbApiKey), target.TmdbMaximumConcurrentRequests, target.TvdbMaximumConcurrentRequests);
         }
 
         private void Rebuild()
@@ -133,7 +137,7 @@ namespace PersonCleaner.V2.UI
             ContentData = new ConfigurationUI
             {
                 EnablePlugin = c.EnablePlugin, SandboxMode = !string.Equals(c.ExecutionMode, "Full", StringComparison.OrdinalIgnoreCase), SandboxSampleSizePerMediaType = c.SandboxSampleSizePerMediaType, SandboxSeed = c.SandboxSeed,
-                SandboxIncludedMediaIds = c.SandboxIncludedMediaIds, SandboxIncludedPersonIds = c.SandboxIncludedPersonIds,
+                SandboxIncludedMediaIds = c.SandboxIncludedMediaIds, SandboxIncludedPersonIds = c.SandboxIncludedPersonIds, SandboxAutoExpandPersonMedia = c.SandboxAutoExpandPersonMedia,
                 TmdbApiKey = c.TmdbApiKey, TvdbApiKey = c.TvdbApiKey, TvdbSubscriberPin = c.TvdbSubscriberPin, CacheTtlDays = c.CacheTtlDays, FailureRetryMinutes = c.FailureRetryMinutes,
                 TmdbMaximumConcurrentRequests = c.TmdbMaximumConcurrentRequests, TvdbMaximumConcurrentRequests = c.TvdbMaximumConcurrentRequests,
                 TmdbMinimumRequestIntervalMilliseconds = c.TmdbMinimumRequestIntervalMilliseconds, TvdbMinimumRequestIntervalMilliseconds = c.TvdbMinimumRequestIntervalMilliseconds,
