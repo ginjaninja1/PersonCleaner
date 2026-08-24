@@ -81,7 +81,12 @@ namespace PersonCleaner.V2.Tasks
                         HumanReviewThreshold = configuration.HumanReviewThreshold,
                         MaximumMediaExamples = configuration.MaximumMediaExamplesPerDecision
                     };
-                    var resolutionInput = repository.LoadResolutionInput();
+                    var resolutionInput = repository.LoadResolutionInput(runId);
+                    foreach (var correction in resolutionInput.CorrectionApplications.Where(x => x.Triggered))
+                        logger.Info("PersonCleaner run {0} provider correction {1} triggered: matched={2}, changed={3}. {4}", runId, correction.CorrectionId, correction.MatchedCount, correction.ChangedCount, correction.Summary);
+                    var inactiveCorrections = resolutionInput.CorrectionApplications.Count(x => !x.Triggered);
+                    if (resolutionInput.CorrectionApplications.Count > 0)
+                        logger.Info("PersonCleaner run {0} correction overlay: active={1}, triggered={2}, not-triggered={3}.", runId, resolutionInput.CorrectionApplications.Count, resolutionInput.CorrectionApplications.Count(x => x.Triggered), inactiveCorrections);
                     logger.Info("PersonCleaner run {0} offline resolution starting: {1} flattened provider people (TMDB={2}, TVDB={3}), {4} local people, {5} local credits, {6} media and {7} operator bridge(s). No provider requests occur in this phase.", runId, resolutionInput.ProviderPeople.Count, resolutionInput.ProviderPeople.Count(x => x.Provider == ProviderNames.Tmdb), resolutionInput.ProviderPeople.Count(x => x.Provider == ProviderNames.Tvdb), resolutionInput.LocalPeople.Count, resolutionInput.LocalCredits.Count, resolutionInput.Media.Count, resolutionInput.Bridges.Count);
                     var engine = new ResolutionEngine();
                     var decisions = engine.Resolve(resolutionInput, settings).ToList();

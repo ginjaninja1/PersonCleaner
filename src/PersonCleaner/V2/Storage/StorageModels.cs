@@ -1,5 +1,7 @@
 namespace PersonCleaner.V2.Storage
 {
+    using PersonCleaner.V2.Domain;
+
     internal sealed class QueueItem
     {
         public string Provider { get; set; }
@@ -29,6 +31,16 @@ namespace PersonCleaner.V2.Storage
         public int SelectedTvdb { get; set; }
         public int DiscoveredTotal => DiscoveredTmdb + DiscoveredTvdb;
         public int SelectedTotal => SelectedTmdb + SelectedTvdb;
+    }
+
+    public sealed class CorrectionReviewRow
+    {
+        public ProviderCorrection Correction { get; set; }
+        public long? LastRunId { get; set; }
+        public int LastMatchedCount { get; set; }
+        public int LastChangedCount { get; set; }
+        public string LastSummary { get; set; }
+        public long? LastAppliedUtc { get; set; }
     }
 
     public sealed class DashboardDecision

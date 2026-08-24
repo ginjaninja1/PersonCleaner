@@ -7,7 +7,7 @@ The old whole-library implementation is intentionally excluded from compilation.
 ## Safety boundaries
 
 - Emby is queried through `ILibraryManager`; this version never writes Emby items, people, provider IDs, images, or relationships.
-- Raw provider responses, flattened indexes, manual bridges, run history, and decisions live under Emby's data directory in `personcleaner-v2/`.
+- Raw provider responses, flattened indexes, persistent provider corrections, manual bridges, run history, and decisions live under Emby's data directory in `personcleaner-v2/`.
 - API keys remain in Emby's normal plugin configuration. They are not written to the evidence database, raw cache, or logs.
 - An `ORPHAN` result is a review warning, never a deletion instruction.
 - Automatic matches update only the plugin's shadow decisions.
@@ -50,7 +50,9 @@ Identity confidence describes the provider cluster. Local-anchor confidence sepa
 
 The full-screen evidence dialog is sorted by risk and uncertainty and returns up to the configured row limit from every decision class, rather than applying one global limit before grouping. The summary always shows the uncapped class totals. Each row leads with the decision in ordinary language; expansion reveals supporting/conflicting signals and representative impacted titles. Emby people and media link to the current server, while TMDB, TVDB and IMDb identifiers link to their provider pages in a new tab. TVDB media slugs are flattened from cached payloads by the background task and persisted in SQLite; the dialog never opens or parses provider payload files. The complete title attribution remains in SQLite. Operators can confirm or reject a TMDB↔TVDB alignment and recalculate immediately from flattened evidence without refetching.
 
-Schema migrations are offline operations. Stop Emby and back up `entity-resolution.db` before applying every migration after the database's current `schema_info.version`, in numeric order. Schema 2 requires `003_evidence_model_v2.sql` followed by `004_materializer_version.sql`; schema 3 requires only `004_materializer_version.sql`. Use SQLite's fail-fast mode, for example `sqlite3.exe -bail entity-resolution.db ".read C:/path/to/PersonCleaner/migrations/004_materializer_version.sql"`. The plugin validates `schema_info` before touching the existing structure and refuses to start resolution against an older or incomplete schema.
+The Provider corrections tab stores a persistent operator overlay without editing raw payloads or flattened source facts. Separate add dialogs cover media-person attribution, credit role, person/media cross-references, person name or birthday, local provider bindings and explicit identity relationships. A blank replacement marks the selected fact unusable; a supplied replacement substitutes it only for effective analysis. Corrections can be edited, disabled, re-enabled or removed. Every active rule records whether it triggered in each calculation run, and triggered rules write an informational log line.
+
+Schema migrations are offline operations. Stop Emby and back up `entity-resolution.db` before applying every migration after the database's current `schema_info.version`, in numeric order. Schema 2 requires `003_evidence_model_v2.sql`, `004_materializer_version.sql`, then `005_provider_corrections.sql`; schema 3 requires `004` then `005`; schema 4 requires only `005_provider_corrections.sql`. Use SQLite's fail-fast mode, for example `sqlite3.exe -bail entity-resolution.db ".read C:/path/to/PersonCleaner/migrations/005_provider_corrections.sql"`. The plugin validates `schema_info` before touching the existing structure and refuses to start resolution against an older or incomplete schema.
 
 ## Build and test
 

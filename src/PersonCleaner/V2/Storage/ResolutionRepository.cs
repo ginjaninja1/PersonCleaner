@@ -12,7 +12,7 @@ namespace PersonCleaner.V2.Storage
 {
     internal sealed class ResolutionRepository : IDisposable
     {
-        private const int SchemaVersion = 4;
+        private const int SchemaVersion = 5;
         private readonly object sync = new object();
         private IDatabaseConnection db;
         public string WorkspacePath { get; }
@@ -50,10 +50,10 @@ namespace PersonCleaner.V2.Storage
                 }
                 foreach (var sql in Schema) db.Execute(sql);
                 if (!version.HasValue) db.Execute("INSERT INTO schema_info(singleton,version) VALUES(1," + SchemaVersion.ToString(CultureInfo.InvariantCulture) + ")");
-                if (!ColumnExists("provider_media", "slug") || !ColumnExists("provider_media_credit", "role_category") || !ColumnExists("resolution_decision", "local_anchor_confidence") || !ColumnExists("cache_manifest", "materializer_version") || !ColumnExists("provider_media_observation", "materializer_version") || !TableExists("resolution_pair") || !TableExists("resolution_cluster"))
+                if (!ColumnExists("provider_media", "slug") || !ColumnExists("provider_media_credit", "role_category") || !ColumnExists("resolution_decision", "local_anchor_confidence") || !ColumnExists("cache_manifest", "materializer_version") || !ColumnExists("provider_media_observation", "materializer_version") || !TableExists("resolution_pair") || !TableExists("resolution_cluster") || !TableExists("provider_correction") || !TableExists("correction_application"))
                 {
                     db.Dispose(); db = null;
-                    throw new InvalidOperationException("PersonCleaner schema 4 is incomplete. Stop Emby and restore the most recent pre-migration backup before applying the numbered migrations again.");
+                    throw new InvalidOperationException("PersonCleaner schema 5 is incomplete. Stop Emby and restore the most recent pre-migration backup before applying the numbered migrations again.");
                 }
                 // v2 originally represented the non-media dimension of person
                 // work as an empty string. Emby's SQLite binder can coerce an
@@ -103,6 +103,7 @@ namespace PersonCleaner.V2.Storage
                     SeedMedia(x, runId, ProviderNames.Tmdb, item.MediaType, item.TmdbId);
                     SeedMedia(x, runId, ProviderNames.Tvdb, item.MediaType, item.TvdbId);
                 }
+                ApplyLocalMediaQueueCorrections(x, runId, media, LoadCorrections());
                 foreach (var person in people)
                     Statement(x, "INSERT INTO current_local_person VALUES(@id,@name,@tmdb,@tvdb,@imdb)", s => { s.Bind("@id", person.EmbyId); s.Bind("@name", person.Name); s.Bind("@tmdb", person.TmdbId); s.Bind("@tvdb", person.TvdbId); s.Bind("@imdb", person.ImdbId); });
                 foreach (var credit in credits.Distinct(new LocalCreditComparer()))
@@ -152,6 +153,21 @@ JOIN current_media m ON m.media_type=c.media_type AND ((c.provider='tmdb' AND m.
                         discovered.Add(key);
                         if (localByMedia.TryGetValue(r.GetInt64(3), out var scope) && scope.Matches(provider, providerId, Null(r, 2))) selected.Add(key);
                     }
+
+                foreach (var correction in LoadCorrections())
+                {
+                    if (correction.Kind == CorrectionKinds.MediaCredit && correction.Operation == CorrectionOperations.Replace)
+                        AddCorrectionPerson(selected, correction.Provider, correction.ReplacementValue);
+                    else if (correction.Kind == CorrectionKinds.PersonField || correction.Kind == CorrectionKinds.PersonExternalId)
+                        AddCorrectionPerson(selected, correction.Provider, correction.ProviderPersonId);
+                    else if (correction.Kind == CorrectionKinds.LocalPersonBinding && correction.Operation == CorrectionOperations.Replace)
+                        AddCorrectionPerson(selected, correction.Provider, correction.ReplacementValue);
+                    else if (correction.Kind == CorrectionKinds.IdentityRelation)
+                    {
+                        AddCorrectionPerson(selected, correction.Provider, correction.ProviderPersonId);
+                        AddCorrectionPerson(selected, correction.SecondaryProvider, correction.SecondaryId);
+                    }
+                }
 
                 db.RunInTransaction(x =>
                 {
@@ -247,15 +263,16 @@ JOIN current_media m ON m.media_type=c.media_type AND ((c.provider='tmdb' AND m.
             }, TransactionMode.Immediate);
         }
 
-        public ResolutionInput LoadResolutionInput()
+        public ResolutionInput LoadResolutionInput(long? runId = null)
         {
             var input = new ResolutionInput();
             lock (sync)
             {
+                var tracker = new CorrectionApplicationTracker(LoadCorrections());
                 using (var s = db.PrepareStatement("SELECT emby_id,media_type,name,production_year,tmdb_id,tvdb_id,imdb_id FROM current_media")) foreach (var r in s.Rows()) input.Media.Add(new MediaSeed { EmbyId = r.GetInt64(0), MediaType = r.GetString(1), Name = r.GetString(2), Year = r.IsDBNull(3) ? (int?)null : r.GetInt(3), TmdbId = Null(r, 4), TvdbId = Null(r, 5), ImdbId = Null(r, 6) });
                 using (var s = db.PrepareStatement("SELECT emby_id,name,tmdb_id,tvdb_id,imdb_id FROM current_local_person")) foreach (var r in s.Rows()) input.LocalPeople.Add(new LocalPerson { EmbyId = r.GetInt64(0), Name = r.GetString(1), TmdbId = Null(r, 2), TvdbId = Null(r, 3), ImdbId = Null(r, 4) });
                 using (var s = db.PrepareStatement("SELECT person_emby_id,media_emby_id,role FROM current_local_credit")) foreach (var r in s.Rows()) input.LocalCredits.Add(new LocalCredit { PersonEmbyId = r.GetInt64(0), MediaEmbyId = r.GetInt64(1), Role = r.GetString(2) });
-                const string personSql = "SELECT DISTINCT p.provider,p.provider_person_id,p.name,p.clean_name,p.birthday FROM provider_person p JOIN provider_media_credit c ON c.provider=p.provider AND c.provider_person_id=p.provider_person_id JOIN current_provider_media m ON m.provider=c.provider AND m.media_type=c.media_type AND m.provider_media_id=c.provider_media_id";
+                const string personSql = "SELECT p.provider,p.provider_person_id,p.name,p.clean_name,p.birthday FROM provider_person p";
                 using (var s = db.PrepareStatement(personSql)) foreach (var r in s.Rows()) input.ProviderPeople.Add(new ProviderPerson { Provider = r.GetString(0), ProviderId = r.GetString(1), Name = r.GetString(2), CleanName = r.GetString(3), Birthday = Null(r, 4) });
                 var byKey = input.ProviderPeople.ToDictionary(x => x.Key, StringComparer.Ordinal);
                 using (var s = db.PrepareStatement("SELECT provider,provider_person_id,external_provider,external_id FROM person_external_id")) foreach (var r in s.Rows()) if (byKey.TryGetValue(r.GetString(0) + ":" + r.GetString(1), out var p)) p.ExternalIds[r.GetString(2)] = r.GetString(3);
@@ -268,7 +285,9 @@ JOIN current_media m ON m.media_type=c.media_type AND ((c.provider='tmdb' AND m.
                     if (!providerMedia.TryGetValue(mediaKey, out var value)) providerMedia[mediaKey] = value = new CanonicalMediaBuilder { Provider = r.GetString(0), MediaType = r.GetString(1), NativeId = r.GetString(2) };
                     if (!r.IsDBNull(3) && !r.IsDBNull(4)) value.ExternalIds.Add(new MediaExternalIdentity { Provider = r.GetString(3), Id = r.GetString(4) });
                 }
-                var canonicalMedia = MediaIdentityResolver.Resolve(providerMedia.Values.Select(x => x.Identity()));
+                var mediaIdentities = providerMedia.Values.Select(x => x.Identity()).ToList();
+                ProviderCorrectionOverlay.ApplyMediaIdentities(mediaIdentities, tracker);
+                var canonicalMedia = MediaIdentityResolver.Resolve(mediaIdentities);
                 const string creditSql = "SELECT c.provider,c.provider_person_id,c.person_name,c.media_type,c.provider_media_id,c.role,c.role_category,c.role_name FROM provider_media_credit c JOIN current_provider_media m ON m.provider=c.provider AND m.media_type=c.media_type AND m.provider_media_id=c.provider_media_id";
                 using (var s = db.PrepareStatement(creditSql)) foreach (var r in s.Rows())
                 {
@@ -281,13 +300,11 @@ JOIN current_media m ON m.media_type=c.media_type AND ((c.provider='tmdb' AND m.
                         RoleCategory = r.GetString(6), RoleName = Null(r, 7)
                     };
                     input.ProviderCredits.Add(credit);
-                    if (byKey.TryGetValue(credit.PersonKey, out var person))
-                    {
-                        person.CanonicalMediaKeys.Add(credit.CanonicalMediaKey);
-                        person.Credits.Add(credit);
-                    }
                 }
                 using (var s = db.PrepareStatement("SELECT provider_a,provider_id_a,provider_b,provider_id_b,disposition FROM manual_bridge")) foreach (var r in s.Rows()) input.Bridges.Add(new ManualBridge { ProviderA = r.GetString(0), ProviderIdA = r.GetString(1), ProviderB = r.GetString(2), ProviderIdB = r.GetString(3), IsRejected = r.GetString(4) == "reject" });
+                ProviderCorrectionOverlay.Apply(input, tracker);
+                input.CorrectionApplications.AddRange(tracker.Results);
+                if (runId.HasValue) SaveCorrectionApplications(runId.Value, tracker.Results);
             }
             return input;
         }
@@ -346,6 +363,60 @@ JOIN current_media m ON m.media_type=c.media_type AND ((c.provider='tmdb' AND m.
             if (string.CompareOrdinal(providerA + ":" + providerIdA, providerB + ":" + providerIdB) > 0)
             { var p = providerA; providerA = providerB; providerB = p; var id = providerIdA; providerIdA = providerIdB; providerIdB = id; }
             lock (sync) Statement("INSERT OR REPLACE INTO manual_bridge VALUES(@a,@aid,@b,@bid,@disposition,@now)", s => { s.Bind("@a", providerA); s.Bind("@aid", providerIdA); s.Bind("@b", providerB); s.Bind("@bid", providerIdB); s.Bind("@disposition", reject ? "reject" : "confirm"); s.Bind("@now", Now()); });
+        }
+
+        public long SaveCorrection(ProviderCorrection correction)
+        {
+            if (correction == null) throw new ArgumentNullException(nameof(correction));
+            correction.NormalizeAndValidate();
+            lock (sync)
+            {
+                var now = Now();
+                if (correction.CorrectionId <= 0)
+                {
+                    Statement("INSERT INTO provider_correction(kind,operation,provider,media_type,provider_media_id,provider_person_id,field_name,current_value,replacement_value,secondary_provider,secondary_id,emby_id,reason,note,enabled,created_utc,updated_utc) VALUES(@kind,@operation,@provider,coalesce(@mediaType,''),coalesce(@mediaId,''),coalesce(@personId,''),coalesce(@field,''),coalesce(@current,''),coalesce(@replacement,''),coalesce(@secondaryProvider,''),coalesce(@secondaryId,''),@emby,@reason,coalesce(@note,''),@enabled,@now,@now)", s => BindCorrection(s, correction, now));
+                    using (var s = db.PrepareStatement("SELECT last_insert_rowid()")) foreach (var row in s.Rows()) return row.GetInt64(0);
+                }
+                else
+                {
+                    Statement("UPDATE provider_correction SET kind=@kind,operation=@operation,provider=@provider,media_type=coalesce(@mediaType,''),provider_media_id=coalesce(@mediaId,''),provider_person_id=coalesce(@personId,''),field_name=coalesce(@field,''),current_value=coalesce(@current,''),replacement_value=coalesce(@replacement,''),secondary_provider=coalesce(@secondaryProvider,''),secondary_id=coalesce(@secondaryId,''),emby_id=@emby,reason=@reason,note=coalesce(@note,''),enabled=@enabled,updated_utc=@now WHERE correction_id=@id", s => { BindCorrection(s, correction, now); s.Bind("@id", correction.CorrectionId); });
+                    return correction.CorrectionId;
+                }
+            }
+            throw new InvalidOperationException("Unable to save the provider correction.");
+        }
+
+        public ProviderCorrection GetCorrection(long correctionId)
+        {
+            lock (sync) using (var s = db.PrepareStatement(CorrectionSelect + " WHERE correction_id=@id"))
+            {
+                s.Bind("@id", correctionId); foreach (var r in s.Rows()) return ReadCorrection(r);
+            }
+            return null;
+        }
+
+        public CorrectionReviewRow[] Corrections()
+        {
+            var result = new List<CorrectionReviewRow>();
+            lock (sync) using (var s = db.PrepareStatement(@"SELECT c.correction_id,c.kind,c.operation,c.provider,c.media_type,c.provider_media_id,c.provider_person_id,c.field_name,c.current_value,c.replacement_value,c.secondary_provider,c.secondary_id,c.emby_id,c.reason,c.note,c.enabled,c.created_utc,c.updated_utc,a.run_id,a.matched_count,a.changed_count,a.summary,a.applied_utc
+FROM provider_correction c
+LEFT JOIN correction_application a ON a.correction_id=c.correction_id AND a.run_id=(SELECT max(x.run_id) FROM correction_application x WHERE x.correction_id=c.correction_id)
+ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
+                foreach (var r in s.Rows()) result.Add(new CorrectionReviewRow
+                {
+                    Correction = ReadCorrection(r), LastRunId = r.IsDBNull(18) ? (long?)null : r.GetInt64(18), LastMatchedCount = r.IsDBNull(19) ? 0 : r.GetInt(19), LastChangedCount = r.IsDBNull(20) ? 0 : r.GetInt(20), LastSummary = Null(r, 21), LastAppliedUtc = r.IsDBNull(22) ? (long?)null : r.GetInt64(22)
+                });
+            return result.ToArray();
+        }
+
+        public void SetCorrectionEnabled(long correctionId, bool enabled)
+        {
+            lock (sync) Statement("UPDATE provider_correction SET enabled=@enabled,updated_utc=@now WHERE correction_id=@id", s => { s.Bind("@enabled", enabled ? 1 : 0); s.Bind("@now", Now()); s.Bind("@id", correctionId); });
+        }
+
+        public void DeleteCorrection(long correctionId)
+        {
+            lock (sync) Statement("DELETE FROM provider_correction WHERE correction_id=@id", s => s.Bind("@id", correctionId));
         }
 
         public RunStatus LatestRun()
@@ -446,6 +517,26 @@ JOIN current_media m ON m.media_type=c.media_type AND ((c.provider='tmdb' AND m.
             Statement(x, "INSERT OR IGNORE INTO current_provider_media VALUES(@provider,@type,@id)", s => { s.Bind("@provider", provider); s.Bind("@type", type); s.Bind("@id", id); });
             Statement(x, "INSERT OR REPLACE INTO work_queue VALUES(@provider,'media',@type,@id,2,'pending',0,NULL,@now)", s => { s.Bind("@provider", provider); s.Bind("@type", type); s.Bind("@id", id); s.Bind("@now", Now()); });
         }
+        private static void ApplyLocalMediaQueueCorrections(IDatabaseConnection x, long runId, IEnumerable<MediaSeed> media, IEnumerable<ProviderCorrection> corrections)
+        {
+            var byId = media.ToDictionary(y => y.EmbyId);
+            foreach (var rule in corrections.Where(y => y.Kind == CorrectionKinds.LocalMediaBinding).OrderBy(y => y.CorrectionId))
+            {
+                if (!rule.EmbyId.HasValue || !byId.TryGetValue(rule.EmbyId.Value, out var item)) continue;
+                var current = rule.Provider == ProviderNames.Tmdb ? item.TmdbId : item.TvdbId;
+                if (!string.IsNullOrWhiteSpace(rule.CurrentValue) && !string.Equals(rule.CurrentValue, current, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!string.IsNullOrWhiteSpace(current))
+                {
+                    Statement(x, "DELETE FROM current_provider_media WHERE provider=@provider AND media_type=@type AND provider_media_id=@id", s => { s.Bind("@provider", rule.Provider); s.Bind("@type", item.MediaType); s.Bind("@id", current); });
+                    Statement(x, "DELETE FROM work_queue WHERE provider=@provider AND entity_type='media' AND media_type=@type AND provider_id=@id", s => { s.Bind("@provider", rule.Provider); s.Bind("@type", item.MediaType); s.Bind("@id", current); });
+                }
+                if (rule.Operation == CorrectionOperations.Replace) SeedMedia(x, runId, rule.Provider, item.MediaType, rule.ReplacementValue);
+            }
+        }
+        private static void AddCorrectionPerson(ISet<string> target, string provider, string id)
+        {
+            if ((provider == ProviderNames.Tmdb || provider == ProviderNames.Tvdb) && !string.IsNullOrWhiteSpace(id)) target.Add(provider + ":" + id.Trim());
+        }
 
         private static QueueItem ReadQueue(IResultSet r) => new QueueItem { Provider = r.GetString(0), EntityType = r.GetString(1), ProviderId = r.GetString(2), MediaType = r.GetString(3), Priority = r.GetInt(4) };
         private static string Dimension(string entityType, string mediaType) => string.Equals(entityType, "person", StringComparison.Ordinal) ? "person" : string.IsNullOrWhiteSpace(mediaType) ? "unknown" : mediaType;
@@ -458,6 +549,36 @@ JOIN current_media m ON m.media_type=c.media_type AND ((c.provider='tmdb' AND m.
         }
         private void Statement(string sql, Action<IStatement> bind) => Statement(db, sql, bind);
         private static void Statement(IDatabaseConnection connection, string sql, Action<IStatement> bind) { using (var s = connection.PrepareStatement(sql)) { bind(s); s.MoveNext(); } }
+        private static void BindCorrection(IStatement s, ProviderCorrection c, long now)
+        {
+            s.Bind("@kind", c.Kind); s.Bind("@operation", c.Operation); s.Bind("@provider", c.Provider); s.Bind("@mediaType", c.MediaType);
+            s.Bind("@mediaId", c.ProviderMediaId); s.Bind("@personId", c.ProviderPersonId); s.Bind("@field", c.FieldName); s.Bind("@current", c.CurrentValue);
+            s.Bind("@replacement", c.ReplacementValue); s.Bind("@secondaryProvider", c.SecondaryProvider); s.Bind("@secondaryId", c.SecondaryId); s.Bind("@emby", c.EmbyId);
+            s.Bind("@reason", c.Reason); s.Bind("@note", c.Note); s.Bind("@enabled", c.Enabled ? 1 : 0); s.Bind("@now", now);
+        }
+        private static ProviderCorrection ReadCorrection(IResultSet r) => new ProviderCorrection
+        {
+            CorrectionId = r.GetInt64(0), Kind = r.GetString(1), Operation = r.GetString(2), Provider = r.GetString(3), MediaType = r.GetString(4), ProviderMediaId = r.GetString(5),
+            ProviderPersonId = r.GetString(6), FieldName = r.GetString(7), CurrentValue = r.GetString(8), ReplacementValue = r.GetString(9), SecondaryProvider = r.GetString(10), SecondaryId = r.GetString(11),
+            EmbyId = r.IsDBNull(12) ? (long?)null : r.GetInt64(12), Reason = r.GetString(13), Note = r.GetString(14), Enabled = r.GetInt(15) != 0, CreatedUtc = r.GetInt64(16), UpdatedUtc = r.GetInt64(17)
+        };
+        private List<ProviderCorrection> LoadCorrections()
+        {
+            var result = new List<ProviderCorrection>();
+            using (var s = db.PrepareStatement(CorrectionSelect + " WHERE enabled=1 ORDER BY correction_id")) foreach (var r in s.Rows()) result.Add(ReadCorrection(r));
+            return result;
+        }
+        private void SaveCorrectionApplications(long runId, IEnumerable<CorrectionApplication> applications)
+        {
+            var rows = applications.ToList(); var now = Now();
+            db.RunInTransaction(x =>
+            {
+                Statement(x, "DELETE FROM correction_application WHERE run_id=@run", s => s.Bind("@run", runId));
+                foreach (var app in rows)
+                    Statement(x, "INSERT INTO correction_application(run_id,correction_id,matched_count,changed_count,summary,applied_utc) VALUES(@run,@id,@matched,@changed,@summary,@now)", s => { s.Bind("@run", runId); s.Bind("@id", app.CorrectionId); s.Bind("@matched", app.MatchedCount); s.Bind("@changed", app.ChangedCount); s.Bind("@summary", Required(app.Summary, "Correction application result unavailable.")); s.Bind("@now", now); });
+            }, TransactionMode.Immediate);
+        }
+        private const string CorrectionSelect = "SELECT correction_id,kind,operation,provider,media_type,provider_media_id,provider_person_id,field_name,current_value,replacement_value,secondary_provider,secondary_id,emby_id,reason,note,enabled,created_utc,updated_utc FROM provider_correction";
         private static long Now() => DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         public void Dispose() { lock (sync) { db?.Dispose(); db = null; } }
 
@@ -533,7 +654,10 @@ JOIN current_media m ON m.media_type=c.media_type AND ((c.provider='tmdb' AND m.
             "CREATE INDEX IF NOT EXISTS idx_resolution_pair_disposition ON resolution_pair(run_id,disposition,confidence)",
             "CREATE TABLE IF NOT EXISTS resolution_pair_feature(run_id INTEGER NOT NULL,pair_id TEXT NOT NULL,feature_name TEXT NOT NULL,numeric_value REAL,text_value TEXT,PRIMARY KEY(run_id,pair_id,feature_name),FOREIGN KEY(run_id,pair_id) REFERENCES resolution_pair(run_id,pair_id) ON DELETE CASCADE) WITHOUT ROWID",
             "CREATE TABLE IF NOT EXISTS resolution_cluster(run_id INTEGER NOT NULL,cluster_id TEXT NOT NULL,anchor_emby_id INTEGER,identity_confidence REAL NOT NULL,local_anchor_confidence REAL NOT NULL,PRIMARY KEY(run_id,cluster_id),FOREIGN KEY(run_id) REFERENCES resolution_run(run_id) ON DELETE CASCADE) WITHOUT ROWID",
-            "CREATE TABLE IF NOT EXISTS resolution_cluster_member(run_id INTEGER NOT NULL,cluster_id TEXT NOT NULL,provider TEXT NOT NULL,provider_person_id TEXT NOT NULL,PRIMARY KEY(run_id,cluster_id,provider,provider_person_id),FOREIGN KEY(run_id,cluster_id) REFERENCES resolution_cluster(run_id,cluster_id) ON DELETE CASCADE) WITHOUT ROWID"
+            "CREATE TABLE IF NOT EXISTS resolution_cluster_member(run_id INTEGER NOT NULL,cluster_id TEXT NOT NULL,provider TEXT NOT NULL,provider_person_id TEXT NOT NULL,PRIMARY KEY(run_id,cluster_id,provider,provider_person_id),FOREIGN KEY(run_id,cluster_id) REFERENCES resolution_cluster(run_id,cluster_id) ON DELETE CASCADE) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS provider_correction(correction_id INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL,operation TEXT NOT NULL,provider TEXT NOT NULL DEFAULT '',media_type TEXT NOT NULL DEFAULT '',provider_media_id TEXT NOT NULL DEFAULT '',provider_person_id TEXT NOT NULL DEFAULT '',field_name TEXT NOT NULL DEFAULT '',current_value TEXT NOT NULL DEFAULT '',replacement_value TEXT NOT NULL DEFAULT '',secondary_provider TEXT NOT NULL DEFAULT '',secondary_id TEXT NOT NULL DEFAULT '',emby_id INTEGER,reason TEXT NOT NULL,note TEXT NOT NULL DEFAULT '',enabled INTEGER NOT NULL CHECK(enabled IN(0,1)),created_utc INTEGER NOT NULL,updated_utc INTEGER NOT NULL)",
+            "CREATE INDEX IF NOT EXISTS idx_provider_correction_enabled ON provider_correction(enabled,kind,provider)",
+            "CREATE TABLE IF NOT EXISTS correction_application(run_id INTEGER NOT NULL,correction_id INTEGER NOT NULL,matched_count INTEGER NOT NULL,changed_count INTEGER NOT NULL,summary TEXT NOT NULL,applied_utc INTEGER NOT NULL,PRIMARY KEY(run_id,correction_id),FOREIGN KEY(run_id) REFERENCES resolution_run(run_id) ON DELETE CASCADE,FOREIGN KEY(correction_id) REFERENCES provider_correction(correction_id) ON DELETE CASCADE) WITHOUT ROWID"
         };
     }
 }

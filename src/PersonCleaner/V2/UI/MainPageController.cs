@@ -24,7 +24,8 @@ namespace PersonCleaner.V2.UI
             tabs = new List<IPluginUIPageController>
             {
                 new TabController(plugin, "personcleaner-config-v2", "Configuration", x => new ConfigurationPageView(x, host, logger)),
-                new TabController(plugin, "personcleaner-evidence-v2", "Decision evidence", x => new EvidencePageView(x, host, logger))
+                new TabController(plugin, "personcleaner-evidence-v2", "Decision evidence", x => new EvidencePageView(x, host, logger)),
+                new TabController(plugin, "personcleaner-corrections-v2", "Provider corrections", x => new CorrectionsPageView(x, host, logger))
             };
         }
         public override PluginPageInfo PageInfo { get; }

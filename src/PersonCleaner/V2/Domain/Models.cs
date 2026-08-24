@@ -93,6 +93,7 @@ namespace PersonCleaner.V2.Domain
         public List<LocalCredit> LocalCredits { get; set; } = new List<LocalCredit>();
         public List<MediaSeed> Media { get; set; } = new List<MediaSeed>();
         public List<ManualBridge> Bridges { get; set; } = new List<ManualBridge>();
+        public List<CorrectionApplication> CorrectionApplications { get; set; } = new List<CorrectionApplication>();
     }
 
     public sealed class ResolutionSettings

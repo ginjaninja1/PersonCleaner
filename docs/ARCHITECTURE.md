@@ -53,7 +53,7 @@ Important table groups:
 | Runs and cohort | `resolution_run`, `current_media`, `current_local_person`, `current_local_credit`, `current_provider_media` | Reproducible active snapshot and task telemetry |
 | Acquisition | `work_queue`, `cache_manifest`, `fetch_failure` | Queue state, payload hashes/TTL, negative caching |
 | Flattened provider index | `provider_media`, `provider_media_observation`, `media_external_id`, `provider_media_credit`, `provider_person`, `person_external_id`, `person_alias` | Compact queryable evidence, structured roles and acquisition scope; no UI JSON parsing |
-| Human truth | `manual_bridge` | Confirmed or rejected cross-provider pairings |
+| Human truth | `manual_bridge`, `provider_correction`, `correction_application` | Confirmed/rejected identity relations, persistent provider-fact overlays and per-run trigger audit |
 | Pair and cluster audit | `resolution_pair`, `resolution_pair_feature`, `resolution_cluster`, `resolution_cluster_member` | Versioned pair features, disposition, component membership and separate identity/anchor confidence |
 | Presentation/audit | `resolution_decision`, `resolution_evidence`, `resolution_media` | Pre-rendered summaries, raw metrics and complete impacted-title attribution |
 
@@ -79,6 +79,20 @@ External IDs are source-typed before storage. Wikipedia page slugs are not Wikid
 TMDB and TVDB execute in separate bounded pipelines. Each pipeline uses a fixed number of long-lived workers instead of allocating one task per queue row. Provider-specific interval gates serialize only request start times, not the network wait, allowing bounded requests in flight. Default limits are four TMDB requests and two TVDB requests. TVDB bearer-token refresh is guarded by a separate single-flight semaphore.
 
 Repository operations remain protected by a narrow lock and each queue/cache key is unique, so completion order cannot change the flattened result. The phase barriers are preserved: all media workers finish before locally relevant people are seeded, and all person workers finish before offline resolution begins.
+
+## Provider correction overlay
+
+Raw payloads and flattened provider tables are immutable inputs from the operator's perspective. Active `provider_correction` rows are applied deterministically after flattening and before canonical media resolution, candidate construction and scoring. The overlay supports:
+
+- unusable or replacement media-to-person credit attributions and roles;
+- unusable or replacement person/media external-ID crosswalks;
+- unusable or replacement provider person names and birthdays;
+- unusable or replacement local Emby provider bindings; and
+- explicit same/different identity relations.
+
+Each scheduled or cached recalculation writes one `correction_application` row per active correction. A positive `matched_count` means the rule triggered against the run's source facts; `changed_count` records how many effective facts changed. A zero match remains an operator review state and is never interpreted automatically as a provider-side fix. Triggered rules emit an informational log line. Refreshing provider data never overwrites, deletes or silently resolves an operator correction.
+
+The Provider corrections tab presents task-oriented dialogs rather than a generic table editor. Leaving a replacement blank means that the selected provider fact is unusable; entering a replacement substitutes that value only in effective analysis. Disabling is reversible, while removal deletes the rule and its application audit. Saving, enabling, disabling or removing a rule recalculates the latest cached decision set without provider requests.
 
 ## Canonical media and candidate blocking
 
@@ -144,7 +158,7 @@ The evidence page loads at most the configured summary limit (default 100), orde
 - expandable ordered evidence with verdicts and stored raw metrics; and
 - a capped display set of impacted titles, while all impacted rows remain stored.
 
-Confirm/reject actions write `manual_bridge` and rerun only the offline graph/scoring stage against flattened evidence. They issue no provider requests and update the current run's pre-rendered decision rows atomically.
+Confirm/reject actions write `manual_bridge`; typed provider corrections write `provider_correction`. Both rerun only the offline graph/scoring stage against effective cached evidence. They issue no provider requests and update the current run's pre-rendered decision rows atomically.
 
 ## Deliberate non-goals in v2
 

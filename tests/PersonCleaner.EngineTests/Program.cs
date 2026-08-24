@@ -32,6 +32,10 @@ internal static class Program
         Run("stable singleton binding is not emitted as a 100 percent provider match", StableSingletonIsNotProviderMatch);
         Run("same-provider collision is blocked at component boundary", SameProviderCollisionIsBlocked);
         Run("manual rejection survives a transitive path", ManualRejectionSurvivesTransitivePath);
+        Run("provider correction removes an unusable media-person attribution", ProviderCorrectionSuppressesAttribution);
+        Run("provider correction removes a bad media cross-reference before canonicalization", ProviderCorrectionSuppressesMediaCrosswalk);
+        Run("provider corrections replace person facts and local bindings", ProviderCorrectionsReplaceFactsAndBindings);
+        Run("provider identity correction becomes an operator bridge", ProviderIdentityCorrectionBecomesBridge);
         Console.WriteLine("Passed " + passed + " entity-resolution tests; failed " + failed + ".");
         return failed == 0 ? 0 : 1;
     }
@@ -312,6 +316,67 @@ internal static class Program
         Equal(400L, drift.AnchorEmbyPersonId.Value);
         True(drift.Headline.Contains("pull the provider profile back"));
         True(!decisions.Any(x => x.Status == "ORPHAN"));
+    }
+
+    private static void ProviderCorrectionSuppressesAttribution()
+    {
+        var tmdb = Person(ProviderNames.Tmdb, "8323", "Daniel Newman", ProviderNames.Imdb, "nm0628054", "imdb:tt0102798");
+        var tvdb = Person(ProviderNames.Tvdb, "331984", "Daniel Newman", ProviderNames.Imdb, "nm1649096", "imdb:tt0102798");
+        AddObservedCredit(tmdb, "imdb:tt0102798", "Actor", "Wulf"); AddObservedCredit(tvdb, "imdb:tt0102798", "Actor", "Wulf");
+        var input = BaseInput(tmdb, tvdb); input.ProviderCredits.AddRange(tmdb.Credits.Concat(tvdb.Credits));
+        var correction = new ProviderCorrection { CorrectionId = 1, Kind = CorrectionKinds.MediaCredit, Operation = CorrectionOperations.Unusable, Provider = ProviderNames.Tvdb, MediaType = MediaTypes.Movie, ProviderMediaId = "2035", ProviderPersonId = "331984", CurrentValue = "Actor: Wulf", Reason = "PROVIDER_MISMATCH" };
+        input.ProviderCredits.Single(x => x.Provider == ProviderNames.Tvdb).MediaType = MediaTypes.Movie;
+        input.ProviderCredits.Single(x => x.Provider == ProviderNames.Tvdb).ProviderMediaId = "2035";
+        input.ProviderCredits.Single(x => x.Provider == ProviderNames.Tmdb).MediaType = MediaTypes.Movie;
+        input.ProviderCredits.Single(x => x.Provider == ProviderNames.Tmdb).ProviderMediaId = "8367";
+        var tracker = new CorrectionApplicationTracker(new[] { correction });
+        ProviderCorrectionOverlay.Apply(input, tracker);
+        Equal(1, input.ProviderCredits.Count);
+        Equal(ProviderNames.Tmdb, input.ProviderCredits[0].Provider);
+        True(!input.ProviderPeople.Any(x => x.Key == ProviderNames.Tvdb + ":331984"));
+        Equal(1, tracker.Results.Single().MatchedCount);
+    }
+
+    private static void ProviderCorrectionSuppressesMediaCrosswalk()
+    {
+        var tmdb = ProviderMedia(ProviderNames.Tmdb, "8367", External(ProviderNames.Imdb, "tt0102798"));
+        var tvdb = ProviderMedia(ProviderNames.Tvdb, "2035", External(ProviderNames.Imdb, "tt0102798"));
+        var correction = new ProviderCorrection { CorrectionId = 2, Kind = CorrectionKinds.MediaExternalId, Operation = CorrectionOperations.Unusable, Provider = ProviderNames.Tvdb, MediaType = MediaTypes.Movie, ProviderMediaId = "2035", FieldName = ProviderNames.Imdb, CurrentValue = "tt0102798", Reason = "PROVIDER_MISMATCH" };
+        var tracker = new CorrectionApplicationTracker(new[] { correction });
+        ProviderCorrectionOverlay.ApplyMediaIdentities(new[] { tmdb, tvdb }, tracker);
+        var keys = MediaIdentityResolver.Resolve(new[] { tmdb, tvdb });
+        True(keys[MediaIdentityResolver.RecordKey(ProviderNames.Tmdb, MediaTypes.Movie, "8367")] != keys[MediaIdentityResolver.RecordKey(ProviderNames.Tvdb, MediaTypes.Movie, "2035")]);
+        Equal(1, tracker.Results.Single().MatchedCount);
+    }
+
+    private static void ProviderCorrectionsReplaceFactsAndBindings()
+    {
+        var person = Person(ProviderNames.Tvdb, "331984", "Daniel Newman", ProviderNames.Imdb, "nm1649096", "shared"); person.Birthday = "1981-06-14";
+        AddObservedCredit(person, "shared", "Actor", "Wulf"); person.Credits[0].MediaType = MediaTypes.Movie; person.Credits[0].ProviderMediaId = "2035";
+        var input = BaseInput(person); input.ProviderCredits.AddRange(person.Credits); input.LocalPeople.Add(new LocalPerson { EmbyId = 41636, Name = "Daniel Newman", TvdbId = "331984" });
+        var corrections = new[]
+        {
+            new ProviderCorrection { CorrectionId = 3, Kind = CorrectionKinds.PersonField, Operation = CorrectionOperations.Replace, Provider = ProviderNames.Tvdb, ProviderPersonId = "331984", FieldName = "birthday", CurrentValue = "1981-06-14", ReplacementValue = "1976-05-12", Reason = "PROVIDER_MISMATCH" },
+            new ProviderCorrection { CorrectionId = 4, Kind = CorrectionKinds.PersonExternalId, Operation = CorrectionOperations.Unusable, Provider = ProviderNames.Tvdb, ProviderPersonId = "331984", FieldName = ProviderNames.Imdb, CurrentValue = "nm1649096", Reason = "PROVIDER_MISMATCH" },
+            new ProviderCorrection { CorrectionId = 5, Kind = CorrectionKinds.LocalPersonBinding, Operation = CorrectionOperations.Unusable, Provider = ProviderNames.Tvdb, EmbyId = 41636, CurrentValue = "331984", Reason = "PROVIDER_MISMATCH" }
+        };
+        ProviderCorrectionOverlay.Apply(input, new CorrectionApplicationTracker(corrections));
+        Equal("1976-05-12", input.ProviderPeople.Single().Birthday);
+        True(!input.ProviderPeople.Single().ExternalIds.ContainsKey(ProviderNames.Imdb));
+        True(input.LocalPeople.Single().TvdbId == null);
+    }
+
+    private static void ProviderIdentityCorrectionBecomesBridge()
+    {
+        var first = Person(ProviderNames.Tmdb, "duplicate-a", "Duplicate Person", null, null, "shared");
+        var second = Person(ProviderNames.Tmdb, "duplicate-b", "Duplicate Person", null, null, "shared");
+        AddObservedCredit(first, "shared", "Actor", "Role"); AddObservedCredit(second, "shared", "Actor", "Role");
+        var input = BaseInput(first, second); input.ProviderCredits.AddRange(first.Credits.Concat(second.Credits));
+        var correction = new ProviderCorrection { CorrectionId = 6, Kind = CorrectionKinds.IdentityRelation, Operation = CorrectionOperations.Same, Provider = ProviderNames.Tmdb, ProviderPersonId = "duplicate-a", SecondaryProvider = ProviderNames.Tmdb, SecondaryId = "duplicate-b", Reason = "PROVIDER_DUPLICATE" };
+        correction.NormalizeAndValidate();
+        ProviderCorrectionOverlay.Apply(input, new CorrectionApplicationTracker(new[] { correction }));
+        Equal(1, input.Bridges.Count);
+        True(!input.Bridges[0].IsRejected);
     }
 
     private static void OperatorBridgeJoinsRecords()
