@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 
 namespace PersonCleaner.V2.Domain
 {
@@ -25,15 +26,22 @@ namespace PersonCleaner.V2.Domain
         public IReadOnlyList<ResolutionPairEvaluation> PairEvaluations { get; private set; } = new ResolutionPairEvaluation[0];
         public IReadOnlyList<ResolutionClusterSnapshot> Clusters { get; private set; } = new ResolutionClusterSnapshot[0];
 
-        public IReadOnlyList<ResolutionDecision> Resolve(ResolutionInput input, ResolutionSettings settings)
+        public IReadOnlyList<ResolutionDecision> Resolve(
+            ResolutionInput input,
+            ResolutionSettings settings,
+            Action<ResolutionProgress> progress = null,
+            CancellationToken cancellationToken = default(CancellationToken))
         {
             Diagnostics = new ResolutionDiagnostics();
             PairEvaluations = new ResolutionPairEvaluation[0];
             Clusters = new ResolutionClusterSnapshot[0];
             input = input ?? new ResolutionInput();
             settings = settings ?? new ResolutionSettings();
+            Report(progress, cancellationToken, "Preparing provider-credit index", 0, Math.Max(1, input.ProviderCredits.Count), 0);
             PreparePeople(input.ProviderPeople);
             PrepareCredits(input);
+            var providerCreditIndex = new ProviderCreditIndex(input.ProviderCredits);
+            Report(progress, cancellationToken, "Preparing provider-credit index", input.ProviderCredits.Count, Math.Max(1, input.ProviderCredits.Count), 0.05);
 
             var peopleByKey = input.ProviderPeople
                 .Where(x => !string.IsNullOrWhiteSpace(x.Provider) && !string.IsNullOrWhiteSpace(x.ProviderId))
@@ -44,27 +52,34 @@ namespace PersonCleaner.V2.Domain
             var graph = new DisjointSet();
             foreach (var key in peopleByKey.Keys) graph.Add(key);
 
-            var candidates = BuildCandidates(peopleByKey.Values, input, rejected);
+            var candidates = BuildCandidates(peopleByKey.Values, input, rejected, providerCreditIndex, progress, cancellationToken);
 
+            var bridgeIndex = 0;
+            var bridgeCount = input.Bridges.Count(x => !x.IsRejected);
             foreach (var bridge in input.Bridges.Where(x => !x.IsRejected).OrderBy(BridgeKey, StringComparer.Ordinal))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var left = bridge.ProviderA + ":" + bridge.ProviderIdA;
                 var right = bridge.ProviderB + ":" + bridge.ProviderIdB;
                 if (!peopleByKey.ContainsKey(left) || !peopleByKey.ContainsKey(right)) continue;
-                var candidate = FindOrAddManualCandidate(candidates, peopleByKey[left], peopleByKey[right], input);
+                var candidate = FindOrAddManualCandidate(candidates, peopleByKey[left], peopleByKey[right], input, providerCreditIndex);
                 candidate.Disposition = graph.Union(left, right, (a, b) => CanMergeComponents(a, b, peopleByKey, rejected, true))
                     ? "operator-confirmed"
                     : "constraint-blocked";
                 if (candidate.Disposition == "constraint-blocked") Diagnostics.ConstraintBlockedCandidates++;
+                Report(progress, cancellationToken, "Applying operator bridges", ++bridgeIndex, Math.Max(1, bridgeCount), 0.55);
             }
 
-            foreach (var candidate in candidates
+            var automaticCandidates = candidates
                 .Where(x => string.IsNullOrWhiteSpace(x.Disposition))
                 .Where(x => IsAutomatic(x.Score, settings))
                 .OrderByDescending(x => x.Score.HardIdentifierMatch)
                 .ThenByDescending(x => x.Score.Score)
-                .ThenBy(x => x.PairKey, StringComparer.Ordinal))
+                .ThenBy(x => x.PairKey, StringComparer.Ordinal).ToList();
+            for (var candidateIndex = 0; candidateIndex < automaticCandidates.Count; candidateIndex++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+                var candidate = automaticCandidates[candidateIndex];
                 if (graph.Find(candidate.Left.Key) == graph.Find(candidate.Right.Key))
                 {
                     candidate.Disposition = "component-connected";
@@ -77,10 +92,13 @@ namespace PersonCleaner.V2.Domain
                     candidate.Disposition = "constraint-blocked";
                     Diagnostics.ConstraintBlockedCandidates++;
                 }
+                if ((candidateIndex & 255) == 0 || candidateIndex + 1 == automaticCandidates.Count)
+                    Report(progress, cancellationToken, "Resolving candidate graph", candidateIndex + 1, Math.Max(1, automaticCandidates.Count), 0.55 + 0.10 * (candidateIndex + 1) / Math.Max(1, automaticCandidates.Count));
             }
 
             foreach (var candidate in candidates.Where(x => string.IsNullOrWhiteSpace(x.Disposition)))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (rejected.Contains(candidate.PairKey)) candidate.Disposition = "operator-rejected";
                 else if (graph.Find(candidate.Left.Key) == graph.Find(candidate.Right.Key)) candidate.Disposition = "component-connected";
                 else if (candidate.Score.Score >= settings.HumanReviewThreshold) candidate.Disposition = "human-review";
@@ -97,27 +115,37 @@ namespace PersonCleaner.V2.Domain
                 .ToList();
             Diagnostics.GraphComponents = components.Count;
             var localIndex = new LocalIndex(input);
-            var states = components.Select((component, index) => new ComponentState
+            var states = new List<ComponentState>();
+            for (var componentIndex = 0; componentIndex < components.Count; componentIndex++)
             {
-                Index = index,
-                People = component,
-                Anchors = RankLocalAnchors(component, localIndex),
-                ProviderKeys = new HashSet<string>(component.Select(x => x.Key), StringComparer.Ordinal),
-                MediaKeys = new HashSet<string>(component.SelectMany(x => x.CanonicalMediaKeys), StringComparer.Ordinal)
-            }).ToList();
+                cancellationToken.ThrowIfCancellationRequested();
+                var component = components[componentIndex];
+                states.Add(new ComponentState
+                {
+                    Index = componentIndex,
+                    People = component,
+                    Anchors = RankLocalAnchors(component, localIndex),
+                    ProviderKeys = new HashSet<string>(component.Select(x => x.Key), StringComparer.Ordinal),
+                    MediaKeys = new HashSet<string>(component.SelectMany(x => x.CanonicalMediaKeys), StringComparer.Ordinal)
+                });
+                if ((componentIndex & 255) == 0 || componentIndex + 1 == components.Count)
+                    Report(progress, cancellationToken, "Ranking local-media anchors", componentIndex + 1, Math.Max(1, components.Count), 0.65 + 0.10 * (componentIndex + 1) / Math.Max(1, components.Count));
+            }
             var regions = BuildReconciliationRegions(states);
 
             var decisions = new List<ResolutionDecision>();
             var clusters = new List<ResolutionClusterSnapshot>();
             var resolvedLocalPeople = new HashSet<long>();
             var reviewCoveredProviderKeys = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var region in regions)
+            for (var regionIndex = 0; regionIndex < regions.Count; regionIndex++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+                var region = regions[regionIndex];
                 foreach (var local in region.LocalPeople) resolvedLocalPeople.Add(local.EmbyId);
                 if (region.Components.Count > 1 && region.LocalPeople.Count > 1)
                 {
                     var decision = BuildRealignmentDecision(region, input, candidates, localIndex);
-                    if (region.LocalPeople.All(x => EvidenceIsCompleteForLocal(x, input))) decisions.Add(decision);
+                    if (region.LocalPeople.All(x => EvidenceIsCompleteForLocal(x, input, localIndex))) decisions.Add(decision);
                     foreach (var key in region.Components.SelectMany(x => x.ProviderKeys)) reviewCoveredProviderKeys.Add(key);
                 }
                 else if (region.Components.Count > 1 && region.LocalPeople.Count == 1)
@@ -125,7 +153,7 @@ namespace PersonCleaner.V2.Domain
                     var local = region.LocalPeople[0];
                     var keys = region.Components.SelectMany(x => x.ProviderKeys).ToList();
                     var representedByReview = candidates.Any(x => x.Disposition == "human-review" && keys.Contains(x.Left.Key) && keys.Contains(x.Right.Key));
-                    if (!representedByReview && EvidenceIsCompleteForLocal(local, input))
+                    if (!representedByReview && EvidenceIsCompleteForLocal(local, input, localIndex))
                         decisions.Add(BuildSplitDecision(local, region.Components.Select(x => x.People).ToList(), input, candidates, settings));
                 }
                 else
@@ -133,10 +161,12 @@ namespace PersonCleaner.V2.Domain
                     var state = region.Components[0];
                     if (state.Anchors.Count > 0 && ShouldEmitComponentDecision(state.People, state.Anchors))
                     {
-                        var decision = BuildComponentDecision(state.People, state.Anchors, input, candidates, settings);
-                        if (state.Anchors.All(x => EvidenceIsCompleteForLocal(x.Person, input))) decisions.Add(decision);
+                        var decision = BuildComponentDecision(state.People, state.Anchors, input, candidates, settings, localIndex);
+                        if (state.Anchors.All(x => EvidenceIsCompleteForLocal(x.Person, input, localIndex))) decisions.Add(decision);
                     }
                 }
+                if ((regionIndex & 127) == 0 || regionIndex + 1 == regions.Count)
+                    Report(progress, cancellationToken, "Building reconciliation decisions", regionIndex + 1, Math.Max(1, regions.Count), 0.75 + 0.08 * (regionIndex + 1) / Math.Max(1, regions.Count));
             }
 
             foreach (var region in regions)
@@ -157,60 +187,97 @@ namespace PersonCleaner.V2.Domain
             Clusters = clusters.GroupBy(x => x.ClusterId, StringComparer.Ordinal).Select(x => x.First()).ToList();
 
             var reviewCandidates = candidates.Where(x => x.Disposition == "human-review").ToList();
-            foreach (var review in reviewCandidates)
+            for (var reviewIndex = 0; reviewIndex < reviewCandidates.Count; reviewIndex++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+                var review = reviewCandidates[reviewIndex];
                 if (reviewCoveredProviderKeys.Contains(review.Left.Key) && reviewCoveredProviderKeys.Contains(review.Right.Key)) continue;
                 var decision = BuildReviewDecision(review, input, settings);
                 var local = decision.AnchorEmbyPersonId.HasValue ? input.LocalPeople.FirstOrDefault(x => x.EmbyId == decision.AnchorEmbyPersonId.Value) : null;
-                if (local == null || EvidenceIsCompleteForLocal(local, input)) decisions.Add(decision);
+                if (local == null || EvidenceIsCompleteForLocal(local, input, localIndex)) decisions.Add(decision);
             }
 
-            foreach (var local in input.LocalPeople)
+            for (var localPersonIndex = 0; localPersonIndex < input.LocalPeople.Count; localPersonIndex++)
             {
-                if (!resolvedLocalPeople.Contains(local.EmbyId) && input.LocalCredits.Any(x => x.PersonEmbyId == local.EmbyId) && EvidenceIsCompleteForLocal(local, input))
-                    decisions.Add(BuildOrphanDecision(local, input, settings));
+                cancellationToken.ThrowIfCancellationRequested();
+                var local = input.LocalPeople[localPersonIndex];
+                if (!resolvedLocalPeople.Contains(local.EmbyId) && localIndex.CreditsByPerson.ContainsKey(local.EmbyId) && EvidenceIsCompleteForLocal(local, input, localIndex))
+                    decisions.Add(BuildOrphanDecision(local, input, settings, localIndex));
+                if ((localPersonIndex & 255) == 0 || localPersonIndex + 1 == input.LocalPeople.Count)
+                    Report(progress, cancellationToken, "Checking unresolved local people", localPersonIndex + 1, Math.Max(1, input.LocalPeople.Count), 0.83 + 0.07 * (localPersonIndex + 1) / Math.Max(1, input.LocalPeople.Count));
             }
 
             var result = decisions.GroupBy(x => x.DecisionId, StringComparer.Ordinal).Select(x => x.First()).ToList();
-            ApplyGlobalScopeGuards(result, input);
+            ApplyGlobalScopeGuards(result, input, progress, cancellationToken);
+            Report(progress, cancellationToken, "Offline resolution complete", result.Count, Math.Max(1, result.Count), 1);
             return result
                 .OrderBy(x => StatusOrder(x.Status)).ThenBy(x => x.Confidence).ThenByDescending(x => x.ImpactedMediaCount)
                 .ThenBy(x => x.DisplayName, StringComparer.OrdinalIgnoreCase).ToList();
         }
 
-        private static void ApplyGlobalScopeGuards(IEnumerable<ResolutionDecision> decisions, ResolutionInput input)
+        private void ApplyGlobalScopeGuards(
+            IReadOnlyList<ResolutionDecision> decisions,
+            ResolutionInput input,
+            Action<ResolutionProgress> progress,
+            CancellationToken cancellationToken)
         {
             if (input.GlobalLocalPeople == null || input.GlobalLocalPeople.Count == 0) return;
             var inScope = new HashSet<long>(input.LocalPeople.Select(x => x.EmbyId));
             var providerPeople = input.ProviderPeople.GroupBy(x => x.Key, StringComparer.Ordinal).ToDictionary(x => x.Key, x => x.First(), StringComparer.Ordinal);
-            foreach (var decision in decisions.Where(x => x.AnchorEmbyPersonId.HasValue))
+            var owners = new Dictionary<string, List<LocalPerson>>(StringComparer.OrdinalIgnoreCase);
+            for (var ownerIndex = 0; ownerIndex < input.GlobalLocalPeople.Count; ownerIndex++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+                var owner = input.GlobalLocalPeople[ownerIndex];
+                AddOwner(owners, ProviderNames.Tmdb, owner.TmdbId, owner);
+                AddOwner(owners, ProviderNames.Tvdb, owner.TvdbId, owner);
+                AddOwner(owners, ProviderNames.Imdb, owner.ImdbId, owner);
+                if ((ownerIndex & 4095) == 0 || ownerIndex + 1 == input.GlobalLocalPeople.Count)
+                    Report(progress, cancellationToken, "Indexing global Emby bindings", ownerIndex + 1, Math.Max(1, input.GlobalLocalPeople.Count), 0.90 + 0.04 * (ownerIndex + 1) / Math.Max(1, input.GlobalLocalPeople.Count));
+            }
+
+            var anchored = decisions.Where(x => x.AnchorEmbyPersonId.HasValue).ToList();
+            for (var decisionIndex = 0; decisionIndex < anchored.Count; decisionIndex++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var decision = anchored[decisionIndex];
                 var proposed = ProposedIdentityBindings(decision.ProviderKeys, providerPeople);
-                if (proposed.Count == 0) continue;
                 var collisions = new List<string>();
-                foreach (var owner in input.GlobalLocalPeople.Where(x => x.EmbyId != decision.AnchorEmbyPersonId.Value && !inScope.Contains(x.EmbyId)))
                 foreach (var binding in proposed)
                 {
-                    var current = LocalBinding(owner, binding.Key);
-                    if (string.IsNullOrWhiteSpace(current) || !string.Equals(current, binding.Value, StringComparison.OrdinalIgnoreCase)) continue;
-                    collisions.Add(binding.Key + ":" + binding.Value + " on Emby person " + owner.EmbyId.ToString(CultureInfo.InvariantCulture) + (string.IsNullOrWhiteSpace(owner.Name) ? string.Empty : " (" + owner.Name + ")"));
+                    if (!owners.TryGetValue(BindingKey(binding.Key, binding.Value), out var bindingOwners)) continue;
+                    foreach (var owner in bindingOwners.Where(x => x.EmbyId != decision.AnchorEmbyPersonId.Value && !inScope.Contains(x.EmbyId)))
+                        collisions.Add(binding.Key + ":" + binding.Value + " on Emby person " + owner.EmbyId.ToString(CultureInfo.InvariantCulture) + (string.IsNullOrWhiteSpace(owner.Name) ? string.Empty : " (" + owner.Name + ")"));
                 }
                 collisions = collisions.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
-                if (collisions.Count == 0) continue;
-
-                decision.Action = ResolutionActions.IncompleteScope;
-                decision.Headline = "The proposed identity is already held by an Emby person outside the evaluated scope.";
-                decision.Explanation = "No Emby change is offered. Add the named person or relevant media IDs to the explicit sandbox scope and rerun, or use Full mode. PersonCleaner does not expand the cohort automatically.";
-                decision.Evidence.Add(new EvidenceLine
+                if (collisions.Count > 0)
                 {
-                    SortOrder = 0,
-                    SignalType = "GLOBAL_BINDING_OWNER",
-                    Verdict = "withheld",
-                    Narrative = "Global Emby provider-binding safety check found " + string.Join("; ", collisions) + ".",
-                    Metric = "owners=" + collisions.Count.ToString(CultureInfo.InvariantCulture)
-                });
+                    decision.Action = ResolutionActions.IncompleteScope;
+                    decision.Headline = "The proposed identity is already held by an Emby person outside the evaluated scope.";
+                    decision.Explanation = "No Emby change is offered. Add the named person or relevant media IDs to the explicit sandbox scope and rerun, or use Full mode. PersonCleaner does not expand the cohort automatically.";
+                    decision.Evidence.Add(new EvidenceLine
+                    {
+                        SortOrder = 0,
+                        SignalType = "GLOBAL_BINDING_OWNER",
+                        Verdict = "withheld",
+                        Narrative = "Global Emby provider-binding safety check found " + string.Join("; ", collisions) + ".",
+                        Metric = "owners=" + collisions.Count.ToString(CultureInfo.InvariantCulture)
+                    });
+                }
+                if ((decisionIndex & 255) == 0 || decisionIndex + 1 == anchored.Count)
+                    Report(progress, cancellationToken, "Applying global scope guards", decisionIndex + 1, Math.Max(1, anchored.Count), 0.94 + 0.05 * (decisionIndex + 1) / Math.Max(1, anchored.Count));
             }
         }
+
+        private static void AddOwner(Dictionary<string, List<LocalPerson>> owners, string provider, string id, LocalPerson person)
+        {
+            if (string.IsNullOrWhiteSpace(id)) return;
+            var key = BindingKey(provider, id);
+            if (!owners.TryGetValue(key, out var items)) owners[key] = items = new List<LocalPerson>();
+            items.Add(person);
+        }
+
+        private static string BindingKey(string provider, string id) => provider + ":" + id;
 
         private static Dictionary<string, string> ProposedIdentityBindings(string providerKeys, IReadOnlyDictionary<string, ProviderPerson> people)
         {
@@ -232,18 +299,16 @@ namespace PersonCleaner.V2.Domain
                 .ToDictionary(x => x.Key.ToLowerInvariant(), x => x.First().Value, StringComparer.OrdinalIgnoreCase);
         }
 
-        private static string LocalBinding(LocalPerson person, string provider) => provider == ProviderNames.Tmdb ? person.TmdbId : provider == ProviderNames.Tvdb ? person.TvdbId : provider == ProviderNames.Imdb ? person.ImdbId : null;
-
         public static ScoreBreakdown Score(ProviderPerson left, ProviderPerson right, ResolutionSettings settings)
         {
             PreparePeople(new[] { left, right });
             var input = new ResolutionInput { ProviderPeople = new List<ProviderPerson> { left, right } };
             input.ProviderCredits.AddRange((left.Credits ?? new List<ObservedProviderCredit>()).Concat(right.Credits ?? new List<ObservedProviderCredit>()));
             PrepareCredits(input);
-            return Score(left, right, input, 1);
+            return Score(left, right, input, 1, new ProviderCreditIndex(input.ProviderCredits));
         }
 
-        private static ScoreBreakdown Score(ProviderPerson left, ProviderPerson right, ResolutionInput input, int nameFrequency)
+        private static ScoreBreakdown Score(ProviderPerson left, ProviderPerson right, ResolutionInput input, int nameFrequency, ProviderCreditIndex creditIndex)
         {
             var sharedKeys = new HashSet<string>(left.CanonicalMediaKeys.Intersect(right.CanonicalMediaKeys, StringComparer.Ordinal), StringComparer.Ordinal);
             var intersection = sharedKeys.Count;
@@ -262,7 +327,7 @@ namespace PersonCleaner.V2.Domain
 
             var identifier = IdentifierEvidence(left, right);
             var roles = RoleEvidence(left, right, sharedKeys);
-            var competing = CountCompetingAttributions(left, right, input, aliases.Union(otherAliases));
+            var competing = CountCompetingAttributions(left, right, creditIndex, aliases.Union(otherAliases));
             var mediaAttributionDominant = (exactName || aliasMatch) && intersection > 0 && roles.Agreement > 0 && competing == 0;
 
             var rarity = 1.0 / Math.Sqrt(Math.Max(1, nameFrequency));
@@ -313,7 +378,13 @@ namespace PersonCleaner.V2.Domain
             };
         }
 
-        private List<Candidate> BuildCandidates(IEnumerable<ProviderPerson> people, ResolutionInput input, HashSet<string> rejected)
+        private List<Candidate> BuildCandidates(
+            IEnumerable<ProviderPerson> people,
+            ResolutionInput input,
+            HashSet<string> rejected,
+            ProviderCreditIndex creditIndex,
+            Action<ResolutionProgress> progress,
+            CancellationToken cancellationToken)
         {
             var allPeople = people.ToList();
             var tmdb = allPeople.Where(x => x.Provider == ProviderNames.Tmdb).ToList();
@@ -334,8 +405,10 @@ namespace PersonCleaner.V2.Domain
                 .GroupBy(x => x.Provider + "|" + x.CleanName, StringComparer.Ordinal)
                 .ToDictionary(x => x.Key, x => x.Count(), StringComparer.Ordinal);
             var result = new List<Candidate>();
-            foreach (var left in tmdb)
+            for (var leftIndex = 0; leftIndex < tmdb.Count; leftIndex++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+                var left = tmdb[leftIndex];
                 var possible = new HashSet<ProviderPerson>();
                 foreach (var media in left.CanonicalMediaKeys) if (byMedia.TryGetValue(media, out var matches)) possible.UnionWith(matches);
                 if (byExternal.TryGetValue(left.Provider + ":" + left.ProviderId, out var nativeMatches)) possible.UnionWith(nativeMatches);
@@ -347,7 +420,7 @@ namespace PersonCleaner.V2.Domain
                 {
                     Diagnostics.BlockedCrossProviderPairs++;
                     var frequency = Math.Max(Frequency(nameFrequency, left), Frequency(nameFrequency, right));
-                    var score = Score(left, right, input, frequency);
+                    var score = Score(left, right, input, frequency, creditIndex);
                     if (score.HardIdentifierMatch || (score.SharedMediaCount > 0 && (score.ExactNameMatch || score.AliasMatch)))
                     {
                         if (score.HardIdentifierMatch) Diagnostics.HardIdentityCandidates++; else Diagnostics.NameCompatibleCandidates++;
@@ -356,16 +429,17 @@ namespace PersonCleaner.V2.Domain
                         result.Add(candidate);
                     }
                 }
+                Report(progress, cancellationToken, "Building cross-provider candidates", leftIndex + 1, Math.Max(1, tmdb.Count), 0.05 + 0.50 * (leftIndex + 1) / Math.Max(1, tmdb.Count));
             }
             return result;
         }
 
-        private static Candidate FindOrAddManualCandidate(List<Candidate> candidates, ProviderPerson left, ProviderPerson right, ResolutionInput input)
+        private static Candidate FindOrAddManualCandidate(List<Candidate> candidates, ProviderPerson left, ProviderPerson right, ResolutionInput input, ProviderCreditIndex creditIndex)
         {
             var key = PairKey(left.Key, right.Key);
             var candidate = candidates.FirstOrDefault(x => x.PairKey == key);
             if (candidate != null) return candidate;
-            candidate = new Candidate { Left = left, Right = right, Score = Score(left, right, input, 1), ManualOnly = true };
+            candidate = new Candidate { Left = left, Right = right, Score = Score(left, right, input, 1, creditIndex), ManualOnly = true };
             candidates.Add(candidate);
             return candidate;
         }
@@ -461,7 +535,7 @@ namespace PersonCleaner.V2.Domain
             var componentsByMedia = region.Components.SelectMany(x => x.MediaKeys.Select(media => new { Media = media, Component = x }))
                 .GroupBy(x => x.Media, StringComparer.Ordinal).ToDictionary(x => x.Key, x => x.Select(y => y.Component).Distinct().ToList(), StringComparer.Ordinal);
             foreach (var local in region.LocalPeople)
-            foreach (var credit in input.LocalCredits.Where(x => x.PersonEmbyId == local.EmbyId))
+            foreach (var credit in index.CreditsByPerson.TryGetValue(local.EmbyId, out var localCredits) ? localCredits : EmptyCredits)
             {
                 if (!index.MediaKeysById.TryGetValue(credit.MediaEmbyId, out var mediaKeys) || !mediaKeys.Overlaps(regionMediaKeys)) continue;
                 var possible = mediaKeys.Where(componentsByMedia.ContainsKey).SelectMany(x => componentsByMedia[x]).Distinct().ToList();
@@ -533,7 +607,7 @@ namespace PersonCleaner.V2.Domain
             var state = new ComponentState { People = component, Anchors = anchors, ProviderKeys = new HashSet<string>(component.Select(x => x.Key), StringComparer.Ordinal), MediaKeys = new HashSet<string>(component.SelectMany(x => x.CanonicalMediaKeys), StringComparer.Ordinal) };
             var result = new List<ResolutionCreditAssignment>();
             foreach (var anchor in anchors)
-            foreach (var credit in input.LocalCredits.Where(x => x.PersonEmbyId == anchor.Person.EmbyId))
+            foreach (var credit in index.CreditsByPerson.TryGetValue(anchor.Person.EmbyId, out var localCredits) ? localCredits : EmptyCredits)
             {
                 if (!index.MediaKeysById.TryGetValue(credit.MediaEmbyId, out var mediaKeys) || !CreditMatchesComponent(anchor.Person, credit, state, mediaKeys)) continue;
                 result.Add(new ResolutionCreditAssignment { SourcePersonEmbyId = anchor.Person.EmbyId, TargetPersonEmbyId = owner.EmbyId, MediaEmbyId = credit.MediaEmbyId, Role = credit.Role, Disposition = anchor.Person.EmbyId == owner.EmbyId ? "KEEP" : "MOVE", ComponentKey = string.Join(", ", state.ProviderKeys.OrderBy(x => x, StringComparer.Ordinal)), Rationale = "This credit is attributable to the resolved provider component and its selected Emby owner." });
@@ -555,7 +629,7 @@ namespace PersonCleaner.V2.Domain
             return component.Count > 1 || anchors.Count > 1 || !anchors[0].Direct;
         }
 
-        private static ResolutionDecision BuildComponentDecision(List<ProviderPerson> component, List<Anchor> anchors, ResolutionInput input, List<Candidate> candidates, ResolutionSettings settings)
+        private static ResolutionDecision BuildComponentDecision(List<ProviderPerson> component, List<Anchor> anchors, ResolutionInput input, List<Candidate> candidates, ResolutionSettings settings, LocalIndex index)
         {
             var winner = anchors[0];
             var providerKeys = component.Select(x => x.Key).OrderBy(x => x, StringComparer.Ordinal).ToList();
@@ -567,7 +641,7 @@ namespace PersonCleaner.V2.Domain
             var dominantAttribution = accepted.Any(x => x.Score.MediaAttributionDominant);
             var conflictCount = accepted.Sum(x => (x.Score.BirthdayConflict ? 1 : 0) + (x.Score.IdentifierConflict ? 1 : 0));
             var currentKeys = CurrentProviderKeys(winner.Person).ToList();
-            var currentAcquisitions = CurrentAcquisitions(winner.Person, input);
+            var currentAcquisitions = CurrentAcquisitions(winner.Person, index);
             var confirmedAbsent = currentKeys.Count > 0 && currentKeys.All(x => currentAcquisitions.TryGetValue(x, out var acquisition) && acquisition.State == AcquisitionStates.Absent);
             var names = string.Join(" / ", component.Select(x => x.Name).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase));
             var decision = new ResolutionDecision
@@ -603,13 +677,13 @@ namespace PersonCleaner.V2.Domain
             AddPairEvidence(decision, weakest?.Score);
             decision.Evidence.Add(new EvidenceLine { SortOrder = 50, SignalType = "LOCAL_MEDIA_ANCHOR", Verdict = "supports", Narrative = "Emby person " + winner.Person.EmbyId + " is the local anchor with " + winner.Mass + " matching sampled title(s); local-anchor confidence " + AnchorConfidence(winner).ToString("0.000", CultureInfo.InvariantCulture) + ".", Metric = "mass=" + winner.Mass + ";direct=" + winner.Direct.ToString().ToLowerInvariant() + ";confidence=" + AnchorConfidence(winner).ToString("0.000000", CultureInfo.InvariantCulture) });
             if (drift) decision.Evidence.Add(new EvidenceLine { SortOrder = 5, SignalType = "PROVIDER_ID_DRIFT", Verdict = "changed", Narrative = "None of the current Emby provider keys directly identifies this component; compatible naming and local-media mass establish the proposed continuity.", Metric = "direct_current_id=false" });
-            AddAcquisitionEvidence(decision, winner.Person, input);
-            AddMediaAcquisitionEvidence(decision, winner.Person, input);
+            AddAcquisitionEvidence(decision, winner.Person, index);
+            AddMediaAcquisitionEvidence(decision, winner.Person, input, index);
             var manual = input.Bridges.FirstOrDefault(x => !x.IsRejected && providerKeys.Contains(x.ProviderA + ":" + x.ProviderIdA) && providerKeys.Contains(x.ProviderB + ":" + x.ProviderIdB));
             if (manual != null) decision.Evidence.Add(new EvidenceLine { SortOrder = 2, SignalType = "OPERATOR_BRIDGE", Verdict = "proves", Narrative = "An operator explicitly confirmed this cross-provider alignment.", Metric = manual.ProviderA + ":" + manual.ProviderIdA + "=" + manual.ProviderB + ":" + manual.ProviderIdB });
             if (merge)
             {
-                decision.CreditAssignments = BuildComponentAssignments(component, anchors, winner.Person, input, new LocalIndex(input));
+                decision.CreditAssignments = BuildComponentAssignments(component, anchors, winner.Person, input, index);
                 PopulateImpactedFromAssignments(decision, input);
                 var moves = decision.CreditAssignments.Count(x => x.Disposition == "MOVE");
                 decision.Evidence.Add(new EvidenceLine { SortOrder = 4, SignalType = "CREDIT_ASSIGNMENT_PLAN", Verdict = moves > 0 ? "supports" : "review", Narrative = moves + " exact local credit move(s) were derived for the selected component owner.", Metric = "moves=" + moves + ";assignments=" + decision.CreditAssignments.Count });
@@ -671,10 +745,10 @@ namespace PersonCleaner.V2.Domain
             return decision;
         }
 
-        private static ResolutionDecision BuildOrphanDecision(LocalPerson local, ResolutionInput input, ResolutionSettings settings)
+        private static ResolutionDecision BuildOrphanDecision(LocalPerson local, ResolutionInput input, ResolutionSettings settings, LocalIndex index)
         {
             var currentKeys = CurrentProviderKeys(local).ToList();
-            var acquisitions = CurrentAcquisitions(local, input);
+            var acquisitions = CurrentAcquisitions(local, index);
             var absent = currentKeys.Where(x => acquisitions.TryGetValue(x, out var acquisition) && acquisition.State == AcquisitionStates.Absent).ToList();
             var confirmedStale = absent.Count > 0;
             var decision = new ResolutionDecision
@@ -698,8 +772,8 @@ namespace PersonCleaner.V2.Domain
             };
             decision.Action = confirmedStale ? "REVIEW_REMOVE_STALE_PROVIDER_ID" : "HUMAN_REVIEW";
             decision.Evidence.Add(new EvidenceLine { SortOrder = 1, SignalType = "NO_PROVIDER_SUPPORT", Verdict = "missing", Narrative = "The media-derived provider graph contains no matching identity node.", Metric = "provider_nodes=0" });
-            AddAcquisitionEvidence(decision, local, input);
-            AddMediaAcquisitionEvidence(decision, local, input);
+            AddAcquisitionEvidence(decision, local, index);
+            AddMediaAcquisitionEvidence(decision, local, input, index);
             AddMediaExamples(decision, new[] { local.EmbyId }, input, settings.MaximumMediaExamples);
             return decision;
         }
@@ -816,20 +890,19 @@ namespace PersonCleaner.V2.Domain
             return new RoleResult { Exact = exact, Compatible = compatible, Agreement = sharedKeys.Count == 0 ? 0 : (exact + compatible * 0.67) / sharedKeys.Count };
         }
 
-        private static int CountCompetingAttributions(ProviderPerson left, ProviderPerson right, ResolutionInput input, IEnumerable<string> compatibleNames)
+        private static int CountCompetingAttributions(ProviderPerson left, ProviderPerson right, ProviderCreditIndex creditIndex, IEnumerable<string> compatibleNames)
         {
             var names = new HashSet<string>(compatibleNames.Where(x => !string.IsNullOrWhiteSpace(x)), StringComparer.Ordinal);
-            var credits = input.ProviderCredits ?? new List<ObservedProviderCredit>();
             var conflicts = new HashSet<string>(StringComparer.Ordinal);
-            CountCompeting(left, right, credits, names, conflicts);
-            CountCompeting(right, left, credits, names, conflicts);
+            CountCompeting(left, right, creditIndex, names, conflicts);
+            CountCompeting(right, left, creditIndex, names, conflicts);
             return conflicts.Count;
         }
 
-        private static void CountCompeting(ProviderPerson source, ProviderPerson expected, IEnumerable<ObservedProviderCredit> allCredits, HashSet<string> names, HashSet<string> conflicts)
+        private static void CountCompeting(ProviderPerson source, ProviderPerson expected, ProviderCreditIndex creditIndex, HashSet<string> names, HashSet<string> conflicts)
         {
             foreach (var sourceCredit in source.Credits)
-            foreach (var other in allCredits.Where(x => x.Provider == expected.Provider && x.CanonicalMediaKey == sourceCredit.CanonicalMediaKey && x.PersonKey != expected.Key && names.Contains(x.CleanPersonName)))
+            foreach (var other in creditIndex.Find(expected.Provider, sourceCredit.CanonicalMediaKey).Where(x => x.PersonKey != expected.Key && names.Contains(x.CleanPersonName)))
                 if (RoleCompatibility(sourceCredit, other) > 0) conflicts.Add(other.PersonKey + "|" + other.CanonicalMediaKey);
         }
 
@@ -910,47 +983,46 @@ namespace PersonCleaner.V2.Domain
             if (!string.IsNullOrWhiteSpace(person.TvdbId)) yield return ProviderNames.Tvdb + ":" + person.TvdbId;
         }
 
-        private static Dictionary<string, PersonAcquisition> CurrentAcquisitions(LocalPerson person, ResolutionInput input)
+        private static Dictionary<string, PersonAcquisition> CurrentAcquisitions(LocalPerson person, LocalIndex index)
         {
-            var current = new HashSet<string>(CurrentProviderKeys(person), StringComparer.Ordinal);
-            return input.PersonAcquisitions.Where(x => current.Contains(x.Key)).GroupBy(x => x.Key, StringComparer.Ordinal).Select(x => x.Last()).ToDictionary(x => x.Key, StringComparer.Ordinal);
+            var result = new Dictionary<string, PersonAcquisition>(StringComparer.Ordinal);
+            foreach (var key in CurrentProviderKeys(person))
+                if (index.PersonAcquisitionsByKey.TryGetValue(key, out var acquisition)) result[key] = acquisition;
+            return result;
         }
 
-        private static bool CurrentBindingsAreUsable(LocalPerson person, ResolutionInput input)
+        private static bool CurrentBindingsAreUsable(LocalPerson person, ResolutionInput input, LocalIndex index)
         {
             var keys = CurrentProviderKeys(person).ToList();
             if (keys.Count == 0) return true;
-            var acquisitions = CurrentAcquisitions(person, input);
+            var acquisitions = CurrentAcquisitions(person, index);
             if (!input.AcquisitionTrackingEnabled && acquisitions.Count == 0) return true;
             return keys.All(x => acquisitions.TryGetValue(x, out var acquisition) && acquisition.State != AcquisitionStates.Unavailable);
         }
 
-        private static bool EvidenceIsCompleteForLocal(LocalPerson person, ResolutionInput input)
+        private static bool EvidenceIsCompleteForLocal(LocalPerson person, ResolutionInput input, LocalIndex index)
         {
-            return CurrentBindingsAreUsable(person, input) && MediaAcquisitionsAreUsable(person, input);
+            return CurrentBindingsAreUsable(person, input, index) && MediaAcquisitionsAreUsable(person, input, index);
         }
 
-        private static bool MediaAcquisitionsAreUsable(LocalPerson person, ResolutionInput input)
+        private static bool MediaAcquisitionsAreUsable(LocalPerson person, ResolutionInput input, LocalIndex index)
         {
             if (!input.AcquisitionTrackingEnabled && input.MediaAcquisitions.Count == 0) return true;
-            var required = RequiredMediaAcquisitionKeys(person, input);
-            var observed = input.MediaAcquisitions.GroupBy(x => x.Key, StringComparer.Ordinal).Select(x => x.Last()).ToDictionary(x => x.Key, StringComparer.Ordinal);
-            return required.All(x => observed.TryGetValue(x, out var acquisition) && acquisition.State != AcquisitionStates.Unavailable);
+            var required = RequiredMediaAcquisitionKeys(person, index);
+            return required.All(x => index.MediaAcquisitionsByKey.TryGetValue(x, out var acquisition) && acquisition.State != AcquisitionStates.Unavailable);
         }
 
-        private static List<string> RequiredMediaAcquisitionKeys(LocalPerson person, ResolutionInput input)
+        private static List<string> RequiredMediaAcquisitionKeys(LocalPerson person, LocalIndex index)
         {
-            var creditedMedia = new HashSet<long>(input.LocalCredits.Where(x => x.PersonEmbyId == person.EmbyId).Select(x => x.MediaEmbyId));
             var keys = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var media in input.Media.Where(x => creditedMedia.Contains(x.EmbyId)))
-            {
-                if (!string.IsNullOrWhiteSpace(media.TmdbId)) keys.Add(ProviderNames.Tmdb + ":" + media.MediaType + ":" + media.TmdbId);
-                if (!string.IsNullOrWhiteSpace(media.TvdbId)) keys.Add(ProviderNames.Tvdb + ":" + media.MediaType + ":" + media.TvdbId);
-            }
+            if (!index.CreditsByPerson.TryGetValue(person.EmbyId, out var credits)) return keys.ToList();
+            foreach (var credit in credits)
+                if (index.MediaKeysById.TryGetValue(credit.MediaEmbyId, out var mediaKeys))
+                    foreach (var key in mediaKeys.Where(x => x.StartsWith(ProviderNames.Tmdb + ":", StringComparison.Ordinal) || x.StartsWith(ProviderNames.Tvdb + ":", StringComparison.Ordinal))) keys.Add(key);
             return keys.OrderBy(x => x, StringComparer.Ordinal).ToList();
         }
 
-        private static void AddAcquisitionEvidence(ResolutionDecision decision, LocalPerson person, ResolutionInput input)
+        private static void AddAcquisitionEvidence(ResolutionDecision decision, LocalPerson person, LocalIndex index)
         {
             var keys = CurrentProviderKeys(person).ToList();
             if (keys.Count == 0)
@@ -958,7 +1030,7 @@ namespace PersonCleaner.V2.Domain
                 decision.Evidence.Add(new EvidenceLine { SortOrder = 3, SignalType = "CURRENT_ID_ACQUISITION", Verdict = "missing", Narrative = "The Emby person has no current TMDB/TVDB person ID to validate.", Metric = "state=no-current-id" });
                 return;
             }
-            var acquisitions = CurrentAcquisitions(person, input);
+            var acquisitions = CurrentAcquisitions(person, index);
             var order = 3;
             foreach (var key in keys)
             {
@@ -970,13 +1042,12 @@ namespace PersonCleaner.V2.Domain
             }
         }
 
-        private static void AddMediaAcquisitionEvidence(ResolutionDecision decision, LocalPerson person, ResolutionInput input)
+        private static void AddMediaAcquisitionEvidence(ResolutionDecision decision, LocalPerson person, ResolutionInput input, LocalIndex index)
         {
             if (!input.AcquisitionTrackingEnabled) return;
-            var required = RequiredMediaAcquisitionKeys(person, input);
-            var observed = input.MediaAcquisitions.GroupBy(x => x.Key, StringComparer.Ordinal).Select(x => x.Last()).ToDictionary(x => x.Key, StringComparer.Ordinal);
-            var present = required.Count(x => observed.TryGetValue(x, out var acquisition) && acquisition.State == AcquisitionStates.Present);
-            var absent = required.Count(x => observed.TryGetValue(x, out var acquisition) && acquisition.State == AcquisitionStates.Absent);
+            var required = RequiredMediaAcquisitionKeys(person, index);
+            var present = required.Count(x => index.MediaAcquisitionsByKey.TryGetValue(x, out var acquisition) && acquisition.State == AcquisitionStates.Present);
+            var absent = required.Count(x => index.MediaAcquisitionsByKey.TryGetValue(x, out var acquisition) && acquisition.State == AcquisitionStates.Absent);
             decision.Evidence.Add(new EvidenceLine { SortOrder = 7, SignalType = "MEDIA_ACQUISITION", Verdict = "complete", Narrative = "All " + required.Count + " provider-media observation(s) required by this local attribution supplied usable answers; " + present + " present and " + absent + " provider-confirmed absent.", Metric = "required=" + required.Count + ";present=" + present + ";absent=" + absent });
         }
 
@@ -1001,6 +1072,20 @@ namespace PersonCleaner.V2.Domain
         private static int StatusOrder(string status)
         {
             switch (status) { case "SPLIT": return 0; case "REALIGNMENT": return 1; case "MERGE": return 2; case "CONFLATION": return 3; case "DRIFT": return 4; case "ORPHAN": return 5; case "MATCH_WITH_CONFLICT": return 6; default: return 7; }
+        }
+
+        private void Report(Action<ResolutionProgress> progress, CancellationToken cancellationToken, string stage, int completed, int total, double fraction)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            progress?.Invoke(new ResolutionProgress
+            {
+                Stage = stage,
+                Completed = completed,
+                Total = total,
+                Fraction = Math.Max(0, Math.Min(1, fraction)),
+                ExaminedPairs = Diagnostics.BlockedCrossProviderPairs,
+                AdmittedCandidates = Diagnostics.AdmittedCandidates
+            });
         }
 
         private sealed class Candidate
@@ -1033,6 +1118,32 @@ namespace PersonCleaner.V2.Domain
         private static readonly string[] NativePersonIdProviders = { ProviderNames.Tmdb, ProviderNames.Tvdb };
         private static readonly List<LocalCredit> EmptyCredits = new List<LocalCredit>();
 
+        private sealed class ProviderCreditIndex
+        {
+            private static readonly List<ObservedProviderCredit> Empty = new List<ObservedProviderCredit>();
+            private readonly Dictionary<string, Dictionary<string, List<ObservedProviderCredit>>> byProvider =
+                new Dictionary<string, Dictionary<string, List<ObservedProviderCredit>>>(StringComparer.Ordinal);
+
+            public ProviderCreditIndex(IEnumerable<ObservedProviderCredit> credits)
+            {
+                foreach (var credit in credits ?? new ObservedProviderCredit[0])
+                {
+                    if (credit == null || string.IsNullOrWhiteSpace(credit.Provider) || string.IsNullOrWhiteSpace(credit.CanonicalMediaKey)) continue;
+                    if (!byProvider.TryGetValue(credit.Provider, out var byMedia))
+                        byProvider[credit.Provider] = byMedia = new Dictionary<string, List<ObservedProviderCredit>>(StringComparer.Ordinal);
+                    if (!byMedia.TryGetValue(credit.CanonicalMediaKey, out var items))
+                        byMedia[credit.CanonicalMediaKey] = items = new List<ObservedProviderCredit>();
+                    items.Add(credit);
+                }
+            }
+
+            public IReadOnlyList<ObservedProviderCredit> Find(string provider, string canonicalMediaKey)
+            {
+                if (provider != null && canonicalMediaKey != null && byProvider.TryGetValue(provider, out var byMedia) && byMedia.TryGetValue(canonicalMediaKey, out var items)) return items;
+                return Empty;
+            }
+        }
+
         private sealed class LocalIndex
         {
             public Dictionary<string, List<LocalPerson>> ByProviderKey { get; } = new Dictionary<string, List<LocalPerson>>(StringComparer.Ordinal);
@@ -1040,11 +1151,15 @@ namespace PersonCleaner.V2.Domain
             public Dictionary<string, List<LocalPerson>> ByCleanName { get; } = new Dictionary<string, List<LocalPerson>>(StringComparer.Ordinal);
             public Dictionary<long, List<LocalCredit>> CreditsByPerson { get; }
             public Dictionary<long, HashSet<string>> MediaKeysById { get; }
+            public Dictionary<string, PersonAcquisition> PersonAcquisitionsByKey { get; }
+            public Dictionary<string, MediaAcquisition> MediaAcquisitionsByKey { get; }
 
             public LocalIndex(ResolutionInput input)
             {
                 CreditsByPerson = input.LocalCredits.GroupBy(x => x.PersonEmbyId).ToDictionary(x => x.Key, x => x.ToList());
                 MediaKeysById = input.Media.ToDictionary(x => x.EmbyId, MediaKeys);
+                PersonAcquisitionsByKey = input.PersonAcquisitions.GroupBy(x => x.Key, StringComparer.Ordinal).ToDictionary(x => x.Key, x => x.Last(), StringComparer.Ordinal);
+                MediaAcquisitionsByKey = input.MediaAcquisitions.GroupBy(x => x.Key, StringComparer.Ordinal).ToDictionary(x => x.Key, x => x.Last(), StringComparer.Ordinal);
                 foreach (var person in input.LocalPeople)
                 {
                     foreach (var key in CurrentProviderKeys(person)) Add(ByProviderKey, key, person);

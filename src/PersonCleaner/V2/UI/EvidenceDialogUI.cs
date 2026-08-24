@@ -29,14 +29,23 @@ namespace PersonCleaner.V2.UI
 
         public DashboardDecision[] Rows { get; set; } = Array.Empty<DashboardDecision>();
 
-        public static EvidenceDialogUI Build(DashboardDecision[] rows, RunStatus run)
+        public static EvidenceDialogUI Build(DashboardDecision[] rows, RunStatus run, string focusedDecisionId = null)
         {
             var grid = new DxGridOptions(new DashboardDecision(), nameof(DashboardDecision.DecisionId), false, true, true, true)
             {
-                heightMode = DxGridOptions.GridHeightMode.fullHeight,
+                // GenericEdit implements fullHeight as 100% inside nested 100%
+                // containers. In a dialog that can leave the horizontal bar at
+                // an unresolved container edge. A bounded grid keeps both
+                // scrollbars inside the visible full-screen dialog.
+                heightMode = DxGridOptions.GridHeightMode.large,
                 allowColumnReordering = true,
                 allowColumnResizing = true,
                 columnAutoWidth = false,
+                columnHidingEnabled = false,
+                focusedRowEnabled = !string.IsNullOrWhiteSpace(focusedDecisionId),
+                focusStateEnabled = !string.IsNullOrWhiteSpace(focusedDecisionId),
+                autoNavigateToFocusedRow = !string.IsNullOrWhiteSpace(focusedDecisionId),
+                focusedRowKey = focusedDecisionId,
                 showBorders = true,
                 showRowLines = true,
                 rowAlternationEnabled = true,
@@ -125,8 +134,9 @@ namespace PersonCleaner.V2.UI
                 detailGridOptions = detail
             };
 
+            var rowCount = rows == null ? 0 : rows.Length;
             var summary = run == null ? "No completed run is available."
-                : "Run " + run.RunId + " · " + run.Decisions + " decisions (" + run.DecisionBreakdown + ") · up to " + Plugin.Instance.Configuration.MaximumDashboardRows + " rows shown per decision class";
+                : "Run " + run.RunId + " · all " + rowCount + " decisions loaded (" + run.DecisionBreakdown + ")";
             return new EvidenceDialogUI { RunSummary = new CaptionItem(summary), Decisions = new DxDataGrid(grid), Rows = rows ?? Array.Empty<DashboardDecision>() };
         }
     }
@@ -138,6 +148,7 @@ namespace PersonCleaner.V2.UI
         private readonly IApplicationPaths paths;
         private readonly IJsonSerializer json;
         private readonly ILogger logger;
+        private string focusedDecisionId;
 
         public EvidenceDialogView(PluginInfo plugin, IServerApplicationHost host, ILogger logger) : base(plugin.Id)
         {
@@ -152,14 +163,15 @@ namespace PersonCleaner.V2.UI
             using (var repository = new ResolutionRepository(paths))
             {
                 repository.Initialize();
-                var rows = repository.Dashboard(Plugin.Instance.Configuration.MaximumDashboardRows, Plugin.Instance.Configuration.MaximumMediaExamplesPerDecision);
+                var rows = repository.Dashboard(Plugin.Instance.Configuration.MaximumMediaExamplesPerDecision);
                 var run = repository.LatestRun();
                 string serverId = null;
                 try { serverId = host.GetPublicSystemInfo(CancellationToken.None).GetAwaiter().GetResult()?.Id; }
                 catch (Exception ex) { logger.Warn("PersonCleaner could not resolve the Emby server ID; provider links will remain available but Emby item links will be plain text. {0}", ex.Message); }
                 EvidenceLinks.Apply(rows, serverId);
                 logger.Info("PersonCleaner full-screen evidence dialog loaded {0} decision row(s) in {1} status group(s), with {2} attached evidence/title detail row(s), from run {3}.", rows.Length, rows.Select(x => x.Status).Distinct(StringComparer.Ordinal).Count(), rows.Sum(x => x.Details == null ? 0 : x.Details.Length), run == null ? 0 : run.RunId);
-                ContentData = EvidenceDialogUI.Build(rows, run);
+                var focus = rows.Any(x => string.Equals(x.DecisionId, focusedDecisionId, StringComparison.Ordinal)) ? focusedDecisionId : null;
+                ContentData = EvidenceDialogUI.Build(rows, run, focus);
             }
         }
 
@@ -176,6 +188,7 @@ namespace PersonCleaner.V2.UI
                 var selected = incoming?.Rows?.FirstOrDefault(x => x.ReviewChanges && !string.IsNullOrWhiteSpace(x.DecisionId));
                 if (selected != null)
                 {
+                    focusedDecisionId = selected.DecisionId;
                     logger.Info("PersonCleaner opening scoped change review for decision {0}.", selected.DecisionId);
                     return Task.FromResult<IPluginUIView>(new DecisionChangeDialogView(plugin, host, logger, this, Rebuild, selected.DecisionId));
                 }

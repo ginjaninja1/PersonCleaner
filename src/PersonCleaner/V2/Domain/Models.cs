@@ -136,6 +136,16 @@ namespace PersonCleaner.V2.Domain
         public int MaximumMediaExamples { get; set; } = 25;
     }
 
+    public sealed class ResolutionProgress
+    {
+        public string Stage { get; set; }
+        public int Completed { get; set; }
+        public int Total { get; set; }
+        public double Fraction { get; set; }
+        public int ExaminedPairs { get; set; }
+        public int AdmittedCandidates { get; set; }
+    }
+
     public sealed class ScoreBreakdown
     {
         public string ModelVersion { get; set; } = "person-evidence-v5";

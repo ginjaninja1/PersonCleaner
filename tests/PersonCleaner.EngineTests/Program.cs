@@ -1,7 +1,9 @@
 using PersonCleaner.V2.Domain;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
+using System.Threading;
 
 internal static class Program
 {
@@ -55,6 +57,9 @@ internal static class Program
         Run("Emby change planner carries proposed IMDb identity with TMDB drift", ChangePlannerCarriesExternalIdentity);
         Run("Emby change planner removes only provider-confirmed stale bindings", ChangePlannerScopesStaleRemoval);
         Run("Emby change planner exposes unsupported orphan bindings for manual removal", ChangePlannerExposesOrphanRemoval);
+        Run("offline resolution reports bounded stage progress", ResolutionReportsProgress);
+        Run("offline resolution observes cancellation", ResolutionObservesCancellation);
+        Run("large unrelated provider-credit sets remain bounded", LargeProviderCreditSetRemainsBounded);
         Console.WriteLine("Passed " + passed + " entity-resolution tests; failed " + failed + ".");
         return failed == 0 ? 0 : 1;
     }
@@ -806,6 +811,66 @@ internal static class Program
         input.PersonAcquisitions.Add(Acquisition(ProviderNames.Tmdb, "existing-id", AcquisitionStates.Present));
         input.MediaAcquisitions.Add(new MediaAcquisition { Provider = ProviderNames.Tmdb, MediaType = MediaTypes.Movie, ProviderId = "11", State = AcquisitionStates.Unavailable });
         True(!new ResolutionEngine().Resolve(input, new ResolutionSettings()).Any());
+    }
+
+    private static void ResolutionReportsProgress()
+    {
+        var reports = new List<ResolutionProgress>();
+        new ResolutionEngine().Resolve(new ResolutionInput(), new ResolutionSettings(), reports.Add, CancellationToken.None);
+        True(reports.Count > 1);
+        Equal("Preparing provider-credit index", reports.First().Stage);
+        Equal("Offline resolution complete", reports.Last().Stage);
+        Equal(1.0, reports.Last().Fraction);
+    }
+
+    private static void ResolutionObservesCancellation()
+    {
+        var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        try
+        {
+            new ResolutionEngine().Resolve(new ResolutionInput(), new ResolutionSettings(), null, cancellation.Token);
+            throw new InvalidOperationException("Expected cancellation.");
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private static void LargeProviderCreditSetRemainsBounded()
+    {
+        const int peoplePerProvider = 80;
+        const string sharedMedia = "canonical:shared";
+        var input = new ResolutionInput();
+        for (var i = 0; i < peoplePerProvider; i++)
+        {
+            var tmdb = Person(ProviderNames.Tmdb, "large-tmdb-" + i, "Left Person " + i, null, null, sharedMedia);
+            var tvdb = Person(ProviderNames.Tvdb, "large-tvdb-" + i, "Right Person " + i, null, null, sharedMedia);
+            AddObservedCredit(tmdb, sharedMedia, "Actor", "Left Role " + i);
+            AddObservedCredit(tvdb, sharedMedia, "Actor", "Right Role " + i);
+            input.ProviderPeople.Add(tmdb);
+            input.ProviderPeople.Add(tvdb);
+            input.ProviderCredits.AddRange(tmdb.Credits);
+            input.ProviderCredits.AddRange(tvdb.Credits);
+        }
+        for (var i = 0; i < 20000; i++)
+            input.ProviderCredits.Add(new ObservedProviderCredit
+            {
+                Provider = (i & 1) == 0 ? ProviderNames.Tmdb : ProviderNames.Tvdb,
+                ProviderPersonId = "unrelated-" + i,
+                PersonName = "Unrelated Person " + i,
+                CanonicalMediaKey = "canonical:unrelated:" + i,
+                Role = "Actor",
+                RoleCategory = "Actor",
+                RoleName = "Unrelated Role"
+            });
+
+        var engine = new ResolutionEngine();
+        var clock = Stopwatch.StartNew();
+        engine.Resolve(input, new ResolutionSettings());
+        clock.Stop();
+        Equal(peoplePerProvider * peoplePerProvider, engine.Diagnostics.BlockedCrossProviderPairs);
+        True(clock.Elapsed < TimeSpan.FromSeconds(10));
     }
 
     private static ResolutionInput BaseInput(params ProviderPerson[] people) => new ResolutionInput { ProviderPeople = people.ToList() };

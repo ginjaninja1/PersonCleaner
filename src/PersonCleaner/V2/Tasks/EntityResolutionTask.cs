@@ -13,6 +13,7 @@ using PersonCleaner.V2.Providers;
 using PersonCleaner.V2.Storage;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
@@ -87,9 +88,25 @@ namespace PersonCleaner.V2.Tasks
                     var inactiveCorrections = resolutionInput.CorrectionApplications.Count(x => !x.Triggered);
                     if (resolutionInput.CorrectionApplications.Count > 0)
                         logger.Info("PersonCleaner run {0} correction overlay: active={1}, triggered={2}, not-triggered={3}.", runId, resolutionInput.CorrectionApplications.Count, resolutionInput.CorrectionApplications.Count(x => x.Triggered), inactiveCorrections);
-                    logger.Info("PersonCleaner run {0} offline resolution starting: {1} flattened provider people (TMDB={2}, TVDB={3}), {4} local people, {5} local credits, {6} media and {7} operator bridge(s). No provider requests occur in this phase.", runId, resolutionInput.ProviderPeople.Count, resolutionInput.ProviderPeople.Count(x => x.Provider == ProviderNames.Tmdb), resolutionInput.ProviderPeople.Count(x => x.Provider == ProviderNames.Tvdb), resolutionInput.LocalPeople.Count, resolutionInput.LocalCredits.Count, resolutionInput.Media.Count, resolutionInput.Bridges.Count);
+                    logger.Info("PersonCleaner run {0} offline resolution starting: {1} flattened provider people (TMDB={2}, TVDB={3}), {4} provider credits, {5} local people, {6} local credits, {7} global Emby people, {8} media and {9} operator bridge(s). No provider requests occur in this phase.", runId, resolutionInput.ProviderPeople.Count, resolutionInput.ProviderPeople.Count(x => x.Provider == ProviderNames.Tmdb), resolutionInput.ProviderPeople.Count(x => x.Provider == ProviderNames.Tvdb), resolutionInput.ProviderCredits.Count, resolutionInput.LocalPeople.Count, resolutionInput.LocalCredits.Count, resolutionInput.GlobalLocalPeople.Count, resolutionInput.Media.Count, resolutionInput.Bridges.Count);
                     var engine = new ResolutionEngine();
-                    var decisions = engine.Resolve(resolutionInput, settings).ToList();
+                    var resolutionClock = Stopwatch.StartNew();
+                    var lastResolutionStage = string.Empty;
+                    var lastResolutionLog = DateTime.MinValue;
+                    Action<ResolutionProgress> reportResolution = state =>
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        progress.Report(85 + 13 * state.Fraction);
+                        var now = DateTime.UtcNow;
+                        var stageChanged = !string.Equals(lastResolutionStage, state.Stage, StringComparison.Ordinal);
+                        if (!stageChanged && (now - lastResolutionLog).TotalSeconds < 30) return;
+                        lastResolutionStage = state.Stage;
+                        lastResolutionLog = now;
+                        var message = state.Stage + ": " + state.Completed.ToString(CultureInfo.InvariantCulture) + "/" + state.Total.ToString(CultureInfo.InvariantCulture) + "; examined pairs=" + state.ExaminedPairs.ToString(CultureInfo.InvariantCulture) + ", admitted candidates=" + state.AdmittedCandidates.ToString(CultureInfo.InvariantCulture) + ", elapsed=" + resolutionClock.Elapsed.ToString(@"hh\:mm\:ss", CultureInfo.InvariantCulture);
+                        repository.UpdateRun(runId, "resolution", message);
+                        logger.Info("PersonCleaner run {0} resolution progress: {1}", runId, message);
+                    };
+                    var decisions = engine.Resolve(resolutionInput, settings, reportResolution, cancellationToken).ToList();
                     var diagnostic = engine.Diagnostics;
                     logger.Info("PersonCleaner run {0} candidate gate: examined {1} cross-provider blocked pair(s), admitted {2} ({3} hard external-ID, {4} shared-title plus compatible-name/alias), operator-rejected={5}; evidence model v2 produced automatic={6}, human-review={7}, below-review={8}, constraint-blocked={9}, graph-components={10}.", runId, diagnostic.BlockedCrossProviderPairs, diagnostic.AdmittedCandidates, diagnostic.HardIdentityCandidates, diagnostic.NameCompatibleCandidates, diagnostic.RejectedByOperator, diagnostic.AutomaticCandidates, diagnostic.ReviewCandidates, diagnostic.BelowReviewCandidates, diagnostic.ConstraintBlockedCandidates, diagnostic.GraphComponents);
                     logger.Info("PersonCleaner run {0} offline resolution calculated {1} decision summaries ({2}); persisting pre-rendered decisions, evidence and impacted media.", runId, decisions.Count, DecisionBreakdown(decisions));

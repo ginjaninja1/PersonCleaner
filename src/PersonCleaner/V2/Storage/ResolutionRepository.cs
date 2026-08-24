@@ -69,10 +69,19 @@ namespace PersonCleaner.V2.Storage
         {
             lock (sync)
             {
-                Statement("INSERT INTO resolution_run(status,mode,phase,started_utc,updated_utc,message) VALUES('running',@mode,'snapshot',@now,@now,'Selecting bounded media sample')", s => { s.Bind("@mode", mode); s.Bind("@now", Now()); });
-                using (var s = db.PrepareStatement("SELECT last_insert_rowid()")) foreach (var row in s.Rows()) return row.GetInt64(0);
+                var runId = 0L;
+                db.RunInTransaction(x =>
+                {
+                    Statement(x, "INSERT INTO resolution_run(status,mode,phase,started_utc,updated_utc,message) VALUES('running',@mode,'snapshot',@now,@now,'Selecting bounded media sample')", s => { s.Bind("@mode", mode); s.Bind("@now", Now()); });
+                    using (var s = x.PrepareStatement("SELECT last_insert_rowid()")) foreach (var row in s.Rows()) runId = row.GetInt64(0);
+                    if (runId <= 0) throw new InvalidOperationException("Unable to create a PersonCleaner run.");
+                    // Keep the most recent completed evidence visible while its
+                    // replacement is running. Abandoned, failed and older runs
+                    // have no dashboard value and their run-scoped rows cascade.
+                    Statement(x, "DELETE FROM resolution_run WHERE run_id<>@run AND run_id<>coalesce((SELECT max(run_id) FROM resolution_run WHERE status='completed' AND run_id<>@run),-1)", s => s.Bind("@run", runId));
+                }, TransactionMode.Immediate);
+                return runId;
             }
-            throw new InvalidOperationException("Unable to create a PersonCleaner run.");
         }
 
         public void UpdateRun(long runId, string phase, string message)
@@ -89,7 +98,14 @@ namespace PersonCleaner.V2.Storage
 
         public void FinishRun(long runId, string status, string message, int decisions)
         {
-            lock (sync) Statement("UPDATE resolution_run SET status=@status,phase=@phase,message=@message,decisions=@decisions,finished_utc=@now,updated_utc=@now WHERE run_id=@run", s => { s.Bind("@status", status); s.Bind("@phase", status == "completed" ? "complete" : status); s.Bind("@message", message); s.Bind("@decisions", decisions); s.Bind("@now", Now()); s.Bind("@run", runId); });
+            lock (sync) db.RunInTransaction(x =>
+            {
+                Statement(x, "UPDATE resolution_run SET status=@status,phase=@phase,message=@message,decisions=@decisions,finished_utc=@now,updated_utc=@now WHERE run_id=@run", s => { s.Bind("@status", status); s.Bind("@phase", status == "completed" ? "complete" : status); s.Bind("@message", message); s.Bind("@decisions", decisions); s.Bind("@now", Now()); s.Bind("@run", runId); });
+                if (status == "completed")
+                    Statement(x, "DELETE FROM resolution_run WHERE run_id<>@run", s => s.Bind("@run", runId));
+                else
+                    Statement(x, "DELETE FROM resolution_run WHERE run_id=@run", s => s.Bind("@run", runId));
+            }, TransactionMode.Immediate);
         }
 
         public void ReplaceSnapshot(long runId, IReadOnlyCollection<MediaSeed> media, IReadOnlyCollection<LocalPerson> people, IReadOnlyCollection<LocalCredit> credits, IReadOnlyCollection<LocalPerson> globalPeople)
@@ -522,16 +538,16 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
             }
         }
 
-        public DashboardDecision[] Dashboard(int maximumRows, int mediaExamples)
+        public DashboardDecision[] Dashboard(int mediaExamples)
         {
             var result = new List<DashboardDecision>();
             lock (sync)
             {
                 var latest = 0L; using (var q = db.PrepareStatement("SELECT max(run_id) FROM resolution_run WHERE status='completed'")) foreach (var r in q.Rows()) if (!r.IsDBNull(0)) latest = r.GetInt64(0);
-                const string visible = "SELECT decision_id FROM (SELECT decision_id,status,confidence,impact_media_count,ROW_NUMBER() OVER(PARTITION BY status ORDER BY confidence ASC,impact_media_count DESC,decision_id) AS status_row FROM resolution_decision WHERE run_id=@run) WHERE status_row<=@summaryLimit";
+                const string visible = "SELECT decision_id FROM resolution_decision WHERE run_id=@run";
                 using (var s = db.PrepareStatement("WITH visible AS (" + visible + ") SELECT d.decision_id,d.status,d.action,d.display_name,d.anchor_emby_id,d.provider_keys,d.confidence,d.impact_media_count,d.headline,d.explanation,d.local_anchor_confidence FROM resolution_decision d JOIN visible v ON v.decision_id=d.decision_id WHERE d.run_id=@run ORDER BY CASE d.status WHEN 'SPLIT' THEN 0 WHEN 'REALIGNMENT' THEN 1 WHEN 'MERGE' THEN 2 WHEN 'CONFLATION' THEN 3 WHEN 'DRIFT' THEN 4 WHEN 'ORPHAN' THEN 5 WHEN 'MATCH_WITH_CONFLICT' THEN 6 ELSE 7 END,d.confidence ASC,d.impact_media_count DESC,d.decision_id"))
                 {
-                    s.Bind("@run", latest); s.Bind("@summaryLimit", Math.Max(1, maximumRows));
+                    s.Bind("@run", latest);
                     foreach (var r in s.Rows()) result.Add(new DashboardDecision { DecisionId = r.GetString(0), Status = r.GetString(1), Action = r.GetString(2), Person = r.GetString(3), EmbyAnchor = r.IsDBNull(4) ? "—" : r.GetInt64(4).ToString(CultureInfo.InvariantCulture), ProviderIdentities = r.GetString(5), Confidence = r.GetDouble(6).ToString("P0", CultureInfo.InvariantCulture), ImpactedTitles = r.GetInt(7), Decision = r.GetString(8), Why = r.GetString(9), LocalAnchorConfidence = r.GetDouble(10).ToString("P0", CultureInfo.InvariantCulture) });
                 }
                 var localPeople = new List<LocalPerson>();
@@ -553,14 +569,14 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
                 var byDecision = result.ToDictionary(x => x.DecisionId, StringComparer.Ordinal);
                 using (var s = db.PrepareStatement("WITH visible AS (" + visible + ") SELECT e.decision_id,e.sort_order,e.signal_type,e.verdict,e.narrative,e.metric_raw FROM resolution_evidence e JOIN visible v ON v.decision_id=e.decision_id WHERE e.run_id=@run ORDER BY e.decision_id,e.sort_order,e.signal_type"))
                 {
-                    s.Bind("@run", latest); s.Bind("@summaryLimit", Math.Max(1, maximumRows));
+                    s.Bind("@run", latest);
                     foreach (var r in s.Rows()) if (byDecision.TryGetValue(r.GetString(0), out var decision))
                         decision.Details = decision.Details.Concat(new[] { new DashboardDetail { DetailId = r.GetString(0) + ":e:" + r.GetInt(1).ToString(CultureInfo.InvariantCulture) + ":" + r.GetString(2), Section = "Evidence", Order = r.GetInt(1), Signal = r.GetString(2), Verdict = r.GetString(3), Explanation = r.GetString(4), RawMetric = r.GetString(5) } }).ToArray();
                 }
                 const string mediaSql = "WITH visible AS (" + visible + "), ranked AS (SELECT m.*,ROW_NUMBER() OVER(PARTITION BY m.decision_id ORDER BY m.media_type,m.display_name,m.emby_media_id) AS row_number FROM resolution_media m JOIN visible v ON v.decision_id=m.decision_id WHERE m.run_id=@run) SELECT r.decision_id,r.row_number,r.media_type,r.display_name,r.role,r.emby_media_id,c.tmdb_id,c.tvdb_id,c.imdb_id,t.slug FROM ranked r LEFT JOIN current_media c ON c.emby_id=r.emby_media_id LEFT JOIN provider_media t ON t.provider='tvdb' AND t.media_type=r.media_type AND t.provider_media_id=c.tvdb_id WHERE r.row_number<=@mediaLimit ORDER BY r.decision_id,r.row_number";
                 using (var s = db.PrepareStatement(mediaSql))
                 {
-                    s.Bind("@run", latest); s.Bind("@summaryLimit", Math.Max(1, maximumRows)); s.Bind("@mediaLimit", Math.Max(0, mediaExamples));
+                    s.Bind("@run", latest); s.Bind("@mediaLimit", Math.Max(0, mediaExamples));
                     foreach (var r in s.Rows()) if (byDecision.TryGetValue(r.GetString(0), out var decision))
                         decision.Details = decision.Details.Concat(new[] { new DashboardDetail { DetailId = r.GetString(0) + ":m:" + r.GetInt(1).ToString(CultureInfo.InvariantCulture), Section = "Impacted titles", Order = 10000 + r.GetInt(1), Signal = r.GetString(2), Verdict = r.GetString(4), Explanation = r.GetString(3), RawMetric = string.Empty, EmbyMediaId = r.GetInt64(5), MediaType = r.GetString(2), TmdbId = Null(r, 6), TvdbId = Null(r, 7), ImdbId = Null(r, 8), TvdbSlug = Null(r, 9) } }).ToArray();
                 }

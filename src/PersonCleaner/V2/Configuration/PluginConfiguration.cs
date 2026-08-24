@@ -33,6 +33,8 @@ namespace PersonCleaner.Configuration
         public double AutomaticMatchThreshold { get; set; } = 0.75;
         public double HumanReviewThreshold { get; set; } = 0.40;
 
+        // Retained only so existing configuration XML remains compatible.
+        // The evidence dialog now loads every decision from the latest run.
         public int MaximumDashboardRows { get; set; } = 100;
         public int MaximumMediaExamplesPerDecision { get; set; } = 25;
     }
