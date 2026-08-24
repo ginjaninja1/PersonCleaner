@@ -8,6 +8,8 @@ namespace PersonCleaner.Configuration
         public string ExecutionMode { get; set; } = "Sandbox";
         public int SandboxSampleSizePerMediaType { get; set; } = 50;
         public int SandboxSeed { get; set; } = 20260823;
+        public string SandboxIncludedMediaIds { get; set; } = string.Empty;
+        public string SandboxIncludedPersonIds { get; set; } = string.Empty;
 
         public string TvdbApiKey { get; set; } = string.Empty;
         public string TvdbSubscriberPin { get; set; } = string.Empty;

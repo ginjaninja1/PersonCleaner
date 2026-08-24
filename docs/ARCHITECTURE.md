@@ -14,7 +14,7 @@
 
 ```mermaid
 flowchart LR
-    E["Read-only Emby library"] --> S["Stable 50 movie + 50 series sandbox"]
+    E["Read-only Emby library"] --> S["Stable 50 movie + 50 series sandbox plus explicit IDs"]
     S --> MQ["Provider media queue"]
     MQ --> C{"Fresh raw cache?"}
     C -->|yes| F["Existing flattened media evidence"]
@@ -53,7 +53,7 @@ Important table groups:
 
 | Boundary | Tables | Purpose |
 |---|---|---|
-| Runs and cohort | `resolution_run`, `current_media`, `current_local_person`, `current_local_credit`, `current_provider_media` | Reproducible active snapshot and task telemetry |
+| Runs and cohort | `resolution_run`, `current_media`, `current_local_person`, `current_local_credit`, `current_provider_media`, `global_local_person` | Reproducible active snapshot and task telemetry, plus a non-scoring global binding safety index |
 | Acquisition | `work_queue`, `cache_manifest`, `provider_absence_cache`, `fetch_failure`, `acquisition_observation` | Queue purpose, positive/absence TTLs, operational failures and run-scoped `PRESENT`/`ABSENT`/`UNAVAILABLE` evidence |
 | Flattened provider index | `provider_media`, `provider_media_observation`, `media_external_id`, `provider_media_credit`, `provider_person`, `person_external_id`, `person_alias` | Compact queryable evidence, structured roles and acquisition scope; no UI JSON parsing |
 | Human truth | `manual_bridge`, `provider_correction`, `correction_application` | Confirmed/rejected identity relations, persistent provider-fact overlays and per-run trigger audit |
@@ -80,6 +80,8 @@ For `(provider, entity type, media type, provider ID)`:
 ### Person acquisition boundary
 
 Selected media remains the sole cohort boundary. Provider people discovered from its credits may be marked graph-eligible when their current ID or normalized same-title name connects them to a locally credited Emby person. The current TMDB/TVDB bindings of those same local people are also queued as validation probes.
+
+Explicit sandbox media IDs are unioned with the deterministic sample. Explicit Emby person IDs add only media directly credited to those people; no transitive traversal through co-credited people occurs. Independently, every live Emby person's TMDB/TVDB/IMDb bindings are copied into `global_local_person`. This table is a collision veto only and is never loaded into the local anchor index. If a proposed identity has an out-of-scope owner, the decision action becomes `INCOMPLETE_SCOPE`; the operator must expand the test scope explicitly or use Full mode.
 
 Both purposes fetch, cache and flatten the complete supported person envelope: primary name, aliases, birth date and recognized external IDs. A validation-only `PRESENT` record remains in the reusable provider index but is excluded from `ResolutionInput.ProviderPeople`; it cannot create a candidate, cluster or replacement merely because Emby currently carries that ID. If later media evidence or an operator correction marks the same key graph-eligible, the cached payload is reused without losing those facts.
 
@@ -164,6 +166,8 @@ Provider components are mapped to local Emby people through indexed current prov
 Cluster identity confidence is the weakest accepted pair edge needed by the component. Local-anchor confidence is stored separately: a direct current-ID binding is `1.0`; a media-mass-only binding is `mass / (mass + 1)`. Ordinary stable singleton bindings are omitted from provider-identity decisions because they contain no cross-provider identity inference.
 
 The result remains a proposal in plugin shadow storage until explicit operator approval. The commit path validates live preconditions, then applies only the provider-ID and sampled credit moves shown in the dialog. It does not delete people, media, or images.
+
+Before assigning a provider person ID, commit preflight re-reads all live Emby people and rejects an owner outside the evaluated scope. This repeats the calculation-time global-binding veto without turning global people into resolution evidence.
 
 ## UI contract
 

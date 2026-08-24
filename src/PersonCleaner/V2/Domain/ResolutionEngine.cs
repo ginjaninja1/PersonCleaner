@@ -157,10 +157,68 @@ namespace PersonCleaner.V2.Domain
                     decisions.Add(BuildOrphanDecision(local, input, settings));
             }
 
-            return decisions.GroupBy(x => x.DecisionId, StringComparer.Ordinal).Select(x => x.First())
+            var result = decisions.GroupBy(x => x.DecisionId, StringComparer.Ordinal).Select(x => x.First()).ToList();
+            ApplyGlobalScopeGuards(result, input);
+            return result
                 .OrderBy(x => StatusOrder(x.Status)).ThenBy(x => x.Confidence).ThenByDescending(x => x.ImpactedMediaCount)
                 .ThenBy(x => x.DisplayName, StringComparer.OrdinalIgnoreCase).ToList();
         }
+
+        private static void ApplyGlobalScopeGuards(IEnumerable<ResolutionDecision> decisions, ResolutionInput input)
+        {
+            if (input.GlobalLocalPeople == null || input.GlobalLocalPeople.Count == 0) return;
+            var inScope = new HashSet<long>(input.LocalPeople.Select(x => x.EmbyId));
+            var providerPeople = input.ProviderPeople.GroupBy(x => x.Key, StringComparer.Ordinal).ToDictionary(x => x.Key, x => x.First(), StringComparer.Ordinal);
+            foreach (var decision in decisions.Where(x => x.AnchorEmbyPersonId.HasValue))
+            {
+                var proposed = ProposedIdentityBindings(decision.ProviderKeys, providerPeople);
+                if (proposed.Count == 0) continue;
+                var collisions = new List<string>();
+                foreach (var owner in input.GlobalLocalPeople.Where(x => x.EmbyId != decision.AnchorEmbyPersonId.Value && !inScope.Contains(x.EmbyId)))
+                foreach (var binding in proposed)
+                {
+                    var current = LocalBinding(owner, binding.Key);
+                    if (string.IsNullOrWhiteSpace(current) || !string.Equals(current, binding.Value, StringComparison.OrdinalIgnoreCase)) continue;
+                    collisions.Add(binding.Key + ":" + binding.Value + " on Emby person " + owner.EmbyId.ToString(CultureInfo.InvariantCulture) + (string.IsNullOrWhiteSpace(owner.Name) ? string.Empty : " (" + owner.Name + ")"));
+                }
+                collisions = collisions.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+                if (collisions.Count == 0) continue;
+
+                decision.Action = ResolutionActions.IncompleteScope;
+                decision.Headline = "The proposed identity is already held by an Emby person outside the evaluated scope.";
+                decision.Explanation = "No Emby change is offered. Add the named person or relevant media IDs to the explicit sandbox scope and rerun, or use Full mode. PersonCleaner does not expand the cohort automatically.";
+                decision.Evidence.Add(new EvidenceLine
+                {
+                    SortOrder = 0,
+                    SignalType = "GLOBAL_BINDING_OWNER",
+                    Verdict = "withheld",
+                    Narrative = "Global Emby provider-binding safety check found " + string.Join("; ", collisions) + ".",
+                    Metric = "owners=" + collisions.Count.ToString(CultureInfo.InvariantCulture)
+                });
+            }
+        }
+
+        private static Dictionary<string, string> ProposedIdentityBindings(string providerKeys, IReadOnlyDictionary<string, ProviderPerson> people)
+        {
+            var candidates = new List<KeyValuePair<string, string>>();
+            foreach (var token in (providerKeys ?? string.Empty).Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var separator = token.IndexOf(':');
+                if (separator <= 0 || separator == token.Length - 1) continue;
+                var provider = token.Substring(0, separator).Trim().ToLowerInvariant();
+                var id = token.Substring(separator + 1).Trim();
+                if (provider == ProviderNames.Tmdb || provider == ProviderNames.Tvdb) candidates.Add(new KeyValuePair<string, string>(provider, id));
+                if (!people.TryGetValue(provider + ":" + id, out var person)) continue;
+                foreach (var external in person.ExternalIds)
+                    if (external.Key == ProviderNames.Tmdb || external.Key == ProviderNames.Tvdb || external.Key == ProviderNames.Imdb)
+                        candidates.Add(new KeyValuePair<string, string>(external.Key, external.Value));
+            }
+            return candidates.Where(x => !string.IsNullOrWhiteSpace(x.Value)).GroupBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
+                .Where(x => x.Select(y => y.Value).Distinct(StringComparer.OrdinalIgnoreCase).Count() == 1)
+                .ToDictionary(x => x.Key.ToLowerInvariant(), x => x.First().Value, StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static string LocalBinding(LocalPerson person, string provider) => provider == ProviderNames.Tmdb ? person.TmdbId : provider == ProviderNames.Tvdb ? person.TvdbId : provider == ProviderNames.Imdb ? person.ImdbId : null;
 
         public static ScoreBreakdown Score(ProviderPerson left, ProviderPerson right, ResolutionSettings settings)
         {

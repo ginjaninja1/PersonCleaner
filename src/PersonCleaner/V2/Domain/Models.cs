@@ -120,6 +120,7 @@ namespace PersonCleaner.V2.Domain
         public List<ProviderPerson> ProviderPeople { get; set; } = new List<ProviderPerson>();
         public List<ObservedProviderCredit> ProviderCredits { get; set; } = new List<ObservedProviderCredit>();
         public List<LocalPerson> LocalPeople { get; set; } = new List<LocalPerson>();
+        public List<LocalPerson> GlobalLocalPeople { get; set; } = new List<LocalPerson>();
         public List<LocalCredit> LocalCredits { get; set; } = new List<LocalCredit>();
         public List<MediaSeed> Media { get; set; } = new List<MediaSeed>();
         public List<ManualBridge> Bridges { get; set; } = new List<ManualBridge>();

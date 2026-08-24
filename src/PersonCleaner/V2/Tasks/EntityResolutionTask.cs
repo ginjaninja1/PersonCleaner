@@ -50,12 +50,12 @@ namespace PersonCleaner.V2.Tasks
                 var runId = repository.BeginRun(mode);
                 try
                 {
-                    logger.Info("PersonCleaner run {0} starting: mode={1}; sample target={2} movie(s) + {2} series; cache TTL={3} day(s); failure retry={4} minute(s); TMDB configured={5}, workers={6}; TVDB configured={7}, workers={8}.", runId, mode, configuration.SandboxSampleSizePerMediaType, configuration.CacheTtlDays, configuration.FailureRetryMinutes, !string.IsNullOrWhiteSpace(configuration.TmdbApiKey), configuration.TmdbMaximumConcurrentRequests, !string.IsNullOrWhiteSpace(configuration.TvdbApiKey), configuration.TvdbMaximumConcurrentRequests);
+                    logger.Info("PersonCleaner run {0} starting: mode={1}; sample target={2} movie(s) + {2} series; explicit media IDs={3}; explicit person IDs={4}; cache TTL={5} day(s); failure retry={6} minute(s); TMDB configured={7}, workers={8}; TVDB configured={9}, workers={10}.", runId, mode, configuration.SandboxSampleSizePerMediaType, ParseEmbyIds(configuration.SandboxIncludedMediaIds).Count, ParseEmbyIds(configuration.SandboxIncludedPersonIds).Count, configuration.CacheTtlDays, configuration.FailureRetryMinutes, !string.IsNullOrWhiteSpace(configuration.TmdbApiKey), configuration.TmdbMaximumConcurrentRequests, !string.IsNullOrWhiteSpace(configuration.TvdbApiKey), configuration.TvdbMaximumConcurrentRequests);
                     logger.Info("PersonCleaner run {0} workspace: database={1}; raw payload cache={2}.", runId, repository.DatabasePath, repository.PayloadPath);
                     progress.Report(1);
-                    var snapshot = CaptureSnapshot(mode, configuration.SandboxSampleSizePerMediaType, configuration.SandboxSeed, cancellationToken);
-                    repository.ReplaceSnapshot(runId, snapshot.Media, snapshot.People, snapshot.Credits);
-                    logger.Info("PersonCleaner run {0} snapshot: {1} provider-addressable movie(s) and {2} series were eligible; selected {3} movie(s), {4} series, {5} local people and {6} local credit relationships. Live Emby remains read-only.", runId, snapshot.EligibleMovies, snapshot.EligibleSeries, snapshot.Media.Count(x => x.MediaType == MediaTypes.Movie), snapshot.Media.Count(x => x.MediaType == MediaTypes.Series), snapshot.People.Count, snapshot.Credits.Count);
+                    var snapshot = CaptureSnapshot(mode, configuration.SandboxSampleSizePerMediaType, configuration.SandboxSeed, configuration.SandboxIncludedMediaIds, configuration.SandboxIncludedPersonIds, cancellationToken);
+                    repository.ReplaceSnapshot(runId, snapshot.Media, snapshot.People, snapshot.Credits, snapshot.GlobalPeople);
+                    logger.Info("PersonCleaner run {0} snapshot: {1} provider-addressable movie(s) and {2} series were eligible; selected {3} movie(s), {4} series, including {5} explicit title(s) ({6} requested directly, {7} found from requested people); captured {8} in-scope local people, {9} local credit relationships and {10} global Emby person binding rows. Live Emby remains read-only.", runId, snapshot.EligibleMovies, snapshot.EligibleSeries, snapshot.Media.Count(x => x.MediaType == MediaTypes.Movie), snapshot.Media.Count(x => x.MediaType == MediaTypes.Series), snapshot.ExplicitMediaCount, snapshot.DirectExplicitMediaCount, snapshot.PersonExplicitMediaCount, snapshot.People.Count, snapshot.Credits.Count, snapshot.GlobalPeople.Count);
                     progress.Report(10);
 
                     var api = new ProviderApiClient(http, json, logger);
@@ -197,14 +197,41 @@ namespace PersonCleaner.V2.Tasks
             }
         }
 
-        private SnapshotData CaptureSnapshot(string mode, int sampleSize, int seed, CancellationToken cancellationToken)
+        private SnapshotData CaptureSnapshot(string mode, int sampleSize, int seed, string includedMediaIds, string includedPersonIds, CancellationToken cancellationToken)
         {
-            var items = library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { typeof(Movie).Name, typeof(Series).Name }, Recursive = true }, cancellationToken)
+            var allItems = library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { typeof(Movie).Name, typeof(Series).Name }, Recursive = true }, cancellationToken)
                 .Where(x => x is Movie || x is Series).Select(ToMedia).Where(x => !string.IsNullOrWhiteSpace(x.TmdbId) || !string.IsNullOrWhiteSpace(x.TvdbId)).ToList();
-            var eligibleMovies = items.Count(x => x.MediaType == MediaTypes.Movie);
-            var eligibleSeries = items.Count(x => x.MediaType == MediaTypes.Series);
-            if (mode == "Sandbox")
-                items = items.GroupBy(x => x.MediaType).SelectMany(x => x.OrderBy(y => SampleKey(y.EmbyId, seed)).ThenBy(y => y.EmbyId).Take(Math.Max(1, sampleSize))).ToList();
+            var eligibleMovies = allItems.Count(x => x.MediaType == MediaTypes.Movie);
+            var eligibleSeries = allItems.Count(x => x.MediaType == MediaTypes.Series);
+            var globalPeople = library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { typeof(Person).Name }, Recursive = true }, cancellationToken)
+                .OfType<Person>().Select(ToLocalPerson).ToList();
+            var sandbox = string.Equals(mode, "Sandbox", StringComparison.OrdinalIgnoreCase);
+            var requestedMediaIds = sandbox ? ParseEmbyIds(includedMediaIds) : new HashSet<long>();
+            var requestedPersonIds = sandbox ? ParseEmbyIds(includedPersonIds) : new HashSet<long>();
+            var eligibleById = allItems.ToDictionary(x => x.EmbyId);
+            var directExplicit = requestedMediaIds.Where(eligibleById.ContainsKey).Select(x => eligibleById[x]).ToList();
+            var personExplicit = new List<MediaSeed>();
+            if (requestedPersonIds.Count > 0)
+            {
+                personExplicit = library.GetItemList(new InternalItemsQuery
+                {
+                    IncludeItemTypes = new[] { typeof(Movie).Name, typeof(Series).Name },
+                    Recursive = true,
+                    PersonIds = requestedPersonIds.ToArray()
+                }, cancellationToken).Where(x => x is Movie || x is Series).Select(ToMedia)
+                    .Where(x => (!string.IsNullOrWhiteSpace(x.TmdbId) || !string.IsNullOrWhiteSpace(x.TvdbId)) && eligibleById.ContainsKey(x.EmbyId))
+                    .GroupBy(x => x.EmbyId).Select(x => x.First()).ToList();
+            }
+            var explicitMedia = directExplicit.Concat(personExplicit).GroupBy(x => x.EmbyId).Select(x => x.First()).ToList();
+            var items = allItems;
+            if (sandbox)
+                items = allItems.GroupBy(x => x.MediaType).SelectMany(x => x.OrderBy(y => SampleKey(y.EmbyId, seed)).ThenBy(y => y.EmbyId).Take(Math.Max(1, sampleSize)))
+                    .Concat(explicitMedia).GroupBy(x => x.EmbyId).Select(x => x.First()).ToList();
+
+            var missingMedia = requestedMediaIds.Count - directExplicit.Count;
+            var missingPeople = requestedPersonIds.Count(x => globalPeople.All(y => y.EmbyId != x));
+            if (missingMedia > 0) logger.Warn("PersonCleaner explicit sandbox scope ignored {0} Emby media ID(s) that were missing, unsupported or lacked a TMDB/TVDB media ID.", missingMedia);
+            if (missingPeople > 0) logger.Warn("PersonCleaner explicit sandbox scope ignored {0} Emby person ID(s) that no longer exist.", missingPeople);
 
             var credits = new List<LocalCredit>();
             var people = new Dictionary<long, LocalPerson>();
@@ -220,7 +247,13 @@ namespace PersonCleaner.V2.Tasks
                         people[row.Id] = new LocalPerson { EmbyId = person.InternalId, Name = person.Name, TmdbId = person.GetProviderId(MetadataProviders.Tmdb), TvdbId = person.GetProviderId(MetadataProviders.Tvdb), ImdbId = person.GetProviderId(MetadataProviders.Imdb) };
                 }
             }
-            return new SnapshotData { Media = items, People = people.Values.ToList(), Credits = credits, EligibleMovies = eligibleMovies, EligibleSeries = eligibleSeries };
+            return new SnapshotData
+            {
+                Media = items, People = people.Values.ToList(), Credits = credits, GlobalPeople = globalPeople,
+                EligibleMovies = eligibleMovies, EligibleSeries = eligibleSeries,
+                DirectExplicitMediaCount = directExplicit.Count, PersonExplicitMediaCount = personExplicit.Count,
+                ExplicitMediaCount = explicitMedia.Count
+            };
         }
 
         private static MediaSeed ToMedia(BaseItem item) => new MediaSeed
@@ -233,6 +266,20 @@ namespace PersonCleaner.V2.Tasks
             TvdbId = item.GetProviderId(MetadataProviders.Tvdb),
             ImdbId = item.GetProviderId(MetadataProviders.Imdb)
         };
+
+        private static LocalPerson ToLocalPerson(Person person) => new LocalPerson
+        {
+            EmbyId = person.InternalId,
+            Name = person.Name,
+            TmdbId = person.GetProviderId(MetadataProviders.Tmdb),
+            TvdbId = person.GetProviderId(MetadataProviders.Tvdb),
+            ImdbId = person.GetProviderId(MetadataProviders.Imdb)
+        };
+
+        private static HashSet<long> ParseEmbyIds(string value) => new HashSet<long>((value ?? string.Empty)
+            .Split(new[] { ',', ';', ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(x => long.TryParse(x, NumberStyles.None, CultureInfo.InvariantCulture, out var id) && id > 0 ? id : 0)
+            .Where(x => x > 0));
 
         private static ulong SampleKey(long value, int seed)
         {
@@ -250,7 +297,18 @@ namespace PersonCleaner.V2.Tasks
         private static string WorkBreakdown(IEnumerable<QueueItem> work) => string.Join(", ", work.GroupBy(x => x.Provider.ToUpperInvariant() + (x.EntityType == "media" ? " " + x.MediaType : string.Empty)).OrderBy(x => x.Key).Select(x => x.Key + "=" + x.Count()));
         private static string DecisionBreakdown(IEnumerable<ResolutionDecision> decisions) => string.Join(", ", decisions.GroupBy(x => x.Status).OrderBy(x => x.Key).Select(x => x.Key + "=" + x.Count()));
 
-        private sealed class SnapshotData { public List<MediaSeed> Media { get; set; } public List<LocalPerson> People { get; set; } public List<LocalCredit> Credits { get; set; } public int EligibleMovies { get; set; } public int EligibleSeries { get; set; } }
+        private sealed class SnapshotData
+        {
+            public List<MediaSeed> Media { get; set; }
+            public List<LocalPerson> People { get; set; }
+            public List<LocalPerson> GlobalPeople { get; set; }
+            public List<LocalCredit> Credits { get; set; }
+            public int EligibleMovies { get; set; }
+            public int EligibleSeries { get; set; }
+            public int DirectExplicitMediaCount { get; set; }
+            public int PersonExplicitMediaCount { get; set; }
+            public int ExplicitMediaCount { get; set; }
+        }
 
         private sealed class PhaseMetrics
         {

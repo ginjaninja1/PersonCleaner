@@ -22,9 +22,11 @@ Sandbox mode is the default. It chooses a stable deterministic cohort of:
 
 Every available TMDB and TVDB media ID on those same titles is queued. This avoids provider-biased samples and makes repeated runs directly comparable. Change the sample seed to evaluate another cohort. Full mode is available explicitly from configuration.
 
+Sandbox configuration can also name Emby movie/series IDs and Emby person IDs that must be included. Explicit titles are added to the deterministic sample without reducing its 50+50 allocation. An explicit person adds only provider-addressable movies/series directly associated with that person in Emby; the cohort does not expand transitively through other people on those titles. This keeps edge-case tests deliberate and prevents scope snowballing.
+
 ## Scheduled pipeline
 
-1. Select the bounded media cohort and snapshot only its local people/credit relationships.
+1. Select the bounded media cohort, add any explicit test titles/person-title relationships, and snapshot only that cohort's local people/credit relationships. Separately snapshot every Emby person's current TMDB/TVDB/IMDb bindings as a safety index; those global rows never participate in anchor scoring.
 2. Fetch or reuse cached provider media records and flatten their credits and media crosswalk IDs.
 3. Queue the unique people discovered by those credits for graph enrichment, and separately queue the current TMDB/TVDB IDs of the same in-scope local people for binding validation.
 4. Fetch or reuse cached provider person records and flatten their names, aliases, birth dates and all recognized external IDs. Validation-only records are retained for future use but cannot seed the current identity graph.
@@ -46,6 +48,8 @@ TMDB and TVDB hydration run as independent parallel pipelines. Each provider use
 - `SPLIT`: one Emby person points to disconnected provider components.
 - `ORPHAN`: no media-derived provider node supports a locally credited Emby person. A provider-confirmed absent current binding may produce `REVIEW_REMOVE_STALE_PROVIDER_ID`; a present but unsupported binding remains ordinary human review, and an unavailable required acquisition withholds the decision.
 
+Any otherwise actionable decision becomes `INCOMPLETE_SCOPE` when its proposed TMDB/TVDB/IMDb identity is already held by an Emby person outside the evaluated cohort. No change is offered and the cohort is never expanded automatically; the evidence names the existing owner so the operator can add that person or relevant media explicitly and rerun. Commit preflight repeats the same ownership check against live Emby.
+
 Missing provider fields and unmatched filmography are neutral, not contradictions. A smaller provider filmography may be wholly contained in a larger one. Repeated shared credits accumulate support, compatible role/category evidence strengthens it, and common names are discounted. Different known birthdays or external IDs reduce evidence strength but do not by themselves force provider profiles apart. An explicit provider-native person cross-reference is candidate evidence, but cannot establish identity automatically without independent stable-ID support or compatible role-aware shared-media attribution. Compatible normalized naming plus role-aware shared media can dominate correlated metadata errors only when no alternative same-envelope provider person has a compatible attribution on any observed title.
 
 Identity evidence strength describes the provider cluster and is a deterministic decision score, not a calibrated probability. Local-anchor confidence separately describes how securely that cluster maps back to an Emby person. A stable one-provider/one-Emby binding is therefore not emitted as a misleading `100% MATCH`.
@@ -54,7 +58,7 @@ The full-screen evidence dialog is sorted by risk and uncertainty and returns up
 
 The Provider corrections tab stores a persistent operator overlay without editing raw payloads or flattened source facts. Separate add dialogs cover media-person attribution, credit role, person/media cross-references, person name or birthday, local provider bindings and explicit identity relationships. A blank replacement marks the selected fact unusable; a supplied replacement substitutes it only for effective analysis. Corrections can be edited, disabled, re-enabled or removed. Every active rule records whether it triggered in each calculation run, and triggered rules write an informational log line.
 
-Schema migrations are offline operations. Stop Emby and back up `entity-resolution.db` before applying every migration after the database's current `schema_info.version`, in numeric order. Existing schema 5 workspaces require `006_acquisition_boundary.sql`; earlier schemas require that migration after their existing sequence. Use SQLite's fail-fast mode, for example `sqlite3.exe -bail entity-resolution.db ".read C:/path/to/PersonCleaner/migrations/006_acquisition_boundary.sql"`. The plugin validates `schema_info` before touching the existing structure and refuses to start resolution against an older or incomplete schema. Run the evidence task once after migration before recalculating old decisions so the new run-scoped acquisition observations exist.
+Schema migrations are offline operations. Stop Emby and back up `entity-resolution.db` before applying every migration after the database's current `schema_info.version`, in numeric order. Existing schema 6 workspaces require `007_global_person_scope.sql`; schema 5 workspaces require `006_acquisition_boundary.sql` followed by `007_global_person_scope.sql`. Use SQLite's fail-fast mode, for example `sqlite3.exe -bail entity-resolution.db ".read C:/path/to/PersonCleaner/migrations/007_global_person_scope.sql"`. The plugin validates `schema_info` before touching the existing structure and refuses to start resolution against an older or incomplete schema. Run the evidence task once after migration so the global binding safety index and run-scoped acquisition observations are populated.
 
 ## Build and test
 

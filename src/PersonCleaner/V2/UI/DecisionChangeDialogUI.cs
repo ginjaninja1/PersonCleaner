@@ -15,6 +15,7 @@ using PersonCleaner.V2.Storage;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace PersonCleaner.V2.UI
@@ -141,6 +142,10 @@ namespace PersonCleaner.V2.UI
 
         private void Preflight(DecisionChangePlan plan)
         {
+            var inScope = new HashSet<long>(plan.InScopePersonIds ?? new List<long>());
+            var globalPeople = plan.Changes.Any(x => x.Kind == EmbyChangeKinds.SetPersonProviderId)
+                ? library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { typeof(Person).Name }, Recursive = true }, CancellationToken.None).OfType<Person>().ToList()
+                : new List<Person>();
             foreach (var change in plan.Changes)
             {
                 if (change.Kind == EmbyChangeKinds.SetPersonProviderId || change.Kind == EmbyChangeKinds.RemovePersonProviderId)
@@ -149,6 +154,12 @@ namespace PersonCleaner.V2.UI
                     var current = ProviderId(person, change.Provider);
                     if (!string.Equals(current ?? string.Empty, change.CurrentValue ?? string.Empty, StringComparison.OrdinalIgnoreCase))
                         throw new InvalidOperationException("Emby person " + change.SourcePersonId + " now has a different " + change.Provider.ToUpperInvariant() + " ID; refresh the evidence before applying.");
+                    if (change.Kind == EmbyChangeKinds.SetPersonProviderId)
+                    {
+                        var outsideOwner = globalPeople.FirstOrDefault(x => x.InternalId != change.SourcePersonId && !inScope.Contains(x.InternalId) && string.Equals(ProviderId(x, change.Provider), change.ProposedValue, StringComparison.OrdinalIgnoreCase));
+                        if (outsideOwner != null)
+                            throw new InvalidOperationException(change.Provider.ToUpperInvariant() + " person ID " + change.ProposedValue + " is already held by out-of-scope Emby person " + outsideOwner.InternalId + (string.IsNullOrWhiteSpace(outsideOwner.Name) ? string.Empty : " (" + outsideOwner.Name + ")") + "; add that person or relevant media to the explicit sandbox scope and rebuild evidence.");
+                    }
                 }
                 else if (change.Kind == EmbyChangeKinds.MoveCredit)
                 {

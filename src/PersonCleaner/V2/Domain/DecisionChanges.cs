@@ -12,6 +12,11 @@ namespace PersonCleaner.V2.Domain
         public const string MoveCredit = "move-credit";
     }
 
+    public static class ResolutionActions
+    {
+        public const string IncompleteScope = "INCOMPLETE_SCOPE";
+    }
+
     public sealed class EmbyChangeProposal
     {
         public string ChangeId { get; set; }
@@ -32,6 +37,7 @@ namespace PersonCleaner.V2.Domain
     {
         public ResolutionDecision Decision { get; set; }
         public List<LocalPerson> LocalPeople { get; set; } = new List<LocalPerson>();
+        public List<LocalPerson> GlobalLocalPeople { get; set; } = new List<LocalPerson>();
         public List<LocalCredit> LocalCredits { get; set; } = new List<LocalCredit>();
         public List<PersonAcquisition> Acquisitions { get; set; } = new List<PersonAcquisition>();
         public List<ProviderPerson> ProposedProviderPeople { get; set; } = new List<ProviderPerson>();
@@ -42,6 +48,7 @@ namespace PersonCleaner.V2.Domain
         public string DecisionId { get; set; }
         public string DisplayName { get; set; }
         public string DecisionSummary { get; set; }
+        public List<long> InScopePersonIds { get; set; } = new List<long>();
         public List<EmbyChangeProposal> Changes { get; set; } = new List<EmbyChangeProposal>();
         public ProviderCorrection RecommendedCorrection { get; set; }
     }
@@ -52,9 +59,10 @@ namespace PersonCleaner.V2.Domain
         {
             if (context == null || context.Decision == null) throw new ArgumentException("The decision is unavailable.");
             var decision = context.Decision;
-            var plan = new DecisionChangePlan { DecisionId = decision.DecisionId, DisplayName = decision.DisplayName, DecisionSummary = decision.Headline };
+            var plan = new DecisionChangePlan { DecisionId = decision.DecisionId, DisplayName = decision.DisplayName, DecisionSummary = decision.Headline, InScopePersonIds = context.LocalPeople.Select(x => x.EmbyId).Distinct().ToList() };
             var keys = ProviderKeys(decision.ProviderKeys).ToList();
             var anchor = decision.AnchorEmbyPersonId.HasValue ? context.LocalPeople.FirstOrDefault(x => x.EmbyId == decision.AnchorEmbyPersonId.Value) : null;
+            if (decision.Action == ResolutionActions.IncompleteScope || HasOutOfScopeOwner(context, anchor, keys)) return plan;
 
             if (anchor != null && decision.Action == "REVIEW_REMOVE_STALE_PROVIDER_ID")
             {
@@ -181,6 +189,14 @@ namespace PersonCleaner.V2.Domain
         };
 
         private static bool IsAbsent(DecisionChangeContext context, string provider, string id) => context.Acquisitions.Any(x => x.Provider == provider && x.ProviderId == id && x.State == AcquisitionStates.Absent);
+        private static bool HasOutOfScopeOwner(DecisionChangeContext context, LocalPerson anchor, IEnumerable<ProviderKey> primaryKeys)
+        {
+            if (anchor == null || context.GlobalLocalPeople == null || context.GlobalLocalPeople.Count == 0) return false;
+            var inScope = new HashSet<long>(context.LocalPeople.Select(x => x.EmbyId));
+            var proposed = ProposedBindings(context, primaryKeys).ToList();
+            return context.GlobalLocalPeople.Where(x => x.EmbyId != anchor.EmbyId && !inScope.Contains(x.EmbyId))
+                .Any(owner => proposed.Any(x => string.Equals(Binding(owner, x.Provider), x.Id, StringComparison.OrdinalIgnoreCase)));
+        }
         private static bool AppliesProviderBindings(string action) => action == "CROSS_PROVIDER_IDENTITY" || action == "CROSS_PROVIDER_IDENTITY_WITH_METADATA_CONFLICT" || action == "AUTO_MERGE_SHADOW" || action == "AUTO_MERGE_SHADOW_WITH_METADATA_CONFLICT" || action == "RETAINED_BY_MASS_ID_DRIFT";
         private static string Binding(LocalPerson person, string provider) => provider == ProviderNames.Tmdb ? person.TmdbId : provider == ProviderNames.Tvdb ? person.TvdbId : provider == ProviderNames.Imdb ? person.ImdbId : null;
         private static IEnumerable<string> CurrentKeys(LocalPerson person)

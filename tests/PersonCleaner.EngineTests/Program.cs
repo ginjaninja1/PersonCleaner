@@ -28,6 +28,8 @@ internal static class Program
         Run("Gerald Sim corroborated identity outweighs a birthday conflict", GeraldSimBirthdayConflictRetainsIdentity);
         Run("Kyle Hebert role-aware media dominance outweighs correlated TVDB conflicts", KyleHebertMediaDominanceOutweighsTvdbConflicts);
         Run("local media mass survives provider id drift", MediaMassSurvivesIdDrift);
+        Run("out-of-scope global provider owner withholds drift action", OutOfScopeProviderOwnerWithholdsDrift);
+        Run("explicitly in-scope provider owner participates in merge", InScopeProviderOwnerParticipatesInMerge);
         Run("operator bridge joins disconnected provider records", OperatorBridgeJoinsRecords);
         Run("operator rejection keeps shared-media records separate", OperatorRejectionKeepsRecordsSeparate);
         Run("orphan without provider IDs has persistable provider text", OrphanWithoutIdsHasProviderText);
@@ -574,6 +576,47 @@ internal static class Program
         True(plan.Changes.Any(x => x.Provider == ProviderNames.Tmdb && x.CurrentValue == "3210679" && x.ProposedValue == "3844231"));
         True(plan.Changes.Any(x => x.Provider == ProviderNames.Imdb && x.CurrentValue == "nm0446845" && x.ProposedValue == "nm2841197"));
         True(plan.Changes.All(x => x.ManualReviewOnly));
+    }
+
+    private static void OutOfScopeProviderOwnerWithholdsDrift()
+    {
+        var provider = Person(ProviderNames.Tmdb, "3844231", "Samantha Kelly", ProviderNames.Imdb, "nm2841197", "tmdb:movie:284293");
+        var input = BaseInput(provider);
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 402910, Name = "Samantha Kelly", TmdbId = "3210679", ImdbId = "nm0446845" });
+        input.GlobalLocalPeople.AddRange(new[]
+        {
+            new LocalPerson { EmbyId = 402910, Name = "Samantha Kelly", TmdbId = "3210679", ImdbId = "nm0446845" },
+            new LocalPerson { EmbyId = 402058, Name = "Samantha Kelly", TmdbId = "3844231", ImdbId = "nm2841197" }
+        });
+        input.Media.Add(Media(284293, "Still Alice"));
+        input.LocalCredits.Add(Credit(402910, 284293));
+
+        var decision = new ResolutionEngine().Resolve(input, new ResolutionSettings()).Single(x => x.Status == "DRIFT");
+        Equal(ResolutionActions.IncompleteScope, decision.Action);
+        True(decision.Evidence.Any(x => x.SignalType == "GLOBAL_BINDING_OWNER" && x.Narrative.Contains("402058")));
+        var plan = DecisionChangePlanner.Build(new DecisionChangeContext { Decision = decision, LocalPeople = input.LocalPeople, GlobalLocalPeople = input.GlobalLocalPeople, ProposedProviderPeople = input.ProviderPeople });
+        Equal(0, plan.Changes.Count);
+        decision.Action = "HUMAN_REVIEW";
+        var defensivePlan = DecisionChangePlanner.Build(new DecisionChangeContext { Decision = decision, LocalPeople = input.LocalPeople, GlobalLocalPeople = input.GlobalLocalPeople, ProposedProviderPeople = input.ProviderPeople });
+        Equal(0, defensivePlan.Changes.Count);
+    }
+
+    private static void InScopeProviderOwnerParticipatesInMerge()
+    {
+        var provider = Person(ProviderNames.Tmdb, "3844231", "Samantha Kelly", ProviderNames.Imdb, "nm2841197", "tmdb:movie:284293", "tmdb:movie:157849");
+        var input = BaseInput(provider);
+        input.LocalPeople.AddRange(new[]
+        {
+            new LocalPerson { EmbyId = 402910, Name = "Samantha Kelly", TmdbId = "3210679", ImdbId = "nm0446845" },
+            new LocalPerson { EmbyId = 402058, Name = "Samantha Kelly", TmdbId = "3844231", ImdbId = "nm2841197" }
+        });
+        input.GlobalLocalPeople.AddRange(input.LocalPeople);
+        input.Media.AddRange(new[] { Media(284293, "Still Alice"), Media(157849, "Before I Go to Sleep") });
+        input.LocalCredits.AddRange(new[] { Credit(402910, 284293), Credit(402058, 157849) });
+
+        var decision = new ResolutionEngine().Resolve(input, new ResolutionSettings()).Single(x => x.Action == "AUTO_MERGE_SHADOW");
+        Equal(402058L, decision.AnchorEmbyPersonId.Value);
+        True(!decision.Evidence.Any(x => x.SignalType == "GLOBAL_BINDING_OWNER"));
     }
 
     private static void ChangePlannerExposesOrphanRemoval()
