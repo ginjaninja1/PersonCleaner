@@ -5,7 +5,7 @@
     <AssemblyName>PersonCleaner</AssemblyName>
     <RootNamespace>PersonCleaner</RootNamespace>
     <LangVersion>latest</LangVersion>
-	  <Version>0.1.8.0</Version>
+	  <Version>0.1.9.0</Version>
 	  <Nullable>annotations</Nullable>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>

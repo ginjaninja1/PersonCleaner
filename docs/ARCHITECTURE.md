@@ -23,9 +23,12 @@ flowchart LR
     H -->|no| F
     H -->|yes| P["Parse once and replace flattened rows"]
     P --> F
-    F --> PQ["Unique provider-person queue"]
-    PQ --> PE["Cached person enrichment"]
-    PE --> G["Offline graph + scoring"]
+    F --> PQ["Media-discovered graph people"]
+    F --> VQ["Current in-scope ID validation"]
+    PQ --> PE["Full cached person enrichment"]
+    VQ --> PE
+    PE --> B{"Media-derived graph boundary"}
+    B --> G["Offline graph + scoring"]
     G --> D["Pre-rendered decisions and evidence"]
     D --> UI["Indexed query-only dashboard"]
 ```
@@ -51,7 +54,7 @@ Important table groups:
 | Boundary | Tables | Purpose |
 |---|---|---|
 | Runs and cohort | `resolution_run`, `current_media`, `current_local_person`, `current_local_credit`, `current_provider_media` | Reproducible active snapshot and task telemetry |
-| Acquisition | `work_queue`, `cache_manifest`, `fetch_failure` | Queue state, payload hashes/TTL, negative caching |
+| Acquisition | `work_queue`, `cache_manifest`, `provider_absence_cache`, `fetch_failure`, `acquisition_observation` | Queue purpose, positive/absence TTLs, operational failures and run-scoped `PRESENT`/`ABSENT`/`UNAVAILABLE` evidence |
 | Flattened provider index | `provider_media`, `provider_media_observation`, `media_external_id`, `provider_media_credit`, `provider_person`, `person_external_id`, `person_alias` | Compact queryable evidence, structured roles and acquisition scope; no UI JSON parsing |
 | Human truth | `manual_bridge`, `provider_correction`, `correction_application` | Confirmed/rejected identity relations, persistent provider-fact overlays and per-run trigger audit |
 | Pair and cluster audit | `resolution_pair`, `resolution_pair_feature`, `resolution_cluster`, `resolution_cluster_member` | Versioned pair features, disposition, component membership and separate identity/anchor confidence |
@@ -63,14 +66,26 @@ The schema is created idempotently by `ResolutionRepository`. It uses WAL, norma
 
 For `(provider, entity type, media type, provider ID)`:
 
-1. A manifest younger than the configured TTL plus an existing payload file is a complete cache hit when its `materializer_version` is current: no network and no parsing.
+1. A manifest younger than the configured TTL plus an existing payload file is a complete cache hit when its `materializer_version` is current: no network and no parsing. Fresh cache answers remain usable when credentials or the network are unavailable.
 2. An older materializer version parses the raw cache once, transactionally replaces the flattened entity rows, and advances the manifest version without a provider request. Parser changes therefore repair stored interpretations even when the provider payload hash is unchanged.
 3. An expired or missing manifest causes a provider fetch with bounded exponential retry and provider-specific request spacing.
 4. SHA-256 is calculated over the exact response text.
 5. An unchanged hash at the current materializer version refreshes `last_fetched_utc` and skips parsing/flattening.
 6. A changed hash is parsed and replaces only that entity's flattened rows.
-7. A failure is recorded independently. Subsequent scheduled runs defer the entity until the configured retry window expires; an otherwise-fresh payload always wins over the negative cache.
-8. Queue reconstruction from existing flattened media credits makes interrupted runs resumable even when the next run is all cache hits.
+7. An authoritative HTTP `404/410` is cached separately from failures and yields `ABSENT` until its TTL expires. If positive and absence caches overlap after a TTL configuration change, the newer authoritative observation wins.
+8. A network, rate-limit, authentication, invalid-payload or other unusable result yields `UNAVAILABLE`; technical details stay in the failure cache and logs.
+9. Every queued entity writes one run-scoped resolution outcome: `PRESENT`, `ABSENT`, or `UNAVAILABLE`. A fresh positive or absence cache is a usable provider answer for the run.
+10. Queue reconstruction from existing flattened media credits makes interrupted runs resumable even when the next run is all cache hits.
+
+### Person acquisition boundary
+
+Selected media remains the sole cohort boundary. Provider people discovered from its credits may be marked graph-eligible when their current ID or normalized same-title name connects them to a locally credited Emby person. The current TMDB/TVDB bindings of those same local people are also queued as validation probes.
+
+Both purposes fetch, cache and flatten the complete supported person envelope: primary name, aliases, birth date and recognized external IDs. A validation-only `PRESENT` record remains in the reusable provider index but is excluded from `ResolutionInput.ProviderPeople`; it cannot create a candidate, cluster or replacement merely because Emby currently carries that ID. If later media evidence or an operator correction marks the same key graph-eligible, the cached payload is reused without losing those facts.
+
+Current-binding acquisition gates decisions that depend on the binding. `ABSENT` can justify review of removing that exact stale ID, `PRESENT` prevents absence from being inferred merely from missing credits, and `UNAVAILABLE` (including a missing run observation) withholds orphan or drift conclusions that would act against the binding.
+
+HTTP `401/403` is also treated operationally as a provider-wide configuration failure: at most the already in-flight bounded workers can observe it, remaining work for that provider is not requested, and the run fails before resolution publishes new decisions. The last completed dashboard remains intact instead of repeating an authentication diagnostic on every person row.
 
 External IDs are source-typed before storage. Wikipedia page slugs are not Wikidata identities; person IMDb IDs must match `nm<digits>`, media IMDb IDs must match `tt<digits>`, Wikidata IDs must match `Q<digits>`, and TMDB/TVDB IDs must be numeric. Unknown or malformed remote identifiers are ignored rather than coerced into a stable namespace.
 

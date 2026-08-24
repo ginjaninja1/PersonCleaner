@@ -9,6 +9,7 @@ namespace PersonCleaner.V2.Storage
         public string ProviderId { get; set; }
         public string MediaType { get; set; }
         public int Priority { get; set; }
+        public bool GraphEligible { get; set; }
     }
 
     internal sealed class CacheEntry
@@ -23,14 +24,27 @@ namespace PersonCleaner.V2.Storage
         public int MaterializerVersion { get; set; }
     }
 
+    internal sealed class AbsenceCacheEntry
+    {
+        public string Provider { get; set; }
+        public string EntityType { get; set; }
+        public string ProviderId { get; set; }
+        public string MediaType { get; set; }
+        public long ConfirmedUnix { get; set; }
+        public int StatusCode { get; set; }
+    }
+
     internal sealed class PersonSeedSummary
     {
         public int DiscoveredTmdb { get; set; }
         public int DiscoveredTvdb { get; set; }
         public int SelectedTmdb { get; set; }
         public int SelectedTvdb { get; set; }
+        public int ValidationTmdb { get; set; }
+        public int ValidationTvdb { get; set; }
         public int DiscoveredTotal => DiscoveredTmdb + DiscoveredTvdb;
         public int SelectedTotal => SelectedTmdb + SelectedTvdb;
+        public int ValidationTotal => ValidationTmdb + ValidationTvdb;
     }
 
     public sealed class CorrectionReviewRow

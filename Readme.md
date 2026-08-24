@@ -9,7 +9,7 @@ The old whole-library implementation is intentionally excluded from compilation.
 - Emby is queried through `ILibraryManager`; this version never writes Emby items, people, provider IDs, images, or relationships.
 - Raw provider responses, flattened indexes, persistent provider corrections, manual bridges, run history, and decisions live under Emby's data directory in `personcleaner-v2/`.
 - API keys remain in Emby's normal plugin configuration. They are not written to the evidence database, raw cache, or logs.
-- An `ORPHAN` result is a review warning, never a deletion instruction.
+- An `ORPHAN` result never recommends deleting an Emby person. It may recommend review of removing only a named current provider binding after that provider authoritatively returns `404/410`.
 - Automatic matches update only the plugin's shadow decisions.
 
 ## Development sandbox
@@ -25,14 +25,14 @@ Every available TMDB and TVDB media ID on those same titles is queued. This avoi
 
 1. Select the bounded media cohort and snapshot only its local people/credit relationships.
 2. Fetch or reuse cached provider media records and flatten their credits and media crosswalk IDs.
-3. Queue the unique people discovered by those credits.
-4. Fetch or reuse cached provider person records and flatten names, aliases, birth dates, IMDb IDs and Wikidata IDs.
+3. Queue the unique people discovered by those credits for graph enrichment, and separately queue the current TMDB/TVDB IDs of the same in-scope local people for binding validation.
+4. Fetch or reuse cached provider person records and flatten their names, aliases, birth dates and all recognized external IDs. Validation-only records are retained for future use but cannot seed the current identity graph.
 5. Resolve media through the transitive graph of all provider-native and external IDs, evaluate only index-blocked cross-provider person pairs with the fixed `person-evidence-v3` model, then join them through component-level identity constraints.
 6. Resolve constrained components back to historical Emby people by local-media mass and persist every pair feature, cluster membership, decision, evidence line and impacted title.
 
-Person enrichment is locally scoped: a discovered provider credit is enriched only when it shares a current provider person ID with a locally credited Emby person, or when its normalized name matches a local person on the same selected title. The complete provider credit lists remain flattened for evidence, but unrelated aggregate-series cast and crew do not generate thousands of unnecessary person API calls.
+Person enrichment is locally scoped: a discovered provider credit is graph-eligible only when it shares a current provider person ID with a locally credited Emby person, or when its normalized name matches a local person on the same selected title. Current TMDB/TVDB bindings are also fetched for those locally credited people, but validation-only responses do not become graph nodes. The complete person payload is still cached and flattened so names, aliases, birth dates and external IDs remain available if later media evidence or an operator correction makes that record graph-eligible.
 
-Fresh cache entries perform no network request and normally require no JSON parsing. Each manifest also stores the version of the materializer that interpreted its raw payload. A model upgrade re-flattens the cached payload once without a provider request, then records the new version. When only the TTL expires, the response is hashed; an unchanged payload with the current materializer refreshes its TTL without re-flattening. Failed requests have a persisted negative-cache window.
+Fresh cache entries perform no network request and normally require no JSON parsing. Each manifest also stores the version of the materializer that interpreted its raw payload. A model upgrade re-flattens the cached payload once without a provider request, then records the new version. When only the TTL expires, the response is hashed; an unchanged payload with the current materializer refreshes its TTL without re-flattening. Authoritative `404/410` responses have their own TTL cache. Every queued entity records exactly one resolution-facing state for the run: `PRESENT`, `ABSENT`, or `UNAVAILABLE`; technical failure details remain operational diagnostics.
 
 TMDB and TVDB hydration run as independent parallel pipelines. Each provider uses a fixed-size worker pool (defaults: TMDB 4, TVDB 2), its own request-start interval, and bounded retry behavior. TVDB token refresh is single-flight. The media phase remains a hard barrier before person discovery, and the person phase remains a hard barrier before offline resolution.
 
@@ -42,7 +42,7 @@ TMDB and TVDB hydration run as independent parallel pipelines. Each provider use
 - `DRIFT`: the current provider key disappeared or changed, but compatible naming and unchanged local-media mass preserve the historical Emby anchor.
 - `CONFLATION`: two provider profiles share evidence but remain below the automatic threshold.
 - `SPLIT`: one Emby person points to disconnected provider components.
-- `ORPHAN`: no hydrated provider node supports a locally credited Emby person; review fetch failures and missing IDs before taking any action.
+- `ORPHAN`: no media-derived provider node supports a locally credited Emby person. A provider-confirmed absent current binding may produce `REVIEW_REMOVE_STALE_PROVIDER_ID`; a present but unsupported binding remains ordinary human review, and an unavailable required acquisition withholds the decision.
 
 Missing provider fields and unmatched filmography are neutral, not contradictions. A smaller provider filmography may be wholly contained in a larger one. Repeated shared credits accumulate support, compatible role/category evidence strengthens it, and common names are discounted. Different known birthdays or stable external IDs are explicit conflicts. A same-name, role-compatible attribution to a different person on the corresponding provider is competing evidence and prevents an automatic join.
 
@@ -52,7 +52,7 @@ The full-screen evidence dialog is sorted by risk and uncertainty and returns up
 
 The Provider corrections tab stores a persistent operator overlay without editing raw payloads or flattened source facts. Separate add dialogs cover media-person attribution, credit role, person/media cross-references, person name or birthday, local provider bindings and explicit identity relationships. A blank replacement marks the selected fact unusable; a supplied replacement substitutes it only for effective analysis. Corrections can be edited, disabled, re-enabled or removed. Every active rule records whether it triggered in each calculation run, and triggered rules write an informational log line.
 
-Schema migrations are offline operations. Stop Emby and back up `entity-resolution.db` before applying every migration after the database's current `schema_info.version`, in numeric order. Schema 2 requires `003_evidence_model_v2.sql`, `004_materializer_version.sql`, then `005_provider_corrections.sql`; schema 3 requires `004` then `005`; schema 4 requires only `005_provider_corrections.sql`. Use SQLite's fail-fast mode, for example `sqlite3.exe -bail entity-resolution.db ".read C:/path/to/PersonCleaner/migrations/005_provider_corrections.sql"`. The plugin validates `schema_info` before touching the existing structure and refuses to start resolution against an older or incomplete schema.
+Schema migrations are offline operations. Stop Emby and back up `entity-resolution.db` before applying every migration after the database's current `schema_info.version`, in numeric order. Existing schema 5 workspaces require `006_acquisition_boundary.sql`; earlier schemas require that migration after their existing sequence. Use SQLite's fail-fast mode, for example `sqlite3.exe -bail entity-resolution.db ".read C:/path/to/PersonCleaner/migrations/006_acquisition_boundary.sql"`. The plugin validates `schema_info` before touching the existing structure and refuses to start resolution against an older or incomplete schema. Run the evidence task once after migration before recalculating old decisions so the new run-scoped acquisition observations exist.
 
 ## Build and test
 

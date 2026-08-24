@@ -17,6 +17,13 @@ namespace PersonCleaner.V2.Domain
         public const string Series = "series";
     }
 
+    public static class AcquisitionStates
+    {
+        public const string Present = "PRESENT";
+        public const string Absent = "ABSENT";
+        public const string Unavailable = "UNAVAILABLE";
+    }
+
     public sealed class MediaSeed
     {
         public long EmbyId { get; set; }
@@ -85,14 +92,39 @@ namespace PersonCleaner.V2.Domain
         public bool IsRejected { get; set; }
     }
 
+    public sealed class PersonAcquisition
+    {
+        public string Provider { get; set; }
+        public string ProviderId { get; set; }
+        public string State { get; set; }
+        public bool GraphEligible { get; set; }
+        public string Source { get; set; }
+        public string Detail { get; set; }
+
+        public string Key => Provider + ":" + ProviderId;
+    }
+
+    public sealed class MediaAcquisition
+    {
+        public string Provider { get; set; }
+        public string MediaType { get; set; }
+        public string ProviderId { get; set; }
+        public string State { get; set; }
+
+        public string Key => Provider + ":" + MediaType + ":" + ProviderId;
+    }
+
     public sealed class ResolutionInput
     {
+        public bool AcquisitionTrackingEnabled { get; set; }
         public List<ProviderPerson> ProviderPeople { get; set; } = new List<ProviderPerson>();
         public List<ObservedProviderCredit> ProviderCredits { get; set; } = new List<ObservedProviderCredit>();
         public List<LocalPerson> LocalPeople { get; set; } = new List<LocalPerson>();
         public List<LocalCredit> LocalCredits { get; set; } = new List<LocalCredit>();
         public List<MediaSeed> Media { get; set; } = new List<MediaSeed>();
         public List<ManualBridge> Bridges { get; set; } = new List<ManualBridge>();
+        public List<PersonAcquisition> PersonAcquisitions { get; set; } = new List<PersonAcquisition>();
+        public List<MediaAcquisition> MediaAcquisitions { get; set; } = new List<MediaAcquisition>();
         public List<CorrectionApplication> CorrectionApplications { get; set; } = new List<CorrectionApplication>();
     }
 

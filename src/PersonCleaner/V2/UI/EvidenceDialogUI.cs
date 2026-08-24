@@ -98,7 +98,7 @@ namespace PersonCleaner.V2.UI
                 if (column.dataField == nameof(DashboardDecision.EmbyAnchor)) { column.caption = "Emby anchor"; column.width = 100; }
                 if (column.dataField == nameof(DashboardDecision.Person)) column.encodeHtml = false;
                 if (column.dataField == nameof(DashboardDecision.EmbyAnchor)) { column.encodeHtml = false; column.caption = "Emby anchor"; column.width = 100; }
-                if (column.dataField == nameof(DashboardDecision.ProviderIdentities)) { column.encodeHtml = false; column.caption = "Provider IDs"; column.width = 260; }
+                if (column.dataField == nameof(DashboardDecision.ProviderIdentities)) { column.encodeHtml = false; column.caption = "Supporting provider identities"; column.width = 300; }
                 if (column.dataField == nameof(DashboardDecision.CurrentProviderIds)) { column.encodeHtml = false; column.caption = "Current Emby IDs"; column.width = 300; }
                 if (column.dataField == nameof(DashboardDecision.Confidence)) column.width = 90;
                 if (column.dataField == nameof(DashboardDecision.LocalAnchorConfidence)) { column.caption = "Local anchor"; column.width = 100; }

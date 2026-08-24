@@ -107,8 +107,12 @@ namespace PersonCleaner.V2.Domain
                 ResolutionDecision decision = null;
                 if (localMatches.Count > 0 && ShouldEmitComponentDecision(component, localMatches))
                 {
-                    decision = BuildComponentDecision(component, localMatches, input, candidates, settings);
-                    decisions.Add(decision);
+                    var proposed = BuildComponentDecision(component, localMatches, input, candidates, settings);
+                    if (EvidenceIsCompleteForLocal(localMatches[0].Person, input))
+                    {
+                        decision = proposed;
+                        decisions.Add(decision);
+                    }
                 }
 
                 if (component.Count > 1 || (localMatches.Count > 0 && !localMatches[0].Direct))
@@ -128,7 +132,12 @@ namespace PersonCleaner.V2.Domain
 
             var reviewCandidates = candidates.Where(x => x.Disposition == "human-review").ToList();
             var reviewPairs = new HashSet<string>(reviewCandidates.Select(x => x.PairKey), StringComparer.Ordinal);
-            foreach (var review in reviewCandidates) decisions.Add(BuildReviewDecision(review, input, settings));
+            foreach (var review in reviewCandidates)
+            {
+                var decision = BuildReviewDecision(review, input, settings);
+                var local = decision.AnchorEmbyPersonId.HasValue ? input.LocalPeople.FirstOrDefault(x => x.EmbyId == decision.AnchorEmbyPersonId.Value) : null;
+                if (local == null || EvidenceIsCompleteForLocal(local, input)) decisions.Add(decision);
+            }
 
             foreach (var local in input.LocalPeople)
             {
@@ -137,10 +146,10 @@ namespace PersonCleaner.V2.Domain
                 if (linkedComponents.Count > 1)
                 {
                     var representedByReview = linkedKeys.SelectMany((left, index) => linkedKeys.Skip(index + 1).Select(right => PairKey(left, right))).Any(reviewPairs.Contains);
-                    if (!representedByReview)
+                    if (!representedByReview && EvidenceIsCompleteForLocal(local, input))
                         decisions.Add(BuildSplitDecision(local, linkedComponents.Select(x => components[x]).ToList(), input, candidates, settings));
                 }
-                else if (linkedComponents.Count == 0 && !resolvedLocalPeople.Contains(local.EmbyId) && input.LocalCredits.Any(x => x.PersonEmbyId == local.EmbyId))
+                else if (linkedComponents.Count == 0 && !resolvedLocalPeople.Contains(local.EmbyId) && input.LocalCredits.Any(x => x.PersonEmbyId == local.EmbyId) && EvidenceIsCompleteForLocal(local, input))
                     decisions.Add(BuildOrphanDecision(local, input, settings));
             }
 
@@ -328,24 +337,31 @@ namespace PersonCleaner.V2.Domain
             var confidence = ComponentIdentityConfidence(providerKeys, candidates);
             var merge = anchors.Count > 1;
             var drift = !winner.Direct;
+            var currentKeys = CurrentProviderKeys(winner.Person).ToList();
+            var currentAcquisitions = CurrentAcquisitions(winner.Person, input);
+            var confirmedAbsent = currentKeys.Count > 0 && currentKeys.All(x => currentAcquisitions.TryGetValue(x, out var acquisition) && acquisition.State == AcquisitionStates.Absent);
             var names = string.Join(" / ", component.Select(x => x.Name).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase));
             var decision = new ResolutionDecision
             {
                 DecisionId = StableId("cluster", string.Join("|", providerKeys)),
                 Status = drift ? "DRIFT" : "MATCH",
-                Action = drift ? "RETAINED_BY_MASS_ID_DRIFT" : merge ? "AUTO_MERGE_SHADOW" : "CROSS_PROVIDER_IDENTITY",
+                Action = drift ? (confirmedAbsent || currentKeys.Count == 0 ? "RETAINED_BY_MASS_ID_DRIFT" : "HUMAN_REVIEW") : merge ? "AUTO_MERGE_SHADOW" : "CROSS_PROVIDER_IDENTITY",
                 DisplayName = string.IsNullOrWhiteSpace(winner.Person.Name) ? names : winner.Person.Name,
                 AnchorEmbyPersonId = winner.Person.EmbyId,
                 ProviderKeys = string.Join(", ", providerKeys),
                 Confidence = confidence,
                 LocalAnchorConfidence = AnchorConfidence(winner),
                 Headline = drift
-                    ? "The current provider key no longer reaches this identity, but " + winner.Mass + " sampled title(s) pull the provider profile back to Emby person " + winner.Person.EmbyId + "."
+                    ? confirmedAbsent
+                    ? "The provider confirmed the current ID is absent, while " + winner.Mass + " sampled title(s) support a media-backed replacement identity for Emby person " + winner.Person.EmbyId + "."
+                    : "The current provider key does not reach this media-backed identity; " + winner.Mass + " sampled title(s) support review of the proposed continuity for Emby person " + winner.Person.EmbyId + "."
                     : merge
                     ? anchors.Count + " Emby people resolve to one constrained provider identity; Emby person " + winner.Person.EmbyId + " has the strongest local-media anchor."
                     : component.Count + " provider profiles resolve to one identity anchored to Emby person " + winner.Person.EmbyId + ".",
                 Explanation = drift
-                    ? "This is an upstream identifier drift proposal. Local-anchor confidence is reported separately from provider-identity confidence."
+                    ? confirmedAbsent
+                    ? "This is an upstream identifier drift proposal backed by authoritative absence of the current provider binding. Local-anchor confidence is reported separately from provider-identity confidence."
+                    : "The current provider binding still exists or no current binding is available to invalidate. The media-backed alternative is retained for human review and no live Emby record is changed."
                     : merge
                     ? "The shadow result groups only constraint-compatible provider records and retains the strongest local-media anchor. No live Emby record is changed."
                     : "Shared identifiers or role-compatible media evidence establish the provider identity; the Emby binding is evaluated independently."
@@ -354,6 +370,8 @@ namespace PersonCleaner.V2.Domain
             AddPairEvidence(decision, weakest?.Score);
             decision.Evidence.Add(new EvidenceLine { SortOrder = 50, SignalType = "LOCAL_MEDIA_ANCHOR", Verdict = "supports", Narrative = "Emby person " + winner.Person.EmbyId + " is the local anchor with " + winner.Mass + " matching sampled title(s); local-anchor confidence " + AnchorConfidence(winner).ToString("0.000", CultureInfo.InvariantCulture) + ".", Metric = "mass=" + winner.Mass + ";direct=" + winner.Direct.ToString().ToLowerInvariant() + ";confidence=" + AnchorConfidence(winner).ToString("0.000000", CultureInfo.InvariantCulture) });
             if (drift) decision.Evidence.Add(new EvidenceLine { SortOrder = 5, SignalType = "PROVIDER_ID_DRIFT", Verdict = "changed", Narrative = "None of the current Emby provider keys directly identifies this component; compatible naming and local-media mass establish the proposed continuity.", Metric = "direct_current_id=false" });
+            AddAcquisitionEvidence(decision, winner.Person, input);
+            AddMediaAcquisitionEvidence(decision, winner.Person, input);
             var manual = input.Bridges.FirstOrDefault(x => !x.IsRejected && providerKeys.Contains(x.ProviderA + ":" + x.ProviderIdA) && providerKeys.Contains(x.ProviderB + ":" + x.ProviderIdB));
             if (manual != null) decision.Evidence.Add(new EvidenceLine { SortOrder = 2, SignalType = "OPERATOR_BRIDGE", Verdict = "proves", Narrative = "An operator explicitly confirmed this cross-provider alignment.", Metric = manual.ProviderA + ":" + manual.ProviderIdA + "=" + manual.ProviderB + ":" + manual.ProviderIdB });
             AddMediaExamples(decision, anchors.Select(x => x.Person.EmbyId), input, settings.MaximumMediaExamples);
@@ -410,6 +428,10 @@ namespace PersonCleaner.V2.Domain
 
         private static ResolutionDecision BuildOrphanDecision(LocalPerson local, ResolutionInput input, ResolutionSettings settings)
         {
+            var currentKeys = CurrentProviderKeys(local).ToList();
+            var acquisitions = CurrentAcquisitions(local, input);
+            var absent = currentKeys.Where(x => acquisitions.TryGetValue(x, out var acquisition) && acquisition.State == AcquisitionStates.Absent).ToList();
+            var confirmedStale = absent.Count > 0;
             var decision = new ResolutionDecision
             {
                 DecisionId = StableId("orphan", local.EmbyId.ToString(CultureInfo.InvariantCulture)),
@@ -417,13 +439,22 @@ namespace PersonCleaner.V2.Domain
                 Action = "HUMAN_REVIEW",
                 DisplayName = local.Name,
                 AnchorEmbyPersonId = local.EmbyId,
-                ProviderKeys = CurrentProviderKeys(local).Any() ? string.Join(", ", CurrentProviderKeys(local)) : "No current TMDB/TVDB person ID",
-                Confidence = 0,
+                ProviderKeys = "No hydrated provider identity",
+                Confidence = confirmedStale ? 1 : 0,
                 LocalAnchorConfidence = 0,
-                Headline = "No hydrated provider identity supports this Emby person in the current sample.",
-                Explanation = "This is not a deletion instruction. It may indicate a stale person, missing provider identifiers, incomplete credits, or a provider fetch failure."
+                Headline = confirmedStale
+                    ? "The provider confirmed " + string.Join(", ", absent) + " does not exist, and no media-backed replacement identity was found in the current sample."
+                    : currentKeys.Count == 0
+                    ? "No current TMDB/TVDB person ID or hydrated provider identity supports this Emby person in the current sample."
+                    : "The current provider ID exists, but no media-backed provider identity supports this Emby person in the current sample.",
+                Explanation = confirmedStale
+                    ? "Review removal of only the provider binding(s) explicitly confirmed absent. This does not recommend deleting the Emby person, and no live Emby record is changed."
+                    : "This is a media-attribution review state, not a provider-ID removal instruction. All required current-ID acquisitions supplied usable answers."
             };
-            decision.Evidence.Add(new EvidenceLine { SortOrder = 1, SignalType = "NO_PROVIDER_SUPPORT", Verdict = "missing", Narrative = "The sampled provider graph contains no matching identity node.", Metric = "provider_nodes=0" });
+            decision.Action = confirmedStale ? "REVIEW_REMOVE_STALE_PROVIDER_ID" : "HUMAN_REVIEW";
+            decision.Evidence.Add(new EvidenceLine { SortOrder = 1, SignalType = "NO_PROVIDER_SUPPORT", Verdict = "missing", Narrative = "The media-derived provider graph contains no matching identity node.", Metric = "provider_nodes=0" });
+            AddAcquisitionEvidence(decision, local, input);
+            AddMediaAcquisitionEvidence(decision, local, input);
             AddMediaExamples(decision, new[] { local.EmbyId }, input, settings.MaximumMediaExamples);
             return decision;
         }
@@ -601,6 +632,76 @@ namespace PersonCleaner.V2.Domain
         {
             if (!string.IsNullOrWhiteSpace(person.TmdbId)) yield return ProviderNames.Tmdb + ":" + person.TmdbId;
             if (!string.IsNullOrWhiteSpace(person.TvdbId)) yield return ProviderNames.Tvdb + ":" + person.TvdbId;
+        }
+
+        private static Dictionary<string, PersonAcquisition> CurrentAcquisitions(LocalPerson person, ResolutionInput input)
+        {
+            var current = new HashSet<string>(CurrentProviderKeys(person), StringComparer.Ordinal);
+            return input.PersonAcquisitions.Where(x => current.Contains(x.Key)).GroupBy(x => x.Key, StringComparer.Ordinal).Select(x => x.Last()).ToDictionary(x => x.Key, StringComparer.Ordinal);
+        }
+
+        private static bool CurrentBindingsAreUsable(LocalPerson person, ResolutionInput input)
+        {
+            var keys = CurrentProviderKeys(person).ToList();
+            if (keys.Count == 0) return true;
+            var acquisitions = CurrentAcquisitions(person, input);
+            if (!input.AcquisitionTrackingEnabled && acquisitions.Count == 0) return true;
+            return keys.All(x => acquisitions.TryGetValue(x, out var acquisition) && acquisition.State != AcquisitionStates.Unavailable);
+        }
+
+        private static bool EvidenceIsCompleteForLocal(LocalPerson person, ResolutionInput input)
+        {
+            return CurrentBindingsAreUsable(person, input) && MediaAcquisitionsAreUsable(person, input);
+        }
+
+        private static bool MediaAcquisitionsAreUsable(LocalPerson person, ResolutionInput input)
+        {
+            if (!input.AcquisitionTrackingEnabled && input.MediaAcquisitions.Count == 0) return true;
+            var required = RequiredMediaAcquisitionKeys(person, input);
+            var observed = input.MediaAcquisitions.GroupBy(x => x.Key, StringComparer.Ordinal).Select(x => x.Last()).ToDictionary(x => x.Key, StringComparer.Ordinal);
+            return required.All(x => observed.TryGetValue(x, out var acquisition) && acquisition.State != AcquisitionStates.Unavailable);
+        }
+
+        private static List<string> RequiredMediaAcquisitionKeys(LocalPerson person, ResolutionInput input)
+        {
+            var creditedMedia = new HashSet<long>(input.LocalCredits.Where(x => x.PersonEmbyId == person.EmbyId).Select(x => x.MediaEmbyId));
+            var keys = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var media in input.Media.Where(x => creditedMedia.Contains(x.EmbyId)))
+            {
+                if (!string.IsNullOrWhiteSpace(media.TmdbId)) keys.Add(ProviderNames.Tmdb + ":" + media.MediaType + ":" + media.TmdbId);
+                if (!string.IsNullOrWhiteSpace(media.TvdbId)) keys.Add(ProviderNames.Tvdb + ":" + media.MediaType + ":" + media.TvdbId);
+            }
+            return keys.OrderBy(x => x, StringComparer.Ordinal).ToList();
+        }
+
+        private static void AddAcquisitionEvidence(ResolutionDecision decision, LocalPerson person, ResolutionInput input)
+        {
+            var keys = CurrentProviderKeys(person).ToList();
+            if (keys.Count == 0)
+            {
+                decision.Evidence.Add(new EvidenceLine { SortOrder = 3, SignalType = "CURRENT_ID_ACQUISITION", Verdict = "missing", Narrative = "The Emby person has no current TMDB/TVDB person ID to validate.", Metric = "state=no-current-id" });
+                return;
+            }
+            var acquisitions = CurrentAcquisitions(person, input);
+            var order = 3;
+            foreach (var key in keys)
+            {
+                if (!acquisitions.TryGetValue(key, out var acquisition)) continue;
+                var narrative = acquisition.State == AcquisitionStates.Present
+                    ? "The provider supplied usable person data for the current Emby binding " + key + "."
+                    : "The provider authoritatively confirmed that the current Emby binding " + key + " does not exist.";
+                decision.Evidence.Add(new EvidenceLine { SortOrder = order++, SignalType = "CURRENT_ID_ACQUISITION", Verdict = acquisition.State == AcquisitionStates.Present ? "present" : "absent", Narrative = narrative, Metric = "key=" + key + ";state=" + acquisition.State + ";source=" + acquisition.Source });
+            }
+        }
+
+        private static void AddMediaAcquisitionEvidence(ResolutionDecision decision, LocalPerson person, ResolutionInput input)
+        {
+            if (!input.AcquisitionTrackingEnabled) return;
+            var required = RequiredMediaAcquisitionKeys(person, input);
+            var observed = input.MediaAcquisitions.GroupBy(x => x.Key, StringComparer.Ordinal).Select(x => x.Last()).ToDictionary(x => x.Key, StringComparer.Ordinal);
+            var present = required.Count(x => observed.TryGetValue(x, out var acquisition) && acquisition.State == AcquisitionStates.Present);
+            var absent = required.Count(x => observed.TryGetValue(x, out var acquisition) && acquisition.State == AcquisitionStates.Absent);
+            decision.Evidence.Add(new EvidenceLine { SortOrder = 7, SignalType = "MEDIA_ACQUISITION", Verdict = "complete", Narrative = "All " + required.Count + " provider-media observation(s) required by this local attribution supplied usable answers; " + present + " present and " + absent + " provider-confirmed absent.", Metric = "required=" + required.Count + ";present=" + present + ";absent=" + absent });
         }
 
         private static string BridgeKey(ManualBridge bridge) => PairKey(bridge.ProviderA + ":" + bridge.ProviderIdA, bridge.ProviderB + ":" + bridge.ProviderIdB);

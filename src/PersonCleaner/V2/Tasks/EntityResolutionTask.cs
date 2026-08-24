@@ -67,7 +67,7 @@ namespace PersonCleaner.V2.Tasks
                     logger.Info("PersonCleaner run {0} media phase complete: {1}.", runId, mediaMetrics.Summary());
 
                     var personSeeds = repository.SeedDiscoveredPeople();
-                    logger.Info("PersonCleaner run {0} person scoping: media discovery found {1} unique provider people (TMDB={2}, TVDB={3}); {4} are relevant to locally credited Emby people by current provider ID or normalized same-title name (TMDB={5}, TVDB={6}). Unrelated provider cast/crew remain flattened but will not trigger person API calls.", runId, personSeeds.DiscoveredTotal, personSeeds.DiscoveredTmdb, personSeeds.DiscoveredTvdb, personSeeds.SelectedTotal, personSeeds.SelectedTmdb, personSeeds.SelectedTvdb);
+                    logger.Info("PersonCleaner run {0} person scoping: media discovery found {1} unique provider people (TMDB={2}, TVDB={3}); {4} are graph-eligible by current provider ID or normalized same-title name (TMDB={5}, TVDB={6}); {7} current in-scope bindings are queued for validation (TMDB={8}, TVDB={9}). Validation-only people are fully cached but cannot seed the identity graph.", runId, personSeeds.DiscoveredTotal, personSeeds.DiscoveredTmdb, personSeeds.DiscoveredTvdb, personSeeds.SelectedTotal, personSeeds.SelectedTmdb, personSeeds.SelectedTvdb, personSeeds.ValidationTotal, personSeeds.ValidationTmdb, personSeeds.ValidationTvdb);
                     repository.UpdateRun(runId, "people", "Enriching people discovered from media credits");
                     var peopleWork = repository.PendingPeople();
                     logger.Info("PersonCleaner run {0} person phase starting: {1} unique provider person(s) ({2}); bounded parallelism TMDB={3}, TVDB={4}. Fresh cache entries bypass both network and JSON parsing.", runId, peopleWork.Count, WorkBreakdown(peopleWork), configuration.TmdbMaximumConcurrentRequests, configuration.TvdbMaximumConcurrentRequests);
@@ -130,17 +130,26 @@ namespace PersonCleaner.V2.Tasks
             var metrics = new PhaseMetrics(items);
             var completed = 0;
             var progressSync = new object();
+            var fatalProviders = new Dictionary<string, string>(StringComparer.Ordinal);
 
             async Task ProcessOne(QueueItem item)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 HydrationOutcome outcome;
-                if (!ProviderConfigured(item.Provider, configuration))
+                string fatal;
+                lock (progressSync) fatalProviders.TryGetValue(item.Provider, out fatal);
+                if (fatal != null)
                 {
-                    repository.MarkQueue(item, "skipped", "API key is not configured");
+                    repository.MarkQueue(item, "skipped", fatal);
+                    repository.RecordAcquisition(runId, item, AcquisitionStates.Unavailable, "authentication", fatal);
                     outcome = HydrationOutcome.Skipped;
                 }
-                else outcome = await hydration.Process(item, runId, configuration.CacheTtlDays, configuration.FailureRetryMinutes, cancellationToken).ConfigureAwait(false);
+                else
+                {
+                    outcome = await hydration.Process(item, runId, configuration.CacheTtlDays, configuration.FailureRetryMinutes, ProviderConfigured(item.Provider, configuration), cancellationToken).ConfigureAwait(false);
+                    if (outcome == HydrationOutcome.AuthenticationFailed)
+                        lock (progressSync) fatalProviders[item.Provider] = item.Provider.ToUpperInvariant() + " authentication failed; remaining provider work was not requested.";
+                }
 
                 metrics.Record(item.Provider, outcome);
                 var processed = Interlocked.Increment(ref completed);
@@ -156,6 +165,8 @@ namespace PersonCleaner.V2.Tasks
                 RunProviderWorkers(tmdb, configuration.TmdbMaximumConcurrentRequests, ProcessOne, cancellationToken),
                 RunProviderWorkers(tvdb, configuration.TvdbMaximumConcurrentRequests, ProcessOne, cancellationToken),
                 RunProviderWorkers(other, 1, ProcessOne, cancellationToken)).ConfigureAwait(false);
+            lock (progressSync)
+                if (fatalProviders.Count > 0) throw new InvalidOperationException(string.Join(" ", fatalProviders.OrderBy(x => x.Key).Select(x => x.Value)));
             return metrics;
         }
 
@@ -251,6 +262,8 @@ namespace PersonCleaner.V2.Tasks
             private int changed;
             private int unchanged;
             private int deferred;
+            private int absent;
+            private int authenticationFailed;
             private int failed;
             private int skipped;
 
@@ -268,12 +281,14 @@ namespace PersonCleaner.V2.Tasks
                     case HydrationOutcome.FetchedChanged: Interlocked.Increment(ref changed); break;
                     case HydrationOutcome.FetchedUnchanged: Interlocked.Increment(ref unchanged); break;
                     case HydrationOutcome.Deferred: Interlocked.Increment(ref deferred); break;
+                    case HydrationOutcome.Absent: Interlocked.Increment(ref absent); break;
+                    case HydrationOutcome.AuthenticationFailed: Interlocked.Increment(ref authenticationFailed); break;
                     case HydrationOutcome.Failed: Interlocked.Increment(ref failed); break;
                     case HydrationOutcome.Skipped: Interlocked.Increment(ref skipped); break;
                 }
             }
 
-            public string Summary() => "TMDB=" + Volatile.Read(ref tmdbProcessed) + "/" + tmdbTotal + ", TVDB=" + Volatile.Read(ref tvdbProcessed) + "/" + tvdbTotal + ", cache hits=" + Volatile.Read(ref cacheHits) + ", fetched+flattened=" + Volatile.Read(ref changed) + ", fetched unchanged=" + Volatile.Read(ref unchanged) + ", deferred=" + Volatile.Read(ref deferred) + ", failed=" + Volatile.Read(ref failed) + ", skipped=" + Volatile.Read(ref skipped);
+            public string Summary() => "TMDB=" + Volatile.Read(ref tmdbProcessed) + "/" + tmdbTotal + ", TVDB=" + Volatile.Read(ref tvdbProcessed) + "/" + tvdbTotal + ", cache hits=" + Volatile.Read(ref cacheHits) + ", fetched+flattened=" + Volatile.Read(ref changed) + ", fetched unchanged=" + Volatile.Read(ref unchanged) + ", provider-confirmed absent=" + Volatile.Read(ref absent) + ", authentication failures=" + Volatile.Read(ref authenticationFailed) + ", deferred=" + Volatile.Read(ref deferred) + ", failed=" + Volatile.Read(ref failed) + ", skipped=" + Volatile.Read(ref skipped);
         }
     }
 }

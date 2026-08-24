@@ -26,6 +26,10 @@ internal static class Program
         Run("operator bridge joins disconnected provider records", OperatorBridgeJoinsRecords);
         Run("operator rejection keeps shared-media records separate", OperatorRejectionKeepsRecordsSeparate);
         Run("orphan without provider IDs has persistable provider text", OrphanWithoutIdsHasProviderText);
+        Run("authoritative absence recommends review of the stale binding", AuthoritativeAbsenceRecommendsBindingRemoval);
+        Run("present but unsupported binding remains human review", PresentUnsupportedBindingRemainsReview);
+        Run("unavailable current binding withholds orphan decision", UnavailableBindingWithholdsDecision);
+        Run("unavailable credited media withholds person decision", UnavailableMediaWithholdsDecision);
         Run("same name alone never establishes identity", SameNameAloneDoesNotMerge);
         Run("shared title alone never creates a person candidate", SharedTitleAloneDoesNotCreateCandidate);
         Run("one uncertain alignment produces review without duplicate split", ReviewDoesNotDuplicateSplit);
@@ -310,11 +314,12 @@ internal static class Program
         var provider = Person(ProviderNames.Tmdb, "new-id", "Taylor Example", null, null, "tmdb:movie:1");
         var input = BaseInput(provider);
         input.LocalPeople.Add(new LocalPerson { EmbyId = 400, Name = "Taylor Example", TmdbId = "old-id" });
+        input.PersonAcquisitions.Add(Acquisition(ProviderNames.Tmdb, "old-id", AcquisitionStates.Absent));
         input.Media.Add(Media(1, "Stable title")); input.LocalCredits.Add(Credit(400, 1));
         var decisions = new ResolutionEngine().Resolve(input, new ResolutionSettings());
         var drift = decisions.Single(x => x.Status == "DRIFT");
         Equal(400L, drift.AnchorEmbyPersonId.Value);
-        True(drift.Headline.Contains("pull the provider profile back"));
+        True(drift.Headline.Contains("confirmed the current ID is absent"));
         True(!decisions.Any(x => x.Status == "ORPHAN"));
     }
 
@@ -411,10 +416,55 @@ internal static class Program
         input.Media.Add(Media(7, "Local title")); input.LocalCredits.Add(Credit(700, 7));
         var orphan = new ResolutionEngine().Resolve(input, new ResolutionSettings()).Single(x => x.Status == "ORPHAN");
         True(!string.IsNullOrWhiteSpace(orphan.ProviderKeys));
-        True(orphan.ProviderKeys.Contains("No current"));
+        True(orphan.ProviderKeys.Contains("No hydrated"));
+    }
+
+    private static void AuthoritativeAbsenceRecommendsBindingRemoval()
+    {
+        var input = new ResolutionInput();
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 701, Name = "Stale Binding", TmdbId = "missing-id" });
+        input.Media.Add(Media(8, "Local title")); input.LocalCredits.Add(Credit(701, 8));
+        input.PersonAcquisitions.Add(Acquisition(ProviderNames.Tmdb, "missing-id", AcquisitionStates.Absent));
+        var orphan = new ResolutionEngine().Resolve(input, new ResolutionSettings()).Single(x => x.Status == "ORPHAN");
+        Equal("REVIEW_REMOVE_STALE_PROVIDER_ID", orphan.Action);
+        Equal(1.0, orphan.Confidence);
+        Equal("No hydrated provider identity", orphan.ProviderKeys);
+        True(orphan.Evidence.Any(x => x.SignalType == "CURRENT_ID_ACQUISITION" && x.Verdict == "absent"));
+    }
+
+    private static void PresentUnsupportedBindingRemainsReview()
+    {
+        var input = new ResolutionInput();
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 702, Name = "Unsupported Binding", TmdbId = "existing-id" });
+        input.Media.Add(Media(9, "Local title")); input.LocalCredits.Add(Credit(702, 9));
+        input.PersonAcquisitions.Add(Acquisition(ProviderNames.Tmdb, "existing-id", AcquisitionStates.Present));
+        var orphan = new ResolutionEngine().Resolve(input, new ResolutionSettings()).Single(x => x.Status == "ORPHAN");
+        Equal("HUMAN_REVIEW", orphan.Action);
+        Equal(0.0, orphan.Confidence);
+        True(orphan.Headline.Contains("exists"));
+    }
+
+    private static void UnavailableBindingWithholdsDecision()
+    {
+        var input = new ResolutionInput();
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 703, Name = "Offline Binding", TmdbId = "unknown-id" });
+        input.Media.Add(Media(10, "Local title")); input.LocalCredits.Add(Credit(703, 10));
+        input.PersonAcquisitions.Add(Acquisition(ProviderNames.Tmdb, "unknown-id", AcquisitionStates.Unavailable));
+        True(!new ResolutionEngine().Resolve(input, new ResolutionSettings()).Any());
+    }
+
+    private static void UnavailableMediaWithholdsDecision()
+    {
+        var input = new ResolutionInput { AcquisitionTrackingEnabled = true };
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 704, Name = "Incomplete Media", TmdbId = "existing-id" });
+        input.Media.Add(Media(11, "Unavailable title")); input.LocalCredits.Add(Credit(704, 11));
+        input.PersonAcquisitions.Add(Acquisition(ProviderNames.Tmdb, "existing-id", AcquisitionStates.Present));
+        input.MediaAcquisitions.Add(new MediaAcquisition { Provider = ProviderNames.Tmdb, MediaType = MediaTypes.Movie, ProviderId = "11", State = AcquisitionStates.Unavailable });
+        True(!new ResolutionEngine().Resolve(input, new ResolutionSettings()).Any());
     }
 
     private static ResolutionInput BaseInput(params ProviderPerson[] people) => new ResolutionInput { ProviderPeople = people.ToList() };
+    private static PersonAcquisition Acquisition(string provider, string id, string state) => new PersonAcquisition { Provider = provider, ProviderId = id, State = state, Source = "test" };
     private static ProviderPerson Person(string provider, string id, string name, string externalProvider, string externalId, params string[] media)
     {
         var result = new ProviderPerson { Provider = provider, ProviderId = id, Name = name, CanonicalMediaKeys = new HashSet<string>(media) };
