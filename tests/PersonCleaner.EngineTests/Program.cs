@@ -1,4 +1,5 @@
 using PersonCleaner.V2.Domain;
+using PersonCleaner.V2.Storage;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -61,6 +62,10 @@ internal static class Program
         Run("Emby change planner exposes unsupported orphan bindings for manual removal", ChangePlannerExposesOrphanRemoval);
         Run("offline resolution reports bounded stage progress", ResolutionReportsProgress);
         Run("offline resolution observes cancellation", ResolutionObservesCancellation);
+        Run("review cases group connected provider relationships", ReviewCasesGroupConnectedRelationships);
+        Run("review case automation requires one converged correction", ReviewCaseAutomationRequiresConvergence);
+        Run("review case automation respects incomplete scope", ReviewCaseAutomationRespectsScope);
+        Run("review cases never group by display name alone", ReviewCasesDoNotGroupByName);
         Run("large unrelated provider-credit sets remain bounded", LargeProviderCreditSetRemainsBounded);
         Console.WriteLine("Passed " + passed + " entity-resolution tests; failed " + failed + ".");
         return failed == 0 ? 0 : 1;
@@ -891,6 +896,63 @@ internal static class Program
         }
     }
 
+    private static void ReviewCasesGroupConnectedRelationships()
+    {
+        var correction = "provider=TVDB;media_type=Movie;media_id=351731;old_person_id=8302951;new_person_id=457122";
+        var rows = new[]
+        {
+            DashboardRow("alex-1", "Alex Jennings", "TMDB:15739, TVDB:457122", correction, 351731),
+            DashboardRow("alex-2", "Alex Jennings", "TMDB:15739, TVDB:8302951", correction, 351731)
+        };
+
+        var reviewCase = DashboardCaseBuilder.Build(rows).Single();
+        Equal(2, reviewCase.Relationships);
+        Equal(3, reviewCase.ProviderRecords);
+        Equal(2, reviewCase.UnderlyingDecisionIds.Length);
+        Equal("Would auto-resolve", reviewCase.Automation);
+        Equal("Suggested provider correction", reviewCase.Action);
+        Equal("Provider attribution disagreement", reviewCase.Status);
+        Equal(1, reviewCase.Details.Count(x => x.Section == "Affected titles"));
+        True(reviewCase.Details.Any(x => x.Signal == "SUGGESTED_CORRECTION" && x.Verdict == "converged"));
+    }
+
+    private static void ReviewCaseAutomationRequiresConvergence()
+    {
+        var rows = new[]
+        {
+            DashboardRow("sandy-1", "Sandy Johnson", "TMDB:1211879, TVDB:296716"),
+            DashboardRow("sandy-2", "Sandy Johnson", "TMDB:15518, TVDB:296716")
+        };
+
+        var reviewCase = DashboardCaseBuilder.Build(rows).Single();
+        Equal(2, reviewCase.Relationships);
+        Equal(3, reviewCase.ProviderRecords);
+        Equal("Review required", reviewCase.Automation);
+        True(reviewCase.AutomationReason.Contains("one exact, safe correction"));
+    }
+
+    private static void ReviewCaseAutomationRespectsScope()
+    {
+        var row = DashboardRow("paul-1", "Paul Simon", "TMDB:100, TVDB:200", "provider=TVDB;media_type=Movie;media_id=1;old_person_id=300;new_person_id=200");
+        row.Action = "INCOMPLETE_SCOPE";
+        row.Details = row.Details.Concat(new[] { new DashboardDetail { DetailId = "owner", Signal = "GLOBAL_BINDING_OWNER", Verdict = "blocked", Explanation = "Another Emby person owns the provider ID." } }).ToArray();
+
+        var reviewCase = DashboardCaseBuilder.Build(new[] { row }).Single();
+        Equal("Blocked", reviewCase.Automation);
+        Equal("Blocked — incomplete scope", reviewCase.Action);
+    }
+
+    private static void ReviewCasesDoNotGroupByName()
+    {
+        var rows = new[]
+        {
+            DashboardRow("same-name-1", "Alex Example", "TMDB:1, TVDB:2"),
+            DashboardRow("same-name-2", "Alex Example", "TMDB:3, TVDB:4")
+        };
+
+        Equal(2, DashboardCaseBuilder.Build(rows).Length);
+    }
+
     private static void LargeProviderCreditSetRemainsBounded()
     {
         const int peoplePerProvider = 80;
@@ -928,6 +990,18 @@ internal static class Program
     }
 
     private static ResolutionInput BaseInput(params ProviderPerson[] people) => new ResolutionInput { ProviderPeople = people.ToList() };
+    private static DashboardDecision DashboardRow(string id, string name, string providerIdentities, string correction = null, long mediaId = 0)
+    {
+        var details = new List<DashboardDetail>();
+        if (!string.IsNullOrWhiteSpace(correction)) details.Add(new DashboardDetail { DetailId = id + ":correction", Section = "Evidence", Signal = "RECOMMENDED_PROVIDER_CORRECTION", Verdict = "recommended", Explanation = "TVDB credits this title to the other same-name record; replace that attribution with the record supported by the matching identity evidence.", RawMetric = correction });
+        if (mediaId > 0) details.Add(new DashboardDetail { DetailId = id + ":media", Section = "Affected titles", Signal = "MEDIA", Verdict = "conflict", Explanation = "Example title", EmbyMediaId = mediaId, MediaType = MediaTypes.Movie });
+        return new DashboardDecision
+        {
+            DecisionId = id, Status = "CONFLATION", Action = "HUMAN_REVIEW", Person = name, EmbyAnchor = "Emby 1", ProviderIdentities = providerIdentities,
+            CurrentProviderIds = "TMDB 15739; TVDB 457122", Confidence = "85%", LocalAnchorConfidence = "90%", ImpactedTitles = mediaId > 0 ? 1 : 0,
+            Decision = "Provider records disagree about a same-name credit.", Why = "The evidence is not yet safe to apply automatically.", Details = details.ToArray()
+        };
+    }
     private static PersonAcquisition Acquisition(string provider, string id, string state) => new PersonAcquisition { Provider = provider, ProviderId = id, State = state, Source = "test" };
     private static ProviderPerson Person(string provider, string id, string name, string externalProvider, string externalId, params string[] media)
     {

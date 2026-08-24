@@ -59,15 +59,22 @@ namespace PersonCleaner.V2.Storage
 
     public sealed class DashboardDecision
     {
+        public string CaseId { get; set; }
         public string DecisionId { get; set; }
+        public string[] UnderlyingDecisionIds { get; set; } = new string[0];
+        public string[] UnderlyingDecisionLabels { get; set; } = new string[0];
         [System.ComponentModel.DisplayName("Change")]
         public bool ReviewChanges { get; set; }
         public string Status { get; set; }
         public string Action { get; set; }
+        public string Automation { get; set; }
+        public string AutomationReason { get; set; }
         public string Person { get; set; }
         public string EmbyAnchor { get; set; }
         public string ProviderIdentities { get; set; }
         public string CurrentProviderIds { get; set; }
+        public int Relationships { get; set; }
+        public int ProviderRecords { get; set; }
         public string Confidence { get; set; }
         public string LocalAnchorConfidence { get; set; }
         public int ImpactedTitles { get; set; }

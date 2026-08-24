@@ -31,7 +31,7 @@ namespace PersonCleaner.V2.UI
 
         public static EvidenceDialogUI Build(DashboardDecision[] rows, RunStatus run, string focusedDecisionId = null)
         {
-            var grid = new DxGridOptions(new DashboardDecision(), nameof(DashboardDecision.DecisionId), false, true, true, true)
+            var grid = new DxGridOptions(new DashboardDecision(), nameof(DashboardDecision.CaseId), false, true, true, true)
             {
                 // GenericEdit implements fullHeight as 100% inside nested 100%
                 // containers. In a dialog that can leave the horizontal bar at
@@ -106,22 +106,25 @@ namespace PersonCleaner.V2.UI
                 column.allowEditing = false;
                 column.allowGrouping = true;
                 column.allowHeaderFiltering = true;
-                if (column.dataField == nameof(DashboardDecision.DecisionId)) column.visible = false;
+                if (column.dataField == nameof(DashboardDecision.CaseId) || column.dataField == nameof(DashboardDecision.DecisionId) || column.dataField == nameof(DashboardDecision.UnderlyingDecisionIds) || column.dataField == nameof(DashboardDecision.UnderlyingDecisionLabels) || column.dataField == nameof(DashboardDecision.AutomationReason)) column.visible = false;
                 if (column.dataField == nameof(DashboardDecision.ReviewChanges)) { column.caption = "Review / update"; column.width = 110; column.allowEditing = true; column.allowGrouping = false; column.allowHeaderFiltering = false; }
                 if (column.dataField == nameof(DashboardDecision.Details)) { column.visible = false; column.isSecondaryGridDataSource = true; }
-                if (column.dataField == nameof(DashboardDecision.Status)) { column.caption = "Decision class"; column.groupIndex = 0; column.showWhenGrouped = true; column.width = 120; }
-                if (column.dataField == nameof(DashboardDecision.Action)) { column.caption = "Recommendation mode"; column.width = 190; }
+                if (column.dataField == nameof(DashboardDecision.Status)) { column.caption = "Case type"; column.groupIndex = 0; column.showWhenGrouped = true; column.width = 120; }
+                if (column.dataField == nameof(DashboardDecision.Action)) { column.caption = "Safety mode"; column.width = 190; }
+                if (column.dataField == nameof(DashboardDecision.Automation)) { column.caption = "Automation assessment"; column.width = 170; }
                 if (column.dataField == nameof(DashboardDecision.Person)) column.width = 190;
                 if (column.dataField == nameof(DashboardDecision.EmbyAnchor)) { column.caption = "Emby anchor"; column.width = 100; }
                 if (column.dataField == nameof(DashboardDecision.Person)) column.encodeHtml = false;
                 if (column.dataField == nameof(DashboardDecision.EmbyAnchor)) { column.encodeHtml = false; column.caption = "Emby anchor"; column.width = 100; }
-                if (column.dataField == nameof(DashboardDecision.ProviderIdentities)) { column.encodeHtml = false; column.caption = "Supporting provider identities"; column.width = 300; }
+                if (column.dataField == nameof(DashboardDecision.ProviderIdentities)) { column.encodeHtml = false; column.caption = "Connected provider IDs"; column.width = 300; }
                 if (column.dataField == nameof(DashboardDecision.CurrentProviderIds)) { column.encodeHtml = false; column.caption = "Current Emby IDs"; column.width = 300; }
+                if (column.dataField == nameof(DashboardDecision.Relationships)) { column.caption = "Relationships"; column.width = 95; }
+                if (column.dataField == nameof(DashboardDecision.ProviderRecords)) { column.caption = "Record count"; column.width = 105; }
                 if (column.dataField == nameof(DashboardDecision.Confidence)) { column.caption = "Evidence strength"; column.width = 115; }
                 if (column.dataField == nameof(DashboardDecision.LocalAnchorConfidence)) { column.caption = "Local anchor"; column.width = 100; }
                 if (column.dataField == nameof(DashboardDecision.ImpactedTitles)) { column.caption = "Titles"; column.width = 75; }
-                if (column.dataField == nameof(DashboardDecision.Decision)) { column.caption = "Plain-language decision"; column.width = 420; }
-                if (column.dataField == nameof(DashboardDecision.Why)) column.width = 480;
+                if (column.dataField == nameof(DashboardDecision.Decision)) { column.caption = "Case summary"; column.width = 480; }
+                if (column.dataField == nameof(DashboardDecision.Why)) { column.caption = "Automation reason"; column.width = 520; }
             }
 
             // Mark the secondary source before assigning masterDetail. The GenericEdit
@@ -136,7 +139,7 @@ namespace PersonCleaner.V2.UI
 
             var rowCount = rows == null ? 0 : rows.Length;
             var summary = run == null ? "No completed run is available."
-                : "Run " + run.RunId + " · all " + rowCount + " decisions loaded (" + run.DecisionBreakdown + ")";
+                : "Run " + run.RunId + " · " + rowCount + " review case(s) from " + run.Decisions + " stored decision relationship(s) (" + run.DecisionBreakdown + ")";
             return new EvidenceDialogUI { RunSummary = new CaptionItem(summary), Decisions = new DxDataGrid(grid), Rows = rows ?? Array.Empty<DashboardDecision>() };
         }
     }
@@ -169,8 +172,9 @@ namespace PersonCleaner.V2.UI
                 try { serverId = host.GetPublicSystemInfo(CancellationToken.None).GetAwaiter().GetResult()?.Id; }
                 catch (Exception ex) { logger.Warn("PersonCleaner could not resolve the Emby server ID; provider links will remain available but Emby item links will be plain text. {0}", ex.Message); }
                 EvidenceLinks.Apply(rows, serverId);
-                logger.Info("PersonCleaner full-screen evidence dialog loaded {0} decision row(s) in {1} status group(s), with {2} attached evidence/title detail row(s), from run {3}.", rows.Length, rows.Select(x => x.Status).Distinct(StringComparer.Ordinal).Count(), rows.Sum(x => x.Details == null ? 0 : x.Details.Length), run == null ? 0 : run.RunId);
-                var focus = rows.Any(x => string.Equals(x.DecisionId, focusedDecisionId, StringComparison.Ordinal)) ? focusedDecisionId : null;
+                logger.Info("PersonCleaner full-screen evidence dialog loaded {0} review case row(s) in {1} status group(s), with {2} attached assessment/relationship/title detail row(s), from run {3}.", rows.Length, rows.Select(x => x.Status).Distinct(StringComparer.Ordinal).Count(), rows.Sum(x => x.Details == null ? 0 : x.Details.Length), run == null ? 0 : run.RunId);
+                var focused = rows.FirstOrDefault(x => string.Equals(x.CaseId, focusedDecisionId, StringComparison.Ordinal) || (x.UnderlyingDecisionIds ?? new string[0]).Contains(focusedDecisionId, StringComparer.Ordinal));
+                var focus = focused == null ? null : focused.CaseId;
                 ContentData = EvidenceDialogUI.Build(rows, run, focus);
             }
         }
@@ -185,12 +189,12 @@ namespace PersonCleaner.V2.UI
             if (commandId == "decision-review-changes" && !string.IsNullOrWhiteSpace(data))
             {
                 var incoming = json.DeserializeFromString<EvidenceDialogUI>(data);
-                var selected = incoming?.Rows?.FirstOrDefault(x => x.ReviewChanges && !string.IsNullOrWhiteSpace(x.DecisionId));
+                var selected = incoming?.Rows?.FirstOrDefault(x => x.ReviewChanges && !string.IsNullOrWhiteSpace(x.CaseId));
                 if (selected != null)
                 {
-                    focusedDecisionId = selected.DecisionId;
-                    logger.Info("PersonCleaner opening scoped change review for decision {0}.", selected.DecisionId);
-                    return Task.FromResult<IPluginUIView>(new DecisionChangeDialogView(plugin, host, logger, this, Rebuild, selected.DecisionId));
+                    focusedDecisionId = selected.CaseId;
+                    logger.Info("PersonCleaner opening review case {0} with {1} underlying decision relationship(s).", selected.CaseId, (selected.UnderlyingDecisionIds ?? new string[0]).Length);
+                    return Task.FromResult<IPluginUIView>(new ReviewCaseDialogView(plugin, host, logger, this, Rebuild, selected));
                 }
             }
             logger.Debug("PersonCleaner evidence dialog command {0}; delegating to dialog host.", commandId ?? "(null)");

@@ -581,7 +581,7 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
                         decision.Details = decision.Details.Concat(new[] { new DashboardDetail { DetailId = r.GetString(0) + ":m:" + r.GetInt(1).ToString(CultureInfo.InvariantCulture), Section = "Impacted titles", Order = 10000 + r.GetInt(1), Signal = r.GetString(2), Verdict = r.GetString(4), Explanation = r.GetString(3), RawMetric = string.Empty, EmbyMediaId = r.GetInt64(5), MediaType = r.GetString(2), TmdbId = Null(r, 6), TvdbId = Null(r, 7), ImdbId = Null(r, 8), TvdbSlug = Null(r, 9) } }).ToArray();
                 }
             }
-            return result.ToArray();
+            return DashboardCaseBuilder.Build(result);
         }
 
         public DecisionChangeContext DecisionChangeContext(string decisionId)
