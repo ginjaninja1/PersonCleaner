@@ -216,6 +216,18 @@ namespace PersonCleaner.V2.Domain
         public List<EvidenceLine> Evidence { get; set; } = new List<EvidenceLine>();
         public List<MediaExample> ImpactedMedia { get; set; } = new List<MediaExample>();
         public List<MediaExample> MediaExamples { get; set; } = new List<MediaExample>();
+        public List<ResolutionCreditAssignment> CreditAssignments { get; set; } = new List<ResolutionCreditAssignment>();
+    }
+
+    public sealed class ResolutionCreditAssignment
+    {
+        public long SourcePersonEmbyId { get; set; }
+        public long TargetPersonEmbyId { get; set; }
+        public long MediaEmbyId { get; set; }
+        public string Role { get; set; }
+        public string Disposition { get; set; }
+        public string ComponentKey { get; set; }
+        public string Rationale { get; set; }
     }
 
     public sealed class ProviderCredit

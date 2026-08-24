@@ -28,8 +28,9 @@ flowchart LR
     PQ --> PE["Full cached person enrichment"]
     VQ --> PE
     PE --> B{"Media-derived graph boundary"}
-    B --> G["Offline graph + scoring"]
-    G --> D["Pre-rendered decisions and evidence"]
+    B --> G["Offline provider graph + scoring"]
+    G --> R["Connected local reconciliation regions"]
+    R --> D["Persisted decisions + exact credit plans"]
     D --> UI["Indexed query-only dashboard"]
 ```
 
@@ -58,7 +59,7 @@ Important table groups:
 | Flattened provider index | `provider_media`, `provider_media_observation`, `media_external_id`, `provider_media_credit`, `provider_person`, `person_external_id`, `person_alias` | Compact queryable evidence, structured roles and acquisition scope; no UI JSON parsing |
 | Human truth | `manual_bridge`, `provider_correction`, `correction_application` | Confirmed/rejected identity relations, persistent provider-fact overlays and per-run trigger audit |
 | Pair and cluster audit | `resolution_pair`, `resolution_pair_feature`, `resolution_cluster`, `resolution_cluster_member` | Versioned pair features, disposition, component membership and separate identity/anchor confidence |
-| Presentation/audit | `resolution_decision`, `resolution_evidence`, `resolution_media` | Pre-rendered summaries, raw metrics and complete impacted-title attribution |
+| Presentation/audit | `resolution_decision`, `resolution_evidence`, `resolution_media`, `resolution_credit_assignment` | Pre-rendered summaries, raw metrics, complete impacted-title attribution and immutable per-decision `KEEP`/`MOVE` plans |
 
 The schema is created idempotently by `ResolutionRepository`. It uses WAL, normal synchronous mode, foreign keys, a 30-second busy timeout, narrow primary keys, and reverse indexes for external-ID and person-credit lookup.
 
@@ -165,13 +166,27 @@ Provider components are mapped to local Emby people through indexed current prov
 
 Cluster identity confidence is the weakest accepted pair edge needed by the component. Local-anchor confidence is stored separately: a direct current-ID binding is `1.0`; a media-mass-only binding is `mass / (mass + 1)`. Ordinary stable singleton bindings are omitted from provider-identity decisions because they contain no cross-provider identity inference.
 
-The result remains a proposal in plugin shadow storage until explicit operator approval. The commit path validates live preconditions, then applies only the provider-ID and sampled credit moves shown in the dialog. It does not delete people, media, or images.
+### Connected local reconciliation
+
+Component resolution is deliberately not performed one provider component at a time. The engine builds a sparse bipartite graph whose left vertices are constrained provider-identity components and whose right vertices are in-scope Emby people; direct IDs, compatible naming and canonical-media mass create the observed anchor edges. Every connected region is then classified once:
+
+- one provider component to multiple Emby people is a `MERGE`;
+- multiple provider components to one Emby person is a `SPLIT`; and
+- multiple provider components to multiple Emby people is a `REALIGNMENT`.
+
+This prevents an individually plausible merge from consuming an Emby person whose credits actually span two distinct provider identities. A realignment is automatic only when every provider component has one distinct direct Emby owner, every relevant local credit maps to exactly one component by canonical media plus compatible person naming and role attribution, and no unresolved human-review edge crosses the component boundary. Otherwise the same region is retained as one review decision with no mutation.
+
+For an actionable region, the engine persists each exact `KEEP` or `MOVE` relationship in `resolution_credit_assignment`. The change planner reads those rows verbatim and never reverse-infers shadow people or moves from current provider keys. Impact counts include only persisted moves. Provider IDs are left unchanged for a pure realignment.
+
+Construction is proportional to the observed graph, not all people or all possible component/person pairs. Person-to-component adjacency and canonical-media-to-component inverted indexes drive connected-component traversal and credit assignment. Explicit sandbox additions therefore remain bounded and there is no transitive scope expansion.
+
+The result remains a proposal in plugin shadow storage until explicit operator approval. The commit path validates live preconditions, then applies only the provider-ID and persisted credit moves shown in the dialog. It does not delete people, media, or images.
 
 Before assigning a provider person ID, commit preflight re-reads all live Emby people and rejects an owner outside the evaluated scope. This repeats the calculation-time global-binding veto without turning global people into resolution evidence.
 
 ## UI contract
 
-The evidence page loads at most the configured summary limit (default 100), ordered as `SPLIT`, `CONFLATION`, `DRIFT`, `ORPHAN`, `MATCH_WITH_CONFLICT`, then `MATCH`. Each summary includes:
+The evidence page loads at most the configured summary limit (default 100), ordered as `SPLIT`, `REALIGNMENT`, `MERGE`, `CONFLATION`, `DRIFT`, `ORPHAN`, `MATCH_WITH_CONFLICT`, then `MATCH`. Each summary includes:
 
 - decision status and proposed shadow action;
 - ordinary-language headline and explanation;

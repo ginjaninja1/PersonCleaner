@@ -30,6 +30,8 @@ internal static class Program
         Run("local media mass survives provider id drift", MediaMassSurvivesIdDrift);
         Run("out-of-scope global provider owner withholds drift action", OutOfScopeProviderOwnerWithholdsDrift);
         Run("explicitly in-scope provider owner participates in merge", InScopeProviderOwnerParticipatesInMerge);
+        Run("Samantha Kelly mixed local credits become one exact realignment", SamanthaKellyCreditsRealignExactly);
+        Run("ambiguous Samantha Kelly credit withholds realignment", SamanthaKellyAmbiguityWithholdsMutation);
         Run("operator bridge joins disconnected provider records", OperatorBridgeJoinsRecords);
         Run("operator rejection keeps shared-media records separate", OperatorRejectionKeepsRecordsSeparate);
         Run("orphan without provider IDs has persistable provider text", OrphanWithoutIdsHasProviderText);
@@ -522,7 +524,8 @@ internal static class Program
                 new LocalPerson { EmbyId = 10, Name = "Example", TmdbId = "100" },
                 new LocalPerson { EmbyId = 11, Name = "Example", TvdbId = "200" }
             },
-            LocalCredits = new List<LocalCredit> { new LocalCredit { PersonEmbyId = 11, MediaEmbyId = 20, Role = "Actor: Lead" } }
+            LocalCredits = new List<LocalCredit> { new LocalCredit { PersonEmbyId = 11, MediaEmbyId = 20, Role = "Actor: Lead" } },
+            CreditAssignments = new List<ResolutionCreditAssignment> { new ResolutionCreditAssignment { SourcePersonEmbyId = 11, TargetPersonEmbyId = 10, MediaEmbyId = 20, Role = "Actor: Lead", Disposition = "MOVE", ComponentKey = "tmdb:100, tvdb:200", Rationale = "Persisted test assignment." } }
         };
         var plan = DecisionChangePlanner.Build(context);
         Equal(2, plan.Changes.Count);
@@ -615,8 +618,77 @@ internal static class Program
         input.LocalCredits.AddRange(new[] { Credit(402910, 284293), Credit(402058, 157849) });
 
         var decision = new ResolutionEngine().Resolve(input, new ResolutionSettings()).Single(x => x.Action == "AUTO_MERGE_SHADOW");
+        Equal("MERGE", decision.Status);
         Equal(402058L, decision.AnchorEmbyPersonId.Value);
         True(!decision.Evidence.Any(x => x.SignalType == "GLOBAL_BINDING_OWNER"));
+    }
+
+    private static void SamanthaKellyCreditsRealignExactly()
+    {
+        var input = SamanthaKellyInput();
+        var engine = new ResolutionEngine();
+        var decision = engine.Resolve(input, new ResolutionSettings()).Single(x => x.Status == "REALIGNMENT");
+        Equal(ResolutionActions.AutoRealignCredits, decision.Action);
+        Equal(1, decision.CreditAssignments.Count(x => x.Disposition == "MOVE"));
+        var move = decision.CreditAssignments.Single(x => x.Disposition == "MOVE");
+        Equal(402910L, move.SourcePersonEmbyId);
+        Equal(402058L, move.TargetPersonEmbyId);
+        Equal(296586L, move.MediaEmbyId);
+        Equal(1, decision.ImpactedMediaCount);
+        Equal("Still Alice", decision.ImpactedMedia.Single().DisplayName);
+
+        var context = new DecisionChangeContext { Decision = decision, LocalPeople = input.LocalPeople, GlobalLocalPeople = input.GlobalLocalPeople, LocalCredits = input.LocalCredits, ProposedProviderPeople = input.ProviderPeople, CreditAssignments = decision.CreditAssignments };
+        var plan = DecisionChangePlanner.Build(context);
+        Equal(1, plan.Changes.Count);
+        Equal(EmbyChangeKinds.MoveCredit, plan.Changes[0].Kind);
+        True(!plan.Changes.Any(x => x.Kind == EmbyChangeKinds.SetPersonProviderId || x.Kind == EmbyChangeKinds.RemovePersonProviderId));
+
+        input.LocalCredits.RemoveAll(x => x.PersonEmbyId == 402910 && x.MediaEmbyId == 296586);
+        input.LocalCredits.Add(new LocalCredit { PersonEmbyId = 402058, MediaEmbyId = 296586, Role = "Actor: TV Reporter (uncredited)" });
+        True(!new ResolutionEngine().Resolve(input, new ResolutionSettings()).Any(x => x.DisplayName.Contains("Samantha Kelly")));
+    }
+
+    private static void SamanthaKellyAmbiguityWithholdsMutation()
+    {
+        var input = SamanthaKellyInput();
+        input.LocalCredits.Single(x => x.MediaEmbyId == 296586).Role = "Director";
+        var decision = new ResolutionEngine().Resolve(input, new ResolutionSettings()).Single(x => x.Status == "REALIGNMENT");
+        Equal("HUMAN_REVIEW", decision.Action);
+        True(decision.Evidence.Any(x => x.SignalType == "LOCAL_RECONCILIATION" && x.Metric.Contains("ambiguous_credits=1")));
+        var context = new DecisionChangeContext { Decision = decision, LocalPeople = input.LocalPeople, GlobalLocalPeople = input.GlobalLocalPeople, LocalCredits = input.LocalCredits, ProposedProviderPeople = input.ProviderPeople, CreditAssignments = decision.CreditAssignments };
+        Equal(0, DecisionChangePlanner.Build(context).Changes.Count);
+    }
+
+    private static ResolutionInput SamanthaKellyInput()
+    {
+        var componentA = Person(ProviderNames.Tmdb, "3844231", "Samantha Kelly", ProviderNames.Imdb, "nm2841197", "tmdb:movie:204922", "tmdb:movie:284293");
+        componentA.ExternalIds[ProviderNames.Wikidata] = "Q19819860";
+        AddObservedCredit(componentA, "tmdb:movie:204922", "Actor", "Nurse with Austrian Accent (uncredited)");
+        AddObservedCredit(componentA, "tmdb:movie:284293", "Actor", "TV Reporter (uncredited)");
+        var componentB = Person(ProviderNames.Tmdb, "3210679", "Samantha Kelly", ProviderNames.Imdb, "nm0446845", "tmdb:movie:277216");
+        AddObservedCredit(componentB, "tmdb:movie:277216", "Actor", "Pendleton's Girl (uncredited)");
+        var input = BaseInput(componentA, componentB);
+        input.ProviderCredits.AddRange(componentA.Credits.Concat(componentB.Credits));
+        input.LocalPeople.AddRange(new[]
+        {
+            new LocalPerson { EmbyId = 402058, Name = "Samantha Kelly", TmdbId = "3844231", ImdbId = "nm2841197" },
+            new LocalPerson { EmbyId = 402910, Name = "Samantha Kelly", TmdbId = "3210679", ImdbId = "nm0446845" }
+        });
+        input.GlobalLocalPeople.AddRange(input.LocalPeople);
+        input.Media.AddRange(new[]
+        {
+            new MediaSeed { EmbyId = 296228, MediaType = MediaTypes.Movie, Name = "Before I Go to Sleep", TmdbId = "204922" },
+            new MediaSeed { EmbyId = 296586, MediaType = MediaTypes.Movie, Name = "Still Alice", TmdbId = "284293" },
+            new MediaSeed { EmbyId = 299100, MediaType = MediaTypes.Movie, Name = "Straight Outta Compton", TmdbId = "277216" }
+        });
+        input.LocalCredits.AddRange(new[]
+        {
+            new LocalCredit { PersonEmbyId = 402058, MediaEmbyId = 296228, Role = "Actor: Nurse with Austrian Accent (uncredited)" },
+            new LocalCredit { PersonEmbyId = 402910, MediaEmbyId = 296586, Role = "Actor: TV Reporter (uncredited)" },
+            new LocalCredit { PersonEmbyId = 402910, MediaEmbyId = 299100, Role = "Actor: Pendleton's Girl (uncredited)" }
+        });
+
+        return input;
     }
 
     private static void ChangePlannerExposesOrphanRemoval()

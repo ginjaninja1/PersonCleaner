@@ -15,6 +15,7 @@ namespace PersonCleaner.V2.Domain
     public static class ResolutionActions
     {
         public const string IncompleteScope = "INCOMPLETE_SCOPE";
+        public const string AutoRealignCredits = "AUTO_REALIGN_CREDITS";
     }
 
     public sealed class EmbyChangeProposal
@@ -39,6 +40,7 @@ namespace PersonCleaner.V2.Domain
         public List<LocalPerson> LocalPeople { get; set; } = new List<LocalPerson>();
         public List<LocalPerson> GlobalLocalPeople { get; set; } = new List<LocalPerson>();
         public List<LocalCredit> LocalCredits { get; set; } = new List<LocalCredit>();
+        public List<ResolutionCreditAssignment> CreditAssignments { get; set; } = new List<ResolutionCreditAssignment>();
         public List<PersonAcquisition> Acquisitions { get; set; } = new List<PersonAcquisition>();
         public List<ProviderPerson> ProposedProviderPeople { get; set; } = new List<ProviderPerson>();
     }
@@ -96,22 +98,20 @@ namespace PersonCleaner.V2.Domain
                 }
             }
 
-            if (anchor != null && (decision.Action ?? string.Empty).StartsWith("AUTO_MERGE_SHADOW", StringComparison.Ordinal))
+            if ((decision.Action ?? string.Empty).StartsWith("AUTO_MERGE_SHADOW", StringComparison.Ordinal) || decision.Action == ResolutionActions.AutoRealignCredits)
             {
-                var proposed = new HashSet<string>(keys.Select(x => x.Provider + ":" + x.Id), StringComparer.OrdinalIgnoreCase);
-                var shadows = new HashSet<long>(context.LocalPeople.Where(x => x.EmbyId != anchor.EmbyId && CurrentKeys(x).Any(proposed.Contains)).Select(x => x.EmbyId));
-                foreach (var credit in context.LocalCredits.Where(x => shadows.Contains(x.PersonEmbyId)).OrderBy(x => x.MediaEmbyId).ThenBy(x => x.Role, StringComparer.Ordinal))
+                foreach (var assignment in context.CreditAssignments.Where(x => x.Disposition == "MOVE").OrderBy(x => x.MediaEmbyId).ThenBy(x => x.Role, StringComparer.Ordinal).ThenBy(x => x.SourcePersonEmbyId))
                 {
                     plan.Changes.Add(new EmbyChangeProposal
                     {
-                        ChangeId = "credit:" + credit.PersonEmbyId.ToString(CultureInfo.InvariantCulture) + ":" + credit.MediaEmbyId.ToString(CultureInfo.InvariantCulture) + ":" + (credit.Role ?? string.Empty),
+                        ChangeId = "credit:" + assignment.SourcePersonEmbyId.ToString(CultureInfo.InvariantCulture) + ":" + assignment.MediaEmbyId.ToString(CultureInfo.InvariantCulture) + ":" + (assignment.Role ?? string.Empty),
                         Kind = EmbyChangeKinds.MoveCredit,
-                        SourcePersonId = credit.PersonEmbyId,
-                        TargetPersonId = anchor.EmbyId,
-                        MediaId = credit.MediaEmbyId,
-                        Role = credit.Role,
-                        Summary = "Move " + (string.IsNullOrWhiteSpace(credit.Role) ? "credit" : credit.Role) + " on Emby media " + credit.MediaEmbyId + " from person " + credit.PersonEmbyId + " to person " + anchor.EmbyId + ".",
-                        EvidenceNote = "This relationship is present in the evaluated Emby snapshot."
+                        SourcePersonId = assignment.SourcePersonEmbyId,
+                        TargetPersonId = assignment.TargetPersonEmbyId,
+                        MediaId = assignment.MediaEmbyId,
+                        Role = assignment.Role,
+                        Summary = "Move " + (string.IsNullOrWhiteSpace(assignment.Role) ? "credit" : assignment.Role) + " on Emby media " + assignment.MediaEmbyId + " from person " + assignment.SourcePersonEmbyId + " to person " + assignment.TargetPersonEmbyId + ".",
+                        EvidenceNote = assignment.Rationale + " Component: " + assignment.ComponentKey + "."
                     });
                 }
             }

@@ -12,7 +12,7 @@ namespace PersonCleaner.V2.Storage
 {
     internal sealed class ResolutionRepository : IDisposable
     {
-        private const int SchemaVersion = 7;
+        private const int SchemaVersion = 8;
         private readonly object sync = new object();
         private IDatabaseConnection db;
         public string WorkspacePath { get; }
@@ -50,10 +50,10 @@ namespace PersonCleaner.V2.Storage
                 }
                 foreach (var sql in Schema) db.Execute(sql);
                 if (!version.HasValue) db.Execute("INSERT INTO schema_info(singleton,version) VALUES(1," + SchemaVersion.ToString(CultureInfo.InvariantCulture) + ")");
-                if (!ColumnExists("provider_media", "slug") || !ColumnExists("provider_media_credit", "role_category") || !ColumnExists("resolution_decision", "local_anchor_confidence") || !ColumnExists("cache_manifest", "materializer_version") || !ColumnExists("provider_media_observation", "materializer_version") || !ColumnExists("work_queue", "graph_eligible") || !TableExists("resolution_pair") || !TableExists("resolution_cluster") || !TableExists("provider_correction") || !TableExists("correction_application") || !TableExists("provider_absence_cache") || !TableExists("acquisition_observation") || !TableExists("global_local_person"))
+                if (!ColumnExists("provider_media", "slug") || !ColumnExists("provider_media_credit", "role_category") || !ColumnExists("resolution_decision", "local_anchor_confidence") || !ColumnExists("cache_manifest", "materializer_version") || !ColumnExists("provider_media_observation", "materializer_version") || !ColumnExists("work_queue", "graph_eligible") || !TableExists("resolution_pair") || !TableExists("resolution_cluster") || !TableExists("provider_correction") || !TableExists("correction_application") || !TableExists("provider_absence_cache") || !TableExists("acquisition_observation") || !TableExists("global_local_person") || !TableExists("resolution_credit_assignment"))
                 {
                     db.Dispose(); db = null;
-                    throw new InvalidOperationException("PersonCleaner schema 7 is incomplete. Stop Emby and restore the most recent pre-migration backup before applying the numbered migrations again.");
+                    throw new InvalidOperationException("PersonCleaner schema 8 is incomplete. Stop Emby and restore the most recent pre-migration backup before applying the numbered migrations again.");
                 }
                 // v2 originally represented the non-media dimension of person
                 // work as an empty string. Emby's SQLite binder can coerce an
@@ -396,6 +396,8 @@ WHERE a.run_id=@run AND a.outcome='PRESENT'";
                         Statement(x, "INSERT OR REPLACE INTO resolution_evidence VALUES(@run,@decision,@sort,@signal,@verdict,@narrative,@metric)", s => { s.Bind("@run", runId); s.Bind("@decision", Required(decision.DecisionId, "decision-id-missing")); s.Bind("@sort", evidence.SortOrder); s.Bind("@signal", Required(evidence.SignalType, "UNSPECIFIED")); s.Bind("@verdict", Required(evidence.Verdict, "unknown")); s.Bind("@narrative", Required(evidence.Narrative, "No narrative was generated.")); s.Bind("@metric", Required(evidence.Metric, "-")); });
                     foreach (var media in decision.ImpactedMedia)
                         Statement(x, "INSERT OR REPLACE INTO resolution_media VALUES(@run,@decision,@media,@type,@name,@role)", s => { s.Bind("@run", runId); s.Bind("@decision", Required(decision.DecisionId, "decision-id-missing")); s.Bind("@media", media.EmbyMediaId); s.Bind("@type", Required(media.MediaType, "unknown")); s.Bind("@name", Required(media.DisplayName, "Unnamed media")); s.Bind("@role", Required(media.Role, "Unspecified role")); });
+                    foreach (var assignment in decision.CreditAssignments ?? new List<ResolutionCreditAssignment>())
+                        Statement(x, "INSERT OR REPLACE INTO resolution_credit_assignment VALUES(@run,@decision,@source,@target,@media,@role,@disposition,@component,@rationale)", s => { s.Bind("@run", runId); s.Bind("@decision", Required(decision.DecisionId, "decision-id-missing")); s.Bind("@source", assignment.SourcePersonEmbyId); s.Bind("@target", assignment.TargetPersonEmbyId); s.Bind("@media", assignment.MediaEmbyId); s.Bind("@role", Required(assignment.Role, "Unspecified role")); s.Bind("@disposition", Required(assignment.Disposition, "KEEP")); s.Bind("@component", Required(assignment.ComponentKey, "unknown")); s.Bind("@rationale", Required(assignment.Rationale, "No assignment rationale was generated.")); });
                 }
                 foreach (var pair in pairs ?? new ResolutionPairEvaluation[0])
                 {
@@ -510,7 +512,7 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
                 if (run == null) return null;
 
                 var counts = new List<string>();
-                using (var s = db.PrepareStatement("SELECT status,count(*) FROM resolution_decision WHERE run_id=@run GROUP BY status ORDER BY CASE status WHEN 'SPLIT' THEN 0 WHEN 'CONFLATION' THEN 1 WHEN 'DRIFT' THEN 2 WHEN 'ORPHAN' THEN 3 WHEN 'MATCH_WITH_CONFLICT' THEN 4 ELSE 5 END,status"))
+                using (var s = db.PrepareStatement("SELECT status,count(*) FROM resolution_decision WHERE run_id=@run GROUP BY status ORDER BY CASE status WHEN 'SPLIT' THEN 0 WHEN 'REALIGNMENT' THEN 1 WHEN 'MERGE' THEN 2 WHEN 'CONFLATION' THEN 3 WHEN 'DRIFT' THEN 4 WHEN 'ORPHAN' THEN 5 WHEN 'MATCH_WITH_CONFLICT' THEN 6 ELSE 7 END,status"))
                 {
                     s.Bind("@run", run.RunId);
                     foreach (var r in s.Rows()) counts.Add(r.GetString(0) + "=" + r.GetInt(1).ToString(CultureInfo.InvariantCulture));
@@ -527,7 +529,7 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
             {
                 var latest = 0L; using (var q = db.PrepareStatement("SELECT max(run_id) FROM resolution_run WHERE status='completed'")) foreach (var r in q.Rows()) if (!r.IsDBNull(0)) latest = r.GetInt64(0);
                 const string visible = "SELECT decision_id FROM (SELECT decision_id,status,confidence,impact_media_count,ROW_NUMBER() OVER(PARTITION BY status ORDER BY confidence ASC,impact_media_count DESC,decision_id) AS status_row FROM resolution_decision WHERE run_id=@run) WHERE status_row<=@summaryLimit";
-                using (var s = db.PrepareStatement("WITH visible AS (" + visible + ") SELECT d.decision_id,d.status,d.action,d.display_name,d.anchor_emby_id,d.provider_keys,d.confidence,d.impact_media_count,d.headline,d.explanation,d.local_anchor_confidence FROM resolution_decision d JOIN visible v ON v.decision_id=d.decision_id WHERE d.run_id=@run ORDER BY CASE d.status WHEN 'SPLIT' THEN 0 WHEN 'CONFLATION' THEN 1 WHEN 'DRIFT' THEN 2 WHEN 'ORPHAN' THEN 3 WHEN 'MATCH_WITH_CONFLICT' THEN 4 ELSE 5 END,d.confidence ASC,d.impact_media_count DESC,d.decision_id"))
+                using (var s = db.PrepareStatement("WITH visible AS (" + visible + ") SELECT d.decision_id,d.status,d.action,d.display_name,d.anchor_emby_id,d.provider_keys,d.confidence,d.impact_media_count,d.headline,d.explanation,d.local_anchor_confidence FROM resolution_decision d JOIN visible v ON v.decision_id=d.decision_id WHERE d.run_id=@run ORDER BY CASE d.status WHEN 'SPLIT' THEN 0 WHEN 'REALIGNMENT' THEN 1 WHEN 'MERGE' THEN 2 WHEN 'CONFLATION' THEN 3 WHEN 'DRIFT' THEN 4 WHEN 'ORPHAN' THEN 5 WHEN 'MATCH_WITH_CONFLICT' THEN 6 ELSE 7 END,d.confidence ASC,d.impact_media_count DESC,d.decision_id"))
                 {
                     s.Bind("@run", latest); s.Bind("@summaryLimit", Math.Max(1, maximumRows));
                     foreach (var r in s.Rows()) result.Add(new DashboardDecision { DecisionId = r.GetString(0), Status = r.GetString(1), Action = r.GetString(2), Person = r.GetString(3), EmbyAnchor = r.IsDBNull(4) ? "—" : r.GetInt64(4).ToString(CultureInfo.InvariantCulture), ProviderIdentities = r.GetString(5), Confidence = r.GetDouble(6).ToString("P0", CultureInfo.InvariantCulture), ImpactedTitles = r.GetInt(7), Decision = r.GetString(8), Why = r.GetString(9), LocalAnchorConfidence = r.GetDouble(10).ToString("P0", CultureInfo.InvariantCulture) });
@@ -589,6 +591,11 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
                     foreach (var r in s.Rows()) context.GlobalLocalPeople.Add(new LocalPerson { EmbyId = r.GetInt64(0), Name = r.GetString(1), TmdbId = Null(r, 2), TvdbId = Null(r, 3), ImdbId = Null(r, 4) });
                 using (var s = db.PrepareStatement("SELECT person_emby_id,media_emby_id,role FROM current_local_credit"))
                     foreach (var r in s.Rows()) context.LocalCredits.Add(new LocalCredit { PersonEmbyId = r.GetInt64(0), MediaEmbyId = r.GetInt64(1), Role = r.GetString(2) });
+                using (var s = db.PrepareStatement("SELECT source_person_emby_id,target_person_emby_id,media_emby_id,role,disposition,component_key,rationale FROM resolution_credit_assignment WHERE run_id=@run AND decision_id=@decision ORDER BY media_emby_id,role,source_person_emby_id,target_person_emby_id"))
+                {
+                    s.Bind("@run", runId); s.Bind("@decision", decisionId);
+                    foreach (var r in s.Rows()) context.CreditAssignments.Add(new ResolutionCreditAssignment { SourcePersonEmbyId = r.GetInt64(0), TargetPersonEmbyId = r.GetInt64(1), MediaEmbyId = r.GetInt64(2), Role = r.GetString(3), Disposition = r.GetString(4), ComponentKey = r.GetString(5), Rationale = r.GetString(6) });
+                }
                 using (var s = db.PrepareStatement("SELECT provider,provider_id,outcome,graph_eligible,source,detail FROM acquisition_observation WHERE run_id=@run AND entity_type='person' AND media_type='person'"))
                 {
                     s.Bind("@run", runId);
@@ -819,6 +826,7 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
             "CREATE INDEX IF NOT EXISTS idx_decision_ui ON resolution_decision(run_id,status,confidence,impact_media_count DESC)",
             "CREATE TABLE IF NOT EXISTS resolution_evidence(run_id INTEGER NOT NULL,decision_id TEXT NOT NULL,sort_order INTEGER NOT NULL,signal_type TEXT NOT NULL,verdict TEXT NOT NULL,narrative TEXT NOT NULL,metric_raw TEXT NOT NULL,PRIMARY KEY(run_id,decision_id,sort_order,signal_type),FOREIGN KEY(run_id,decision_id) REFERENCES resolution_decision(run_id,decision_id) ON DELETE CASCADE) WITHOUT ROWID",
             "CREATE TABLE IF NOT EXISTS resolution_media(run_id INTEGER NOT NULL,decision_id TEXT NOT NULL,emby_media_id INTEGER NOT NULL,media_type TEXT NOT NULL,display_name TEXT NOT NULL,role TEXT NOT NULL,PRIMARY KEY(run_id,decision_id,emby_media_id,role),FOREIGN KEY(run_id,decision_id) REFERENCES resolution_decision(run_id,decision_id) ON DELETE CASCADE) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS resolution_credit_assignment(run_id INTEGER NOT NULL,decision_id TEXT NOT NULL,source_person_emby_id INTEGER NOT NULL,target_person_emby_id INTEGER NOT NULL,media_emby_id INTEGER NOT NULL,role TEXT NOT NULL,disposition TEXT NOT NULL CHECK(disposition IN('KEEP','MOVE')),component_key TEXT NOT NULL,rationale TEXT NOT NULL,PRIMARY KEY(run_id,decision_id,source_person_emby_id,target_person_emby_id,media_emby_id,role),FOREIGN KEY(run_id,decision_id) REFERENCES resolution_decision(run_id,decision_id) ON DELETE CASCADE) WITHOUT ROWID",
             "CREATE TABLE IF NOT EXISTS resolution_pair(run_id INTEGER NOT NULL,pair_id TEXT NOT NULL,left_provider TEXT NOT NULL,left_provider_person_id TEXT NOT NULL,right_provider TEXT NOT NULL,right_provider_person_id TEXT NOT NULL,model_version TEXT NOT NULL,disposition TEXT NOT NULL,confidence REAL NOT NULL,PRIMARY KEY(run_id,pair_id),FOREIGN KEY(run_id) REFERENCES resolution_run(run_id) ON DELETE CASCADE) WITHOUT ROWID",
             "CREATE INDEX IF NOT EXISTS idx_resolution_pair_disposition ON resolution_pair(run_id,disposition,confidence)",
             "CREATE TABLE IF NOT EXISTS resolution_pair_feature(run_id INTEGER NOT NULL,pair_id TEXT NOT NULL,feature_name TEXT NOT NULL,numeric_value REAL,text_value TEXT,PRIMARY KEY(run_id,pair_id,feature_name),FOREIGN KEY(run_id,pair_id) REFERENCES resolution_pair(run_id,pair_id) ON DELETE CASCADE) WITHOUT ROWID",
