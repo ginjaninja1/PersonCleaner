@@ -157,13 +157,17 @@ namespace PersonCleaner.V2.Domain
                 CaseType = FriendlyType(decisions),
                 DecisionIds = decisions.Select(x => x.DecisionId).ToList()
             };
+            foreach (var warning in decisions.SelectMany(x => x.Evidence ?? new List<EvidenceLine>())
+                .Where(x => string.Equals(x.SignalType, "BIRTHDAY", StringComparison.OrdinalIgnoreCase) && string.Equals(x.Verdict, "conflicts", StringComparison.OrdinalIgnoreCase))
+                .Select(x => x.Narrative).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.Ordinal))
+                AppendWarning(plan, "Informational metadata warning: " + warning);
 
             var clusterGroups = clusters.Select(x => new List<ResolutionClusterSnapshot> { x }).ToList();
             var sameAnchor = clusterGroups.Count > 1 && personIds.Count == 1;
             if (sameAnchor && CanRemainOneIdentity(clusterGroups.SelectMany(x => x).ToList(), input, planner))
             {
                 clusterGroups = new List<List<ResolutionClusterSnapshot>> { clusters };
-                plan.Warning = "Nothing independently links every provider record in this case, but there is no counter-evidence and Emby currently treats them as the same person.";
+                AppendWarning(plan, "Nothing independently links every provider record in this case, but there is no counter-evidence and Emby currently treats them as the same person.");
             }
 
             var currentPeople = personIds.Select(x => planner.LocalPeopleById.TryGetValue(x, out var person) ? person : null).Where(x => x != null).OrderBy(x => x.EmbyId).ToList();
@@ -176,6 +180,19 @@ namespace PersonCleaner.V2.Domain
                 var candidates = currentPeople.Select(x => new { Person = x, Score = CurrentKeys(x).Count(keys.Contains), Credits = planner.LocalCreditCounts.TryGetValue(x.EmbyId, out var count) ? count : 0 })
                     .Where(x => x.Score > 0).OrderByDescending(x => x.Score).ThenByDescending(x => x.Credits).ThenBy(x => x.Person.EmbyId).ToList();
                 var selected = candidates.Select(x => x.Person).FirstOrDefault(x => !usedTargets.Contains(x.EmbyId));
+                if (selected == null)
+                {
+                    // A provider-ID drift case deliberately has no current-key match. Reuse the
+                    // resolver's unique local media anchor instead of creating a replacement Emby
+                    // person and moving every already-correct credit to it.
+                    var anchored = group.Where(x => x.AnchorEmbyPersonId.HasValue).Select(x => x.AnchorEmbyPersonId.Value).Distinct()
+                        .Where(x => !usedTargets.Contains(x)).Select(x => currentPeople.FirstOrDefault(y => y.EmbyId == x)).Where(x => x != null).ToList();
+                    if (anchored.Count == 1)
+                    {
+                        var directInAnotherGroup = clusters.Except(group).Any(x => CurrentKeys(anchored[0]).Any(y => x.ProviderKeys.Contains(y)));
+                        if (!directInAnotherGroup) selected = anchored[0];
+                    }
+                }
                 var targetOverride = FindIdentityOverride(input.ActiveCorrections, keys);
                 var builder = new OutcomeBuilder { Clusters = group, Keys = keys, Override = targetOverride };
                 if (targetOverride != null && targetOverride.ReplacementValue.StartsWith("existing:", StringComparison.Ordinal))
@@ -196,7 +213,9 @@ namespace PersonCleaner.V2.Domain
                 var ids = FinalProviderIds(builder.Keys, providerPeople);
                 var targetKind = builder.Selected != null ? IdentityTargetKinds.Existing : ids.Any(x => x.Source == "native") ? IdentityTargetKinds.New : IdentityTargetKinds.Unresolved;
                 if (ids.GroupBy(x => x.Provider, StringComparer.OrdinalIgnoreCase).Any(x => x.Select(y => y.ProviderId).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1)) targetKind = IdentityTargetKinds.Unresolved;
-                var identityName = builder.Keys.Select(x => providerPeople.ContainsKey(x) ? providerPeople[x].Name : null).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)) ?? displayName;
+                // Existing-person Apply changes provider IDs and credit ownership, not names.
+                // Keep the result name honest about what Emby will actually retain.
+                var identityName = builder.Selected?.Name ?? builder.Keys.Select(x => providerPeople.ContainsKey(x) ? providerPeople[x].Name : null).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)) ?? displayName;
                 var outcomeId = (targetKind == IdentityTargetKinds.Existing ? "existing:" + builder.Selected.EmbyId : targetKind == IdentityTargetKinds.New ? "new:" : "unresolved:") + StableHash(string.Join("|", builder.Keys.OrderBy(x => x, StringComparer.Ordinal)));
                 var matchingSourceIds = currentPeople.Where(x => CurrentKeys(x).Any(builder.Keys.Contains)).Select(x => x.EmbyId).ToList();
                 var sourceIds = targetKind == IdentityTargetKinds.Existing && builder.Selected != null ? matchingSourceIds.Where(x => x == builder.Selected.EmbyId).ToList() : targetKind == IdentityTargetKinds.Unresolved ? matchingSourceIds : new List<long>();
@@ -216,6 +235,7 @@ namespace PersonCleaner.V2.Domain
 
             AddEmptyExistingOutcomes(plan, currentPeople);
             BuildCredits(plan, input, planner, provisional);
+            PreserveUnopposedExistingIds(plan, currentPeople);
             BuildIdentityQuestions(plan, input, provisional);
 
             var blocked = decisions.Any(x => x.Action == ResolutionActions.IncompleteScope);
@@ -316,6 +336,24 @@ namespace PersonCleaner.V2.Domain
                 plan.Outcomes.Add(new IdentityOutcome { OutcomeId = "existing-empty:" + person.EmbyId, SortOrder = 10000 + plan.Outcomes.Count, TargetKind = IdentityTargetKinds.Existing, TargetEmbyId = person.EmbyId, DisplayName = person.Name, SourceEmbyIds = new List<long> { person.EmbyId }, Outcome = "Emby will remove this person as no media is assigned" });
         }
 
+        private static void PreserveUnopposedExistingIds(IdentityCasePlan plan, IEnumerable<LocalPerson> currentPeople)
+        {
+            var byId = currentPeople.ToDictionary(x => x.EmbyId);
+            foreach (var outcome in plan.Outcomes.Where(x => x.TargetEmbyId.HasValue && plan.Credits.Any(c => c.TargetOutcomeId == x.OutcomeId)))
+            {
+                if (!byId.TryGetValue(outcome.TargetEmbyId.Value, out var current)) continue;
+                foreach (var provider in new[] { ProviderNames.Tmdb, ProviderNames.Tvdb, ProviderNames.Imdb })
+                {
+                    if (outcome.ProviderIds.Any(x => x.Provider == provider)) continue;
+                    var currentId = LocalId(current, provider);
+                    if (string.IsNullOrWhiteSpace(currentId)) continue;
+                    if (plan.Outcomes.Where(x => x != outcome).SelectMany(x => x.ProviderIds).Any(x => x.Provider == provider && string.Equals(x.ProviderId, currentId, StringComparison.OrdinalIgnoreCase))) continue;
+                    outcome.ProviderIds.Add(new IdentityProviderId { Provider = provider, ProviderId = currentId, Source = provider == ProviderNames.Imdb ? "external" : "native" });
+                }
+                outcome.ProviderIds = outcome.ProviderIds.OrderBy(x => x.Provider, StringComparer.Ordinal).ThenBy(x => x.ProviderId, StringComparer.Ordinal).ToList();
+            }
+        }
+
         private static void CompleteSummaries(IdentityCasePlan plan, ResolutionInput input)
         {
             foreach (var outcome in plan.Outcomes.Where(x => x.TargetKind == IdentityTargetKinds.New && !plan.Credits.Any(c => c.TargetOutcomeId == x.OutcomeId)))
@@ -335,6 +373,8 @@ namespace PersonCleaner.V2.Domain
             plan.ApplyCaption = "Apply: " + (parts.Count == 0 ? "no Emby changes" : string.Join(", ", parts));
             var outcomes = plan.Outcomes.Count(x => x.TargetKind != IdentityTargetKinds.Unresolved && plan.Credits.Any(c => c.TargetOutcomeId == x.OutcomeId));
             plan.Summary = plan.DisplayName + " will become " + outcomes + " provider-identified Emby " + (outcomes == 1 ? "person" : "people") + ". " + (parts.Count == 0 ? "No Emby changes are required." : char.ToUpperInvariant(parts[0][0]) + parts[0].Substring(1) + (parts.Count > 1 ? ", " + string.Join(", ", parts.Skip(1)) : string.Empty) + ".");
+            if (plan.CaseType == "Provider records agree" && changes > 0)
+                AppendWarning(plan, "The provider records agree with each other, but the current Emby person still differs by " + changes + " provider ID" + (changes == 1 ? string.Empty : "s") + "; the reviewed plan shows that pending Emby alignment explicitly.");
             if (plan.State == IdentityPlanStates.CorrectionRequired) plan.Summary += " A human correction is required before Apply is available.";
             if (plan.State == IdentityPlanStates.Blocked) plan.Summary += " The current scope is incomplete, so Apply is unavailable.";
         }
@@ -444,6 +484,11 @@ namespace PersonCleaner.V2.Domain
             var values = decisions.Select(x => x.Status).Distinct(StringComparer.Ordinal).ToList();
             if (values.Count > 1) return "Mixed identity issues";
             switch (values.FirstOrDefault()) { case "SPLIT": return "Possible combined identities"; case "CONFLATION": return "Provider attribution disagreement"; case "REALIGNMENT": return "Credits assigned to the wrong Emby person"; case "DRIFT": return "Emby provider-ID drift"; case "ORPHAN": return "Provider identity missing"; case "MATCH_WITH_CONFLICT": return "Identity match; metadata differs"; case "MATCH": return "Provider records agree"; default: return values.FirstOrDefault() ?? "Identity case"; }
+        }
+        private static void AppendWarning(IdentityCasePlan plan, string warning)
+        {
+            if (string.IsNullOrWhiteSpace(warning)) return;
+            plan.Warning = string.IsNullOrWhiteSpace(plan.Warning) ? warning : plan.Warning + Environment.NewLine + warning;
         }
         private static string Canonical(IdentityCasePlan plan) => plan.CaseId + "|" + plan.State + "|" + string.Join(";", plan.Outcomes.OrderBy(x => x.OutcomeId).Select(x => x.OutcomeId + ":" + x.TargetKind + ":" + x.TargetEmbyId + ":" + string.Join(",", x.ProviderIds.Select(y => y.Provider + "=" + y.ProviderId)))) + "|" + string.Join(";", plan.Credits.OrderBy(x => x.AssignmentId).Select(x => x.AssignmentId + ":" + x.TargetOutcomeId + ":" + x.CorrectionRequired));
         private static string StableHash(string value)

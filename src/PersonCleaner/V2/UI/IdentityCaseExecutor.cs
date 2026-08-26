@@ -75,6 +75,11 @@ namespace PersonCleaner.V2.UI
                 throw new InvalidOperationException("The plan assigns one provider person ID to more than one final identity.");
             foreach (var snapshot in plan.CurrentPeople)
             {
+                var retained = plan.Outcomes.FirstOrDefault(x => x.TargetEmbyId == snapshot.EmbyId && plan.Credits.Any(c => c.TargetOutcomeId == x.OutcomeId));
+                if (retained != null)
+                foreach (var provider in new[] { ProviderNames.Tmdb, ProviderNames.Tvdb, ProviderNames.Imdb })
+                    if (!string.IsNullOrWhiteSpace(LocalProviderId(snapshot, provider)) && !retained.ProviderIds.Any(x => x.Provider == provider))
+                        throw new InvalidOperationException("The reviewed plan omits the current " + provider.ToUpperInvariant() + " ID from retained Emby person " + snapshot.EmbyId + ". Rebuild the evidence before applying.");
                 var live = library.GetItemById(snapshot.EmbyId) as Person ?? throw new InvalidOperationException("Emby person " + snapshot.EmbyId + " no longer exists.");
                 if (!string.Equals(live.Name ?? string.Empty, snapshot.Name ?? string.Empty, StringComparison.Ordinal) || !Same(ProviderId(live, ProviderNames.Tmdb), snapshot.TmdbId) || !Same(ProviderId(live, ProviderNames.Tvdb), snapshot.TvdbId) || !Same(ProviderId(live, ProviderNames.Imdb), snapshot.ImdbId))
                     throw new InvalidOperationException("Emby person " + snapshot.EmbyId + " changed after this plan was calculated. Rebuild the evidence before applying.");
@@ -237,9 +242,10 @@ namespace PersonCleaner.V2.UI
         private static ProviderIdDictionary Copy(ProviderIdDictionary source) { var result = new ProviderIdDictionary(); if (source != null) foreach (var x in source) result[x.Key] = x.Value; return result; }
         private static ProviderIdDictionary ProviderDictionary(IdentityOutcome outcome) { var result = new ProviderIdDictionary(); foreach (var x in outcome.ProviderIds) result[ProviderName(x.Provider)] = x.ProviderId; return result; }
         private static void SetResolver(PersonInfo row, Person person, string token) { row.Id = person.InternalId; row.Guid = person.Id; row.Name = person.Name; row.ProviderIds = new ProviderIdDictionary { [ResolverTokenProvider] = token }; }
-        private static void SetProviderId(Person person, string provider, string value) { var key = ProviderName(provider); if (string.IsNullOrWhiteSpace(value)) person.ProviderIds.Remove(key); else person.ProviderIds[key] = value; }
-        private static string ProviderId(Person person, string provider) { string value; return person.ProviderIds.TryGetValue(ProviderName(provider), out value) ? value : null; }
-        private static string PersonInfoProviderId(PersonInfo person, string provider) { string value; return person.ProviderIds != null && person.ProviderIds.TryGetValue(ProviderName(provider), out value) ? value : null; }
+        private static void SetProviderId(Person person, string provider, string value) { var key = ProviderName(provider); foreach (var existing in person.ProviderIds.Keys.Where(x => string.Equals(x, key, StringComparison.OrdinalIgnoreCase)).ToList()) person.ProviderIds.Remove(existing); if (!string.IsNullOrWhiteSpace(value)) person.ProviderIds[key] = value; }
+        private static string ProviderId(Person person, string provider) => person?.ProviderIds?.FirstOrDefault(x => string.Equals(x.Key, ProviderName(provider), StringComparison.OrdinalIgnoreCase)).Value;
+        private static string PersonInfoProviderId(PersonInfo person, string provider) => person?.ProviderIds?.FirstOrDefault(x => string.Equals(x.Key, ProviderName(provider), StringComparison.OrdinalIgnoreCase)).Value;
+        private static string LocalProviderId(LocalPerson person, string provider) => provider == ProviderNames.Tmdb ? person.TmdbId : provider == ProviderNames.Tvdb ? person.TvdbId : person.ImdbId;
         private static string ProviderName(string provider) => provider == ProviderNames.Tmdb ? MetadataProviders.Tmdb.ToString() : provider == ProviderNames.Tvdb ? MetadataProviders.Tvdb.ToString() : MetadataProviders.Imdb.ToString();
         private static string RoleText(PersonInfo person) => person.Type + (string.IsNullOrWhiteSpace(person.Role) ? string.Empty : ": " + person.Role);
         private static bool Same(string a, string b) => string.Equals(a ?? string.Empty, b ?? string.Empty, StringComparison.OrdinalIgnoreCase);

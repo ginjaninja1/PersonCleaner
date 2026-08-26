@@ -267,7 +267,7 @@ namespace PersonCleaner.V2.Tasks
                     if (affectedPersonIds != null && !affectedPersonIds.Contains(row.Id)) continue;
                     credits.Add(new LocalCredit { PersonEmbyId = row.Id, MediaEmbyId = row.ItemId, Role = row.Type + (string.IsNullOrWhiteSpace(row.Role) ? string.Empty : ": " + row.Role) });
                     if (!people.ContainsKey(row.Id) && library.GetItemById(row.Id) is Person person)
-                        people[row.Id] = new LocalPerson { EmbyId = person.InternalId, Name = person.Name, TmdbId = person.GetProviderId(MetadataProviders.Tmdb), TvdbId = person.GetProviderId(MetadataProviders.Tvdb), ImdbId = person.GetProviderId(MetadataProviders.Imdb) };
+                        people[row.Id] = ToLocalPerson(person);
                 }
             }
             return new SnapshotData
@@ -317,19 +317,26 @@ namespace PersonCleaner.V2.Tasks
             MediaType = item is Movie ? MediaTypes.Movie : MediaTypes.Series,
             Name = item.Name,
             Year = item.ProductionYear,
-            TmdbId = item.GetProviderId(MetadataProviders.Tmdb),
-            TvdbId = item.GetProviderId(MetadataProviders.Tvdb),
-            ImdbId = item.GetProviderId(MetadataProviders.Imdb)
+            TmdbId = ProviderId(item, MetadataProviders.Tmdb),
+            TvdbId = ProviderId(item, MetadataProviders.Tvdb),
+            ImdbId = ProviderId(item, MetadataProviders.Imdb)
         };
 
         private static LocalPerson ToLocalPerson(Person person) => new LocalPerson
         {
             EmbyId = person.InternalId,
             Name = person.Name,
-            TmdbId = person.GetProviderId(MetadataProviders.Tmdb),
-            TvdbId = person.GetProviderId(MetadataProviders.Tvdb),
-            ImdbId = person.GetProviderId(MetadataProviders.Imdb)
+            TmdbId = ProviderId(person, MetadataProviders.Tmdb),
+            TvdbId = ProviderId(person, MetadataProviders.Tvdb),
+            ImdbId = ProviderId(person, MetadataProviders.Imdb)
         };
+
+        private static string ProviderId(BaseItem item, MetadataProviders provider)
+        {
+            var name = provider.ToString();
+            var match = item?.ProviderIds?.FirstOrDefault(x => string.Equals(x.Key, name, StringComparison.OrdinalIgnoreCase));
+            return string.IsNullOrWhiteSpace(match?.Value) ? item?.GetProviderId(provider) : match.Value.Value;
+        }
 
         private static HashSet<long> ParseEmbyIds(string value) => new HashSet<long>((value ?? string.Empty)
             .Split(new[] { ',', ';', ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)

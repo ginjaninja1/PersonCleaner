@@ -63,11 +63,14 @@ namespace PersonCleaner.V2.UI
         {
             return new DxGridOptions(row, key, false, true, true, true)
             {
+                // fullHeight resolves to nested 100% containers in GenericEdit and can
+                // put the grid's bottom edge outside the dialog. Keep the largest safe
+                // bounded height and use standard rendering so its bottom is reachable.
                 heightMode = DxGridOptions.GridHeightMode.large, columnAutoWidth = false, allowColumnReordering = true, allowColumnResizing = true,
                 showBorders = true, showRowLines = true, rowAlternationEnabled = true, wordWrapEnabled = true, cellHintEnabled = true,
                 paging = new DxGridPaging { enabled = false }, editing = new DxGridEditing { mode = DxGridEditing.GridEditMode.cell, allowUpdating = true },
                 onChangeCommand = new DxGridOnChangeCommand { commandId = command },
-                scrolling = new DxGridScrolling { mode = DxGridScrolling.ScrollingMode.@virtual, rowRenderingMode = DxGridScrolling.RowRenderingMode.@virtual, showScrollbar = DxGridScrolling.ShowScrollbarMode.always, scrollByContent = true, scrollByThumb = true, useNative = "false" }
+                scrolling = new DxGridScrolling { mode = DxGridScrolling.ScrollingMode.standard, rowRenderingMode = DxGridScrolling.RowRenderingMode.standard, showScrollbar = DxGridScrolling.ShowScrollbarMode.always, scrollByContent = true, scrollByThumb = true, useNative = "false" }
             };
         }
 

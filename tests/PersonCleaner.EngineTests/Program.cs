@@ -68,6 +68,11 @@ internal static class Program
         Run("review cases never group by display name alone", ReviewCasesDoNotGroupByName);
         Run("holistic Lily plan creates one provider-identified person and moves two credits", HolisticLilyPlan);
         Run("holistic Donna plan treats unopposed disconnected providers as a warning", HolisticDonnaPlan);
+        Run("holistic drift plan reuses its unique media-backed Emby anchor", HolisticDriftReusesAnchor);
+        Run("holistic orphan plan preserves IDs on a retained Emby person", HolisticOrphanPreservesIds);
+        Run("holistic existing-person result preserves the current Emby name", HolisticExistingNameIsHonest);
+        Run("holistic provider agreement identifies pending Emby ID alignment", HolisticProviderAgreementShowsPendingEmbyAlignment);
+        Run("holistic metadata conflict exposes the birthday warning", HolisticBirthdayConflictWarning);
         Run("holistic plan persists a genuine ambiguous media question", HolisticAmbiguousMediaQuestion);
         Run("holistic planner remains bounded across 1600 cases", HolisticPlannerRemainsBounded);
         Run("large unrelated provider-credit sets remain bounded", LargeProviderCreditSetRemainsBounded);
@@ -997,6 +1002,87 @@ internal static class Program
         Equal(1, plan.Outcomes.Count);
         Equal(0, plan.Credits.Count(x => x.Disposition == "MOVE"));
         True(plan.Warning.Contains("no counter-evidence"));
+    }
+
+    private static void HolisticDriftReusesAnchor()
+    {
+        var input = new ResolutionInput();
+        var replacement = Person(ProviderNames.Tmdb, "1171527", "Alexander Terentyev", ProviderNames.Imdb, "nm2765435");
+        input.ProviderPeople.Add(replacement);
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 127919, Name = "Alexander Terentyev", TmdbId = "3876434" });
+        AddPlanMedia(input, 297633, "Wonder Woman", "297762", null, "Actor: German Lieutenant", replacement);
+        var decision = new ResolutionDecision { DecisionId = "drift", Status = "DRIFT", Action = "RETAINED_BY_MASS_ID_DRIFT", DisplayName = "Alexander Terentyev", AnchorEmbyPersonId = 127919, ProviderKeys = "tmdb:1171527" };
+
+        var plan = IdentityCasePlanner.Build(4, input, new[] { decision }, new[] { Cluster("replacement", 127919, "tmdb:1171527") }).Single();
+
+        Equal(IdentityTargetKinds.Existing, plan.Outcomes.Single().TargetKind);
+        Equal(127919L, plan.Outcomes.Single().TargetEmbyId.Value);
+        Equal("KEEP", plan.Credits.Single().Disposition);
+        True(!plan.ApplyCaption.Contains("create") && !plan.ApplyCaption.Contains("move") && plan.ApplyCaption.Contains("change 2 IDs"));
+    }
+
+    private static void HolisticOrphanPreservesIds()
+    {
+        var input = new ResolutionInput();
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 44939, Name = "Roy Beck", TmdbId = "1809473", ImdbId = "nm8745734" });
+        input.Media.Add(new MediaSeed { EmbyId = 294293, MediaType = MediaTypes.Movie, Name = "Indiana Jones and the Last Crusade", TmdbId = "89" });
+        input.LocalCredits.Add(new LocalCredit { PersonEmbyId = 44939, MediaEmbyId = 294293, Role = "Actor: German Customs Official" });
+        var decision = new ResolutionDecision { DecisionId = "orphan", Status = "ORPHAN", Action = "HUMAN_REVIEW", DisplayName = "Roy Beck", AnchorEmbyPersonId = 44939, ProviderKeys = "No hydrated provider identity" };
+
+        var plan = IdentityCasePlanner.Build(5, input, new[] { decision }, new ResolutionClusterSnapshot[0]).Single();
+        var outcome = plan.Outcomes.Single();
+
+        Equal(IdentityTargetKinds.Existing, outcome.TargetKind);
+        Equal("1809473", outcome.ProviderIds.Single(x => x.Provider == ProviderNames.Tmdb).ProviderId);
+        Equal("nm8745734", outcome.ProviderIds.Single(x => x.Provider == ProviderNames.Imdb).ProviderId);
+        Equal("Apply: retain 1 person", plan.ApplyCaption);
+    }
+
+    private static void HolisticExistingNameIsHonest()
+    {
+        var input = new ResolutionInput();
+        var tmdb = Person(ProviderNames.Tmdb, "90658", "Kristin Bauer", ProviderNames.Imdb, "nm0061877", "shared");
+        var tvdb = Person(ProviderNames.Tvdb, "346553", "Kristin Bauer van Straten", ProviderNames.Imdb, "nm0061877", "shared");
+        input.ProviderPeople.AddRange(new[] { tmdb, tvdb });
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 16398, Name = "Kristin Bauer van Straten", TmdbId = "90658", TvdbId = "346553", ImdbId = "nm0061877" });
+        AddPlanMedia(input, 81382, "True Blood", "1399", "82283", "Actor: Pam De Beaufort", tmdb, tvdb);
+        var decision = new ResolutionDecision { DecisionId = "match", Status = "MATCH", Action = "CROSS_PROVIDER_IDENTITY", DisplayName = "Kristin Bauer van Straten", AnchorEmbyPersonId = 16398, ProviderKeys = "tmdb:90658,tvdb:346553" };
+
+        var plan = IdentityCasePlanner.Build(6, input, new[] { decision }, new[] { Cluster("identity", 16398, "tmdb:90658", "tvdb:346553") }).Single();
+
+        Equal("Kristin Bauer van Straten", plan.Outcomes.Single().DisplayName);
+    }
+
+    private static void HolisticBirthdayConflictWarning()
+    {
+        var input = new ResolutionInput();
+        var tmdb = Person(ProviderNames.Tmdb, "1576541", "Tomiwa Edun", ProviderNames.Imdb, "nm3643989", "shared"); tmdb.Birthday = "1984-01-01";
+        var tvdb = Person(ProviderNames.Tvdb, "7891155", "Tomiwa Edun", ProviderNames.Imdb, "nm3643989", "shared"); tvdb.Birthday = "1984-03-04";
+        input.ProviderPeople.AddRange(new[] { tmdb, tvdb });
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 38308, Name = "Tomiwa Edun", TmdbId = "1576541", TvdbId = "7891155", ImdbId = "nm3643989" });
+        AddPlanMedia(input, 66626, "Merlin", "7225", "83123", "Actor: Sir Elyan", tmdb, tvdb);
+        var decision = new ResolutionDecision { DecisionId = "conflict", Status = "MATCH_WITH_CONFLICT", Action = "CROSS_PROVIDER_IDENTITY_WITH_METADATA_CONFLICT", DisplayName = "Tomiwa Edun", AnchorEmbyPersonId = 38308, ProviderKeys = "tmdb:1576541,tvdb:7891155" };
+        decision.Evidence.Add(new EvidenceLine { SignalType = "BIRTHDAY", Verdict = "conflicts", Narrative = "Both providers supplied different birth dates (tmdb:1984-01-01;tvdb:1984-03-04)." });
+
+        var plan = IdentityCasePlanner.Build(7, input, new[] { decision }, new[] { Cluster("identity", 38308, "tmdb:1576541", "tvdb:7891155") }).Single();
+
+        True(plan.Warning.Contains("Informational metadata warning") && plan.Warning.Contains("1984-01-01") && plan.Warning.Contains("1984-03-04"));
+    }
+
+    private static void HolisticProviderAgreementShowsPendingEmbyAlignment()
+    {
+        var input = new ResolutionInput();
+        var tmdb = Person(ProviderNames.Tmdb, "238303", "Tom Hanson", ProviderNames.Imdb, "nm6596413", "shared");
+        var tvdb = Person(ProviderNames.Tvdb, "424547", "Tom Hanson", ProviderNames.Imdb, "nm6596413", "shared");
+        input.ProviderPeople.AddRange(new[] { tmdb, tvdb });
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 36092, Name = "Tom Hanson", TmdbId = "238303", TvdbId = "424547" });
+        AddPlanMedia(input, 25295, "Brassic", "64513", "361537", "Actor: Cardi", tmdb, tvdb);
+        var decision = new ResolutionDecision { DecisionId = "match", Status = "MATCH", Action = "CROSS_PROVIDER_IDENTITY", DisplayName = "Tom Hanson", AnchorEmbyPersonId = 36092, ProviderKeys = "tmdb:238303,tvdb:424547" };
+
+        var plan = IdentityCasePlanner.Build(8, input, new[] { decision }, new[] { Cluster("identity", 36092, "tmdb:238303", "tvdb:424547") }).Single();
+
+        True(plan.ApplyCaption.Contains("change 1 ID"));
+        True(plan.Warning.Contains("provider records agree") && plan.Warning.Contains("current Emby person still differs"));
     }
 
     private static void HolisticAmbiguousMediaQuestion()
