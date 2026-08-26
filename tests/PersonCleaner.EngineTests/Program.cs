@@ -74,6 +74,7 @@ internal static class Program
         Run("holistic provider agreement identifies pending Emby ID alignment", HolisticProviderAgreementShowsPendingEmbyAlignment);
         Run("holistic metadata conflict exposes the birthday warning", HolisticBirthdayConflictWarning);
         Run("holistic plan persists a genuine ambiguous media question", HolisticAmbiguousMediaQuestion);
+        Run("holistic planner keeps compatible current IDs together beside a conflicting alternative", HolisticCurrentIdentitySubsetRemainsTogether);
         Run("holistic planner remains bounded across 1600 cases", HolisticPlannerRemainsBounded);
         Run("large unrelated provider-credit sets remain bounded", LargeProviderCreditSetRemainsBounded);
         Console.WriteLine("Passed " + passed + " entity-resolution tests; failed " + failed + ".");
@@ -1102,6 +1103,50 @@ internal static class Program
         Equal(IdentityPlanStates.CorrectionRequired, plan.State);
         True(plan.Questions.Any(x => x.Kind == CorrectionKinds.LocalCreditTarget && x.Choices.Count == 2));
         True(plan.Credits.Single().CorrectionRequired);
+    }
+
+    private static void HolisticCurrentIdentitySubsetRemainsTogether()
+    {
+        var input = new ResolutionInput();
+        var tmdb = Person(ProviderNames.Tmdb, "15739", "Alex Jennings", ProviderNames.Imdb, "nm0421105"); tmdb.Birthday = "1957-05-10";
+        var currentTvdb = Person(ProviderNames.Tvdb, "457122", "Alex Jennings", ProviderNames.Tmdb, "15739"); currentTvdb.Birthday = "1957-05-10"; currentTvdb.ExternalIds[ProviderNames.Imdb] = "nm0421105";
+        var alternativeTvdb = Person(ProviderNames.Tvdb, "8302951", "Alex Jennings", ProviderNames.Tmdb, "2276924"); alternativeTvdb.ExternalIds[ProviderNames.Imdb] = "nm4532245";
+        input.ProviderPeople.AddRange(new[] { tmdb, currentTvdb, alternativeTvdb });
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 44676, Name = "Alex Jennings", TmdbId = "15739", TvdbId = "457122", ImdbId = "nm0421105" });
+        AddPlanMedia(input, 1, "The Crown", "tmdb-crown", "tvdb-crown", "Actor: Edward VIII", tmdb, currentTvdb);
+        AddPlanMedia(input, 2, "Your Christmas or Mine 2", "1176139", "351731", "Actor: Humphrey", tmdb, alternativeTvdb);
+        AddPlanMedia(input, 3, "Your Christmas or Mine?", "865559", "340802", "Actor: Humphrey", tmdb);
+        AddPlanMedia(input, 4, "The Phoenician Scheme", "1137350", "357577", "Actor: Broadcloth", tmdb);
+        var decisions = new[]
+        {
+            new ResolutionDecision { DecisionId = "current-pair", Status = "CONFLATION", Action = "HUMAN_REVIEW", DisplayName = "Alex Jennings", AnchorEmbyPersonId = 44676, ProviderKeys = "tmdb:15739,tvdb:457122" },
+            new ResolutionDecision { DecisionId = "alternative-pair", Status = "CONFLATION", Action = "HUMAN_REVIEW", DisplayName = "Alex Jennings", AnchorEmbyPersonId = 44676, ProviderKeys = "tmdb:15739,tvdb:8302951" }
+        };
+        var clusters = new[] { Cluster("current-tmdb", 44676, "tmdb:15739"), Cluster("current-tvdb", 44676, "tvdb:457122"), Cluster("alternative-tvdb", 44676, "tvdb:8302951") };
+
+        var plan = IdentityCasePlanner.Build(9, input, decisions, clusters).Single();
+
+        var current = plan.Outcomes.Single(x => x.TargetKind == IdentityTargetKinds.Existing);
+        True(current.ProviderIds.Any(x => x.Provider == ProviderNames.Tmdb && x.ProviderId == "15739" && x.Source == "native"));
+        True(current.ProviderIds.Any(x => x.Provider == ProviderNames.Tvdb && x.ProviderId == "457122" && x.Source == "native"));
+        True(!plan.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.New && x.ProviderIds.Any(y => y.Provider == ProviderNames.Tmdb && y.ProviderId == "15739")));
+        Equal(IdentityTargetKinds.Unresolved, plan.Outcomes.Single(x => x.ProviderIds.Any(y => y.Provider == ProviderNames.Tvdb && y.ProviderId == "8302951" && y.Source == "native")).TargetKind);
+        Equal(1, plan.Credits.Count(x => x.CorrectionRequired));
+        True(plan.Credits.Single(x => x.MediaName == "Your Christmas or Mine 2").CorrectionRequired);
+        True(plan.Credits.Where(x => x.MediaName != "Your Christmas or Mine 2").All(x => x.Disposition == "KEEP" && !x.CorrectionRequired));
+        Equal(1, plan.Questions.Count(x => x.Kind == CorrectionKinds.LocalCreditTarget));
+        True(plan.Warning.Contains("already bound to Emby person 44676"));
+
+        var disputed = plan.Credits.Single(x => x.MediaName == "Your Christmas or Mine 2");
+        input.ActiveCorrections.Add(new ProviderCorrection
+        {
+            Kind = CorrectionKinds.LocalCreditTarget, Operation = CorrectionOperations.Replace, EmbyId = disputed.MediaEmbyId,
+            CurrentValue = disputed.SourcePersonEmbyId + "|" + disputed.Role, ReplacementValue = "existing:44676", Reason = "OPERATOR_MEDIA_ASSIGNMENT", Enabled = true
+        });
+        var locallyPinned = IdentityCasePlanner.Build(10, input, decisions, clusters).Single();
+        Equal(0, locallyPinned.Questions.Count);
+        Equal(IdentityPlanStates.CorrectionRequired, locallyPinned.State);
+        True(locallyPinned.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.Unresolved));
     }
 
     private static void HolisticPlannerRemainsBounded()

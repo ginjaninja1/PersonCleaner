@@ -662,12 +662,12 @@ ORDER BY c.provider,c.provider_person_id,c.role";
                 var now = Now();
                 if (correction.CorrectionId <= 0)
                 {
-                    Statement("INSERT INTO provider_correction(kind,operation,provider,media_type,provider_media_id,provider_person_id,field_name,current_value,replacement_value,secondary_provider,secondary_id,emby_id,reason,note,enabled,created_utc,updated_utc) VALUES(@kind,@operation,@provider,coalesce(@mediaType,''),coalesce(@mediaId,''),coalesce(@personId,''),coalesce(@field,''),coalesce(@current,''),coalesce(@replacement,''),coalesce(@secondaryProvider,''),coalesce(@secondaryId,''),@emby,@reason,coalesce(@note,''),@enabled,@now,@now)", s => BindCorrection(s, correction, now));
+                    Statement("INSERT INTO provider_correction(kind,operation,provider,media_type,provider_media_id,provider_person_id,field_name,current_value,replacement_value,secondary_provider,secondary_id,emby_id,reason,note,enabled,created_utc,updated_utc) VALUES(@kind,@operation,coalesce(@provider,''),coalesce(@mediaType,''),coalesce(@mediaId,''),coalesce(@personId,''),coalesce(@field,''),coalesce(@current,''),coalesce(@replacement,''),coalesce(@secondaryProvider,''),coalesce(@secondaryId,''),@emby,@reason,coalesce(@note,''),@enabled,@now,@now)", s => BindCorrection(s, correction, now));
                     using (var s = db.PrepareStatement("SELECT last_insert_rowid()")) foreach (var row in s.Rows()) return row.GetInt64(0);
                 }
                 else
                 {
-                    Statement("UPDATE provider_correction SET kind=@kind,operation=@operation,provider=@provider,media_type=coalesce(@mediaType,''),provider_media_id=coalesce(@mediaId,''),provider_person_id=coalesce(@personId,''),field_name=coalesce(@field,''),current_value=coalesce(@current,''),replacement_value=coalesce(@replacement,''),secondary_provider=coalesce(@secondaryProvider,''),secondary_id=coalesce(@secondaryId,''),emby_id=@emby,reason=@reason,note=coalesce(@note,''),enabled=@enabled,updated_utc=@now WHERE correction_id=@id", s => { BindCorrection(s, correction, now); s.Bind("@id", correction.CorrectionId); });
+                    Statement("UPDATE provider_correction SET kind=@kind,operation=@operation,provider=coalesce(@provider,''),media_type=coalesce(@mediaType,''),provider_media_id=coalesce(@mediaId,''),provider_person_id=coalesce(@personId,''),field_name=coalesce(@field,''),current_value=coalesce(@current,''),replacement_value=coalesce(@replacement,''),secondary_provider=coalesce(@secondaryProvider,''),secondary_id=coalesce(@secondaryId,''),emby_id=@emby,reason=@reason,note=coalesce(@note,''),enabled=@enabled,updated_utc=@now WHERE correction_id=@id", s => { BindCorrection(s, correction, now); s.Bind("@id", correction.CorrectionId); });
                     return correction.CorrectionId;
                 }
             }
@@ -902,7 +902,7 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
             var now = Now(); var id = 0L;
             lock (sync) db.RunInTransaction(x =>
             {
-                Statement(x, "INSERT INTO provider_correction(kind,operation,provider,media_type,provider_media_id,provider_person_id,field_name,current_value,replacement_value,secondary_provider,secondary_id,emby_id,reason,note,enabled,created_utc,updated_utc) VALUES(@kind,@operation,@provider,coalesce(@mediaType,''),coalesce(@mediaId,''),coalesce(@personId,''),coalesce(@field,''),coalesce(@current,''),coalesce(@replacement,''),coalesce(@secondaryProvider,''),coalesce(@secondaryId,''),@emby,@reason,coalesce(@note,''),@enabled,@now,@now)", s => BindCorrection(s, correction, now));
+                Statement(x, "INSERT INTO provider_correction(kind,operation,provider,media_type,provider_media_id,provider_person_id,field_name,current_value,replacement_value,secondary_provider,secondary_id,emby_id,reason,note,enabled,created_utc,updated_utc) VALUES(@kind,@operation,coalesce(@provider,''),coalesce(@mediaType,''),coalesce(@mediaId,''),coalesce(@personId,''),coalesce(@field,''),coalesce(@current,''),coalesce(@replacement,''),coalesce(@secondaryProvider,''),coalesce(@secondaryId,''),@emby,@reason,coalesce(@note,''),@enabled,@now,@now)", s => BindCorrection(s, correction, now));
                 using (var s = x.PrepareStatement("SELECT last_insert_rowid()")) foreach (var row in s.Rows()) id = row.GetInt64(0);
                 Statement(x, "INSERT INTO provider_correction_selection VALUES(@id,@run,@case,@question,@choice,@now)", s => { s.Bind("@id", id); s.Bind("@run", sourceRunId); s.Bind("@case", caseId); s.Bind("@question", questionId); s.Bind("@choice", choiceId); s.Bind("@now", now); });
             }, TransactionMode.Immediate);

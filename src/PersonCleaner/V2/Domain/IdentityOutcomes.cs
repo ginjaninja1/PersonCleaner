@@ -164,10 +164,27 @@ namespace PersonCleaner.V2.Domain
 
             var clusterGroups = clusters.Select(x => new List<ResolutionClusterSnapshot> { x }).ToList();
             var sameAnchor = clusterGroups.Count > 1 && personIds.Count == 1;
-            if (sameAnchor && CanRemainOneIdentity(clusterGroups.SelectMany(x => x).ToList(), input, planner))
+            if (sameAnchor)
             {
-                clusterGroups = new List<List<ResolutionClusterSnapshot>> { clusters };
-                AppendWarning(plan, "Nothing independently links every provider record in this case, but there is no counter-evidence and Emby currently treats them as the same person.");
+                LocalPerson current;
+                if (planner.LocalPeopleById.TryGetValue(personIds.Single(), out current))
+                {
+                    var currentKeys = new HashSet<string>(CurrentKeys(current), StringComparer.Ordinal);
+                    var boundGroups = clusterGroups.Where(x => x.Any(y => y.ProviderKeys.Any(currentKeys.Contains))).ToList();
+                    var boundClusters = boundGroups.SelectMany(x => x).ToList();
+                    if (boundGroups.Count > 1 && boundGroups.Count < clusterGroups.Count && CanRemainOneIdentity(boundClusters, input, planner))
+                    {
+                        var insertAt = clusterGroups.FindIndex(boundGroups.Contains);
+                        clusterGroups.RemoveAll(boundGroups.Contains);
+                        clusterGroups.Insert(insertAt, boundClusters.OrderBy(x => x.ClusterId, StringComparer.Ordinal).ToList());
+                        AppendWarning(plan, "Compatible provider records already bound to Emby person " + current.EmbyId + " remain together; conflicting provider alternatives remain separate.");
+                    }
+                }
+                if (clusterGroups.Count > 1 && CanRemainOneIdentity(clusterGroups.SelectMany(x => x).ToList(), input, planner))
+                {
+                    clusterGroups = new List<List<ResolutionClusterSnapshot>> { clusters };
+                    AppendWarning(plan, "Nothing independently links every provider record in this case, but there is no counter-evidence and Emby currently treats them as the same person.");
+                }
             }
 
             var currentPeople = personIds.Select(x => planner.LocalPeopleById.TryGetValue(x, out var person) ? person : null).Where(x => x != null).OrderBy(x => x.EmbyId).ToList();
@@ -238,6 +255,7 @@ namespace PersonCleaner.V2.Domain
             PreserveUnopposedExistingIds(plan, currentPeople);
             BuildIdentityQuestions(plan, input, provisional);
 
+            MarkUnassignedNewOutcomesUnresolved(plan);
             var blocked = decisions.Any(x => x.Action == ResolutionActions.IncompleteScope);
             plan.State = blocked ? IdentityPlanStates.Blocked : plan.Questions.Count > 0 || plan.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.Unresolved) || plan.Credits.Any(x => x.CorrectionRequired) ? IdentityPlanStates.CorrectionRequired : IdentityPlanStates.Complete;
             CompleteSummaries(plan, input);
@@ -356,11 +374,6 @@ namespace PersonCleaner.V2.Domain
 
         private static void CompleteSummaries(IdentityCasePlan plan, ResolutionInput input)
         {
-            foreach (var outcome in plan.Outcomes.Where(x => x.TargetKind == IdentityTargetKinds.New && !plan.Credits.Any(c => c.TargetOutcomeId == x.OutcomeId)))
-            {
-                outcome.TargetKind = IdentityTargetKinds.Unresolved;
-                outcome.Outcome = "Correction required — a new person cannot be created without an assigned media credit";
-            }
             var creates = plan.Outcomes.Count(x => x.TargetKind == IdentityTargetKinds.New);
             var moves = plan.Credits.Count(x => x.Disposition == "MOVE" && !x.CorrectionRequired);
             var changes = ProviderIdChangeCount(plan, input);
@@ -379,6 +392,15 @@ namespace PersonCleaner.V2.Domain
                 AppendWarning(plan, "The provider records agree with each other, but the current Emby person still differs by " + changes + " provider ID" + (changes == 1 ? string.Empty : "s") + "; the reviewed plan shows that pending Emby alignment explicitly.");
             if (plan.State == IdentityPlanStates.CorrectionRequired) plan.Summary += " A human correction is required before Apply is available.";
             if (plan.State == IdentityPlanStates.Blocked) plan.Summary += " The current scope is incomplete, so Apply is unavailable.";
+        }
+
+        private static void MarkUnassignedNewOutcomesUnresolved(IdentityCasePlan plan)
+        {
+            foreach (var outcome in plan.Outcomes.Where(x => x.TargetKind == IdentityTargetKinds.New && !plan.Credits.Any(c => c.TargetOutcomeId == x.OutcomeId)))
+            {
+                outcome.TargetKind = IdentityTargetKinds.Unresolved;
+                outcome.Outcome = "Provider alternative — no Emby person is proposed without an assigned media credit";
+            }
         }
 
         private static int ProviderIdChangeCount(IdentityCasePlan plan, ResolutionInput input)
