@@ -12,7 +12,7 @@ namespace PersonCleaner.V2.Storage
 {
     internal sealed class ResolutionRepository : IDisposable
     {
-        private const int SchemaVersion = 8;
+        private const int SchemaVersion = 9;
         private readonly object sync = new object();
         private IDatabaseConnection db;
         public string WorkspacePath { get; }
@@ -50,10 +50,10 @@ namespace PersonCleaner.V2.Storage
                 }
                 foreach (var sql in Schema) db.Execute(sql);
                 if (!version.HasValue) db.Execute("INSERT INTO schema_info(singleton,version) VALUES(1," + SchemaVersion.ToString(CultureInfo.InvariantCulture) + ")");
-                if (!ColumnExists("provider_media", "slug") || !ColumnExists("provider_media_credit", "role_category") || !ColumnExists("resolution_decision", "local_anchor_confidence") || !ColumnExists("cache_manifest", "materializer_version") || !ColumnExists("provider_media_observation", "materializer_version") || !ColumnExists("work_queue", "graph_eligible") || !TableExists("resolution_pair") || !TableExists("resolution_cluster") || !TableExists("provider_correction") || !TableExists("correction_application") || !TableExists("provider_absence_cache") || !TableExists("acquisition_observation") || !TableExists("global_local_person") || !TableExists("resolution_credit_assignment"))
+                if (!ColumnExists("provider_media", "slug") || !ColumnExists("provider_media_credit", "role_category") || !ColumnExists("resolution_decision", "local_anchor_confidence") || !ColumnExists("cache_manifest", "materializer_version") || !ColumnExists("provider_media_observation", "materializer_version") || !ColumnExists("work_queue", "graph_eligible") || !TableExists("resolution_pair") || !TableExists("resolution_cluster") || !TableExists("provider_correction") || !TableExists("correction_application") || !TableExists("provider_correction_selection") || !TableExists("provider_absence_cache") || !TableExists("acquisition_observation") || !TableExists("global_local_person") || !TableExists("resolution_credit_assignment") || !TableExists("resolution_case") || !TableExists("resolution_case_person_snapshot") || !TableExists("resolution_identity_outcome") || !TableExists("resolution_case_credit") || !TableExists("resolution_question") || !TableExists("identity_case_apply"))
                 {
                     db.Dispose(); db = null;
-                    throw new InvalidOperationException("PersonCleaner schema 8 is incomplete. Stop Emby and restore the most recent pre-migration backup before applying the numbered migrations again.");
+                    throw new InvalidOperationException("PersonCleaner schema 9 is incomplete. Stop Emby and restore the most recent pre-migration backup before applying the numbered migrations again.");
                 }
                 // v2 originally represented the non-media dimension of person
                 // work as an empty string. Emby's SQLite binder can coerce an
@@ -344,7 +344,7 @@ WHERE m.tvdb_id IS NOT NULL"))
             {
                 var acquisitionRunId = runId ?? LatestCompletedRunId();
                 var tracker = new CorrectionApplicationTracker(LoadCorrections());
-                using (var s = db.PrepareStatement("SELECT emby_id,media_type,name,production_year,tmdb_id,tvdb_id,imdb_id FROM current_media")) foreach (var r in s.Rows()) input.Media.Add(new MediaSeed { EmbyId = r.GetInt64(0), MediaType = r.GetString(1), Name = r.GetString(2), Year = r.IsDBNull(3) ? (int?)null : r.GetInt(3), TmdbId = Null(r, 4), TvdbId = Null(r, 5), ImdbId = Null(r, 6) });
+                using (var s = db.PrepareStatement("SELECT m.emby_id,m.media_type,m.name,m.production_year,m.tmdb_id,m.tvdb_id,m.imdb_id,(SELECT p.slug FROM provider_media p WHERE p.provider='tvdb' AND p.media_type=m.media_type AND p.provider_media_id=m.tvdb_id) FROM current_media m")) foreach (var r in s.Rows()) input.Media.Add(new MediaSeed { EmbyId = r.GetInt64(0), MediaType = r.GetString(1), Name = r.GetString(2), Year = r.IsDBNull(3) ? (int?)null : r.GetInt(3), TmdbId = Null(r, 4), TvdbId = Null(r, 5), ImdbId = Null(r, 6), TvdbSlug = Null(r, 7) });
                 using (var s = db.PrepareStatement("SELECT emby_id,name,tmdb_id,tvdb_id,imdb_id FROM current_local_person")) foreach (var r in s.Rows()) input.LocalPeople.Add(new LocalPerson { EmbyId = r.GetInt64(0), Name = r.GetString(1), TmdbId = Null(r, 2), TvdbId = Null(r, 3), ImdbId = Null(r, 4) });
                 using (var s = db.PrepareStatement("SELECT emby_id,name,tmdb_id,tvdb_id,imdb_id FROM global_local_person")) foreach (var r in s.Rows()) input.GlobalLocalPeople.Add(new LocalPerson { EmbyId = r.GetInt64(0), Name = r.GetString(1), TmdbId = Null(r, 2), TvdbId = Null(r, 3), ImdbId = Null(r, 4) });
                 using (var s = db.PrepareStatement("SELECT person_emby_id,media_emby_id,role FROM current_local_credit")) foreach (var r in s.Rows()) input.LocalCredits.Add(new LocalCredit { PersonEmbyId = r.GetInt64(0), MediaEmbyId = r.GetInt64(1), Role = r.GetString(2) });
@@ -404,14 +404,16 @@ WHERE a.run_id=@run AND a.outcome='PRESENT'";
                     foreach (var r in s.Rows()) input.MediaAcquisitions.Add(new MediaAcquisition { Provider = r.GetString(0), MediaType = r.GetString(1), ProviderId = r.GetString(2), State = r.GetString(3) });
                 }
                 ProviderCorrectionOverlay.Apply(input, tracker);
+                input.ActiveCorrections.AddRange(tracker.Rules);
                 input.CorrectionApplications.AddRange(tracker.Results);
                 if (runId.HasValue) SaveCorrectionApplications(runId.Value, tracker.Results);
             }
             return input;
         }
 
-        public void SaveDecisions(long runId, IReadOnlyCollection<ResolutionDecision> decisions, IReadOnlyCollection<ResolutionPairEvaluation> pairs = null, IReadOnlyCollection<ResolutionClusterSnapshot> clusters = null)
+        public void SaveDecisions(long runId, IReadOnlyCollection<ResolutionDecision> decisions, IReadOnlyCollection<ResolutionPairEvaluation> pairs = null, IReadOnlyCollection<ResolutionClusterSnapshot> clusters = null, ResolutionInput input = null)
         {
+            var plans = input == null ? new List<IdentityCasePlan>() : IdentityCasePlanner.Build(runId, input, decisions, clusters);
             lock (sync) db.RunInTransaction(x =>
             {
                 Statement(x, "DELETE FROM resolution_decision WHERE run_id=@run", s => s.Bind("@run", runId));
@@ -461,8 +463,183 @@ WHERE a.run_id=@run AND a.outcome='PRESENT'";
                         Statement(x, "INSERT OR IGNORE INTO resolution_cluster_member VALUES(@run,@cluster,@provider,@id)", s => { s.Bind("@run", runId); s.Bind("@cluster", cluster.ClusterId); s.Bind("@provider", key.Substring(0, separator)); s.Bind("@id", key.Substring(separator + 1)); });
                     }
                 }
+                SaveIdentityCasePlans(x, runId, plans);
                 Statement(x, "UPDATE resolution_run SET decisions=@count,updated_utc=@now WHERE run_id=@run", s => { s.Bind("@count", decisions.Count); s.Bind("@now", Now()); s.Bind("@run", runId); });
             }, TransactionMode.Immediate);
+        }
+
+        private static void SaveIdentityCasePlans(IDatabaseConnection x, long runId, IEnumerable<IdentityCasePlan> plans)
+        {
+            Statement(x, "DELETE FROM resolution_case WHERE run_id=@run", s => s.Bind("@run", runId));
+            foreach (var plan in plans ?? Enumerable.Empty<IdentityCasePlan>())
+            {
+                // Emby's SQLite binder represents an empty string as SQL NULL.
+                // Keep the schema's intentional empty-text representation for
+                // optional fields by coalescing at the statement boundary.
+                Statement(x, "INSERT INTO resolution_case(run_id,case_id,plan_hash,display_name,case_type,summary,warning,state,apply_caption) VALUES(@run,@case,@hash,@name,@type,@summary,COALESCE(@warning,''),@state,@apply)", s =>
+                {
+                    s.Bind("@run", runId); s.Bind("@case", plan.CaseId); s.Bind("@hash", plan.PlanHash); s.Bind("@name", plan.DisplayName); s.Bind("@type", plan.CaseType);
+                    s.Bind("@summary", plan.Summary); s.Bind("@warning", plan.Warning ?? string.Empty); s.Bind("@state", plan.State); s.Bind("@apply", plan.ApplyCaption);
+                });
+                for (var i = 0; i < plan.DecisionIds.Count; i++)
+                    Statement(x, "INSERT INTO resolution_case_decision VALUES(@run,@case,@decision,@sort)", s => { s.Bind("@run", runId); s.Bind("@case", plan.CaseId); s.Bind("@decision", plan.DecisionIds[i]); s.Bind("@sort", i); });
+                foreach (var person in plan.CurrentPeople)
+                    Statement(x, "INSERT INTO resolution_case_person_snapshot VALUES(@run,@case,@emby,@name,@tmdb,@tvdb,@imdb)", s => { s.Bind("@run", runId); s.Bind("@case", plan.CaseId); s.Bind("@emby", person.EmbyId); s.Bind("@name", person.Name); s.Bind("@tmdb", person.TmdbId); s.Bind("@tvdb", person.TvdbId); s.Bind("@imdb", person.ImdbId); });
+                foreach (var outcome in plan.Outcomes)
+                {
+                    Statement(x, "INSERT INTO resolution_identity_outcome VALUES(@run,@case,@outcome,@sort,COALESCE(@cluster,''),@kind,@emby,@name,@text)", s =>
+                    {
+                        s.Bind("@run", runId); s.Bind("@case", plan.CaseId); s.Bind("@outcome", outcome.OutcomeId); s.Bind("@sort", outcome.SortOrder); s.Bind("@cluster", outcome.ClusterKey ?? string.Empty);
+                        s.Bind("@kind", outcome.TargetKind); s.Bind("@emby", outcome.TargetEmbyId); s.Bind("@name", outcome.DisplayName); s.Bind("@text", outcome.Outcome);
+                    });
+                    foreach (var source in outcome.SourceEmbyIds)
+                        Statement(x, "INSERT INTO resolution_identity_outcome_source VALUES(@run,@case,@outcome,@source)", s => { s.Bind("@run", runId); s.Bind("@case", plan.CaseId); s.Bind("@outcome", outcome.OutcomeId); s.Bind("@source", source); });
+                    foreach (var id in outcome.ProviderIds)
+                        Statement(x, "INSERT INTO resolution_identity_outcome_provider_id VALUES(@run,@case,@outcome,@provider,@id,@source)", s => { s.Bind("@run", runId); s.Bind("@case", plan.CaseId); s.Bind("@outcome", outcome.OutcomeId); s.Bind("@provider", id.Provider); s.Bind("@id", id.ProviderId); s.Bind("@source", id.Source); });
+                }
+                foreach (var credit in plan.Credits)
+                    Statement(x, "INSERT INTO resolution_case_credit VALUES(@run,@case,@assignment,@source,@target,@media,@type,@name,@role,@tmdb,@tvdb,@slug,@imdb,@disposition,@rationale,@required)", s =>
+                    {
+                        s.Bind("@run", runId); s.Bind("@case", plan.CaseId); s.Bind("@assignment", credit.AssignmentId); s.Bind("@source", credit.SourcePersonEmbyId); s.Bind("@target", credit.TargetOutcomeId);
+                        s.Bind("@media", credit.MediaEmbyId); s.Bind("@type", credit.MediaType); s.Bind("@name", credit.MediaName); s.Bind("@role", credit.Role); s.Bind("@tmdb", credit.TmdbId); s.Bind("@tvdb", credit.TvdbId); s.Bind("@slug", credit.TvdbSlug); s.Bind("@imdb", credit.ImdbId);
+                        s.Bind("@disposition", credit.Disposition); s.Bind("@rationale", credit.Rationale); s.Bind("@required", credit.CorrectionRequired ? 1 : 0);
+                    });
+                foreach (var question in plan.Questions)
+                {
+                    Statement(x, "INSERT INTO resolution_question VALUES(@run,@case,@question,@kind,@outcome,@assignment,@narrative)", s => { s.Bind("@run", runId); s.Bind("@case", plan.CaseId); s.Bind("@question", question.QuestionId); s.Bind("@kind", question.Kind); s.Bind("@outcome", question.OutcomeId); s.Bind("@assignment", question.AssignmentId); s.Bind("@narrative", question.Narrative); });
+                    foreach (var choice in question.Choices)
+                    {
+                        var c = choice.Correction;
+                        Statement(x, "INSERT INTO resolution_question_choice VALUES(@run,@case,@question,@choice,@caption,@effect,@kind,@operation,COALESCE(@provider,''),COALESCE(@mediaType,''),COALESCE(@mediaId,''),COALESCE(@personId,''),COALESCE(@field,''),COALESCE(@current,''),COALESCE(@replacement,''),COALESCE(@secondaryProvider,''),COALESCE(@secondaryId,''),@emby,@reason,COALESCE(@note,''))", s =>
+                        {
+                            s.Bind("@run", runId); s.Bind("@case", plan.CaseId); s.Bind("@question", question.QuestionId); s.Bind("@choice", choice.ChoiceId); s.Bind("@caption", choice.Caption); s.Bind("@effect", choice.Effect);
+                            s.Bind("@kind", c.Kind); s.Bind("@operation", c.Operation); s.Bind("@provider", c.Provider ?? string.Empty); s.Bind("@mediaType", c.MediaType ?? string.Empty); s.Bind("@mediaId", c.ProviderMediaId ?? string.Empty);
+                            s.Bind("@personId", c.ProviderPersonId ?? string.Empty); s.Bind("@field", c.FieldName ?? string.Empty); s.Bind("@current", c.CurrentValue ?? string.Empty); s.Bind("@replacement", c.ReplacementValue ?? string.Empty);
+                            s.Bind("@secondaryProvider", c.SecondaryProvider ?? string.Empty); s.Bind("@secondaryId", c.SecondaryId ?? string.Empty); s.Bind("@emby", c.EmbyId); s.Bind("@reason", c.Reason); s.Bind("@note", c.Note ?? string.Empty);
+                        });
+                    }
+                }
+            }
+        }
+
+        public IdentityCasePlan IdentityCase(string caseId)
+        {
+            if (string.IsNullOrWhiteSpace(caseId)) throw new ArgumentException("The case ID is missing.", nameof(caseId));
+            lock (sync)
+            {
+                var runId = LatestCompletedRunId();
+                IdentityCasePlan plan = null;
+                using (var s = db.PrepareStatement("SELECT case_id,plan_hash,display_name,case_type,summary,warning,state,apply_caption FROM resolution_case WHERE run_id=@run AND case_id=@case"))
+                {
+                    s.Bind("@run", runId); s.Bind("@case", caseId);
+                    foreach (var r in s.Rows()) plan = new IdentityCasePlan { RunId = runId, CaseId = r.GetString(0), PlanHash = r.GetString(1), DisplayName = r.GetString(2), CaseType = r.GetString(3), Summary = r.GetString(4), Warning = r.GetString(5), State = r.GetString(6), ApplyCaption = r.GetString(7) };
+                }
+                if (plan == null) throw new InvalidOperationException("The selected identity case is no longer present in the latest completed run.");
+                using (var s = db.PrepareStatement("SELECT 1 FROM identity_case_apply WHERE source_run_id=@run AND case_id=@case AND reviewed_plan_hash=@hash AND status='COMMITTED' LIMIT 1"))
+                {
+                    s.Bind("@run", runId); s.Bind("@case", caseId); s.Bind("@hash", plan.PlanHash);
+                    foreach (var ignored in s.Rows()) { plan.State = IdentityPlanStates.Applied; plan.ApplyCaption = "Already applied"; plan.Summary += " This exact reviewed plan has already been applied."; break; }
+                }
+                using (var s = db.PrepareStatement("SELECT decision_id FROM resolution_case_decision WHERE run_id=@run AND case_id=@case ORDER BY sort_order,decision_id")) { s.Bind("@run", runId); s.Bind("@case", caseId); foreach (var r in s.Rows()) plan.DecisionIds.Add(r.GetString(0)); }
+                using (var s = db.PrepareStatement("SELECT emby_id,name,tmdb_id,tvdb_id,imdb_id FROM resolution_case_person_snapshot WHERE run_id=@run AND case_id=@case ORDER BY emby_id")) { s.Bind("@run", runId); s.Bind("@case", caseId); foreach (var r in s.Rows()) plan.CurrentPeople.Add(new LocalPerson { EmbyId = r.GetInt64(0), Name = r.GetString(1), TmdbId = Null(r, 2), TvdbId = Null(r, 3), ImdbId = Null(r, 4) }); }
+                using (var s = db.PrepareStatement("SELECT outcome_id,sort_order,cluster_key,target_kind,target_emby_id,display_name,outcome FROM resolution_identity_outcome WHERE run_id=@run AND case_id=@case ORDER BY sort_order,outcome_id"))
+                {
+                    s.Bind("@run", runId); s.Bind("@case", caseId);
+                    foreach (var r in s.Rows()) plan.Outcomes.Add(new IdentityOutcome { OutcomeId = r.GetString(0), SortOrder = r.GetInt(1), ClusterKey = r.GetString(2), TargetKind = r.GetString(3), TargetEmbyId = r.IsDBNull(4) ? (long?)null : r.GetInt64(4), DisplayName = r.GetString(5), Outcome = r.GetString(6) });
+                }
+                var outcomes = plan.Outcomes.ToDictionary(x => x.OutcomeId, StringComparer.Ordinal);
+                using (var s = db.PrepareStatement("SELECT outcome_id,source_emby_id FROM resolution_identity_outcome_source WHERE run_id=@run AND case_id=@case ORDER BY outcome_id,source_emby_id")) { s.Bind("@run", runId); s.Bind("@case", caseId); foreach (var r in s.Rows()) if (outcomes.TryGetValue(r.GetString(0), out var o)) o.SourceEmbyIds.Add(r.GetInt64(1)); }
+                using (var s = db.PrepareStatement("SELECT outcome_id,provider,provider_id,source FROM resolution_identity_outcome_provider_id WHERE run_id=@run AND case_id=@case ORDER BY outcome_id,provider,provider_id")) { s.Bind("@run", runId); s.Bind("@case", caseId); foreach (var r in s.Rows()) if (outcomes.TryGetValue(r.GetString(0), out var o)) o.ProviderIds.Add(new IdentityProviderId { Provider = r.GetString(1), ProviderId = r.GetString(2), Source = r.GetString(3) }); }
+                using (var s = db.PrepareStatement("SELECT assignment_id,source_person_emby_id,target_outcome_id,media_emby_id,media_type,media_name,role,tmdb_id,tvdb_id,tvdb_slug,imdb_id,disposition,rationale,correction_required FROM resolution_case_credit WHERE run_id=@run AND case_id=@case ORDER BY media_name,media_emby_id,role,source_person_emby_id"))
+                {
+                    s.Bind("@run", runId); s.Bind("@case", caseId);
+                    foreach (var r in s.Rows()) plan.Credits.Add(new IdentityCreditOutcome { AssignmentId = r.GetString(0), SourcePersonEmbyId = r.GetInt64(1), TargetOutcomeId = r.GetString(2), MediaEmbyId = r.GetInt64(3), MediaType = r.GetString(4), MediaName = r.GetString(5), Role = r.GetString(6), TmdbId = Null(r, 7), TvdbId = Null(r, 8), TvdbSlug = Null(r, 9), ImdbId = Null(r, 10), Disposition = r.GetString(11), Rationale = r.GetString(12), CorrectionRequired = r.GetInt(13) != 0 });
+                }
+                using (var s = db.PrepareStatement("SELECT question_id,kind,outcome_id,assignment_id,narrative FROM resolution_question WHERE run_id=@run AND case_id=@case ORDER BY question_id"))
+                {
+                    s.Bind("@run", runId); s.Bind("@case", caseId);
+                    foreach (var r in s.Rows()) plan.Questions.Add(new IdentityQuestion { QuestionId = r.GetString(0), Kind = r.GetString(1), OutcomeId = Null(r, 2), AssignmentId = Null(r, 3), Narrative = r.GetString(4) });
+                }
+                var questions = plan.Questions.ToDictionary(x => x.QuestionId, StringComparer.Ordinal);
+                using (var s = db.PrepareStatement("SELECT question_id,choice_id,caption,effect,correction_kind,correction_operation,provider,media_type,provider_media_id,provider_person_id,field_name,current_value,replacement_value,secondary_provider,secondary_id,emby_id,reason,note FROM resolution_question_choice WHERE run_id=@run AND case_id=@case ORDER BY question_id,choice_id"))
+                {
+                    s.Bind("@run", runId); s.Bind("@case", caseId);
+                    foreach (var r in s.Rows()) if (questions.TryGetValue(r.GetString(0), out var q)) q.Choices.Add(new IdentityQuestionChoice { ChoiceId = r.GetString(1), Caption = r.GetString(2), Effect = r.GetString(3), Correction = new ProviderCorrection { Kind = r.GetString(4), Operation = r.GetString(5), Provider = r.GetString(6), MediaType = r.GetString(7), ProviderMediaId = r.GetString(8), ProviderPersonId = r.GetString(9), FieldName = r.GetString(10), CurrentValue = r.GetString(11), ReplacementValue = r.GetString(12), SecondaryProvider = r.GetString(13), SecondaryId = r.GetString(14), EmbyId = r.IsDBNull(15) ? (long?)null : r.GetInt64(15), Reason = r.GetString(16), Note = r.GetString(17), Enabled = true } });
+                }
+                return plan;
+            }
+        }
+
+        public IdentityCasePlan IdentityCaseByReference(string caseId, IEnumerable<long> sourceEmbyIds)
+        {
+            try { return IdentityCase(caseId); }
+            catch (InvalidOperationException)
+            {
+                var ids = new HashSet<long>(sourceEmbyIds ?? Enumerable.Empty<long>());
+                if (ids.Count == 0) throw;
+                string replacement = null; var best = -1;
+                lock (sync)
+                {
+                    var runId = LatestCompletedRunId();
+                    using (var s = db.PrepareStatement("SELECT case_id,emby_id FROM resolution_case_person_snapshot WHERE run_id=@run ORDER BY case_id,emby_id"))
+                    {
+                        s.Bind("@run", runId);
+                        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+                        foreach (var r in s.Rows()) if (ids.Contains(r.GetInt64(1))) counts[r.GetString(0)] = counts.TryGetValue(r.GetString(0), out var count) ? count + 1 : 1;
+                        foreach (var row in counts.OrderByDescending(x => x.Value).ThenBy(x => x.Key, StringComparer.Ordinal)) if (row.Value > best) { replacement = row.Key; best = row.Value; }
+                    }
+                }
+                if (replacement == null) throw;
+                return IdentityCase(replacement);
+            }
+        }
+
+        public LocalPerson[] LocalPeople()
+        {
+            var result = new List<LocalPerson>();
+            lock (sync) using (var s = db.PrepareStatement("SELECT emby_id,name,tmdb_id,tvdb_id,imdb_id FROM global_local_person ORDER BY name,emby_id"))
+                foreach (var r in s.Rows()) result.Add(new LocalPerson { EmbyId = r.GetInt64(0), Name = r.GetString(1), TmdbId = Null(r, 2), TvdbId = Null(r, 3), ImdbId = Null(r, 4) });
+            return result.GroupBy(x => x.EmbyId).Select(x => x.First()).ToArray();
+        }
+
+        public RoleCorrectionChoice[] RoleCorrectionChoices(string caseId, IdentityCreditOutcome credit)
+        {
+            if (credit == null) throw new ArgumentNullException(nameof(credit));
+            var rows = new List<ObservedProviderCredit>();
+            lock (sync)
+            {
+                const string sql = @"SELECT c.provider,c.media_type,c.provider_media_id,c.provider_person_id,c.role,c.role_category,c.role_name
+FROM provider_media_credit c JOIN current_media m ON m.emby_id=@media
+WHERE c.media_type=m.media_type AND
+ ((c.provider='tmdb' AND c.provider_media_id=m.tmdb_id) OR (c.provider='tvdb' AND c.provider_media_id=m.tvdb_id))
+ORDER BY c.provider,c.provider_person_id,c.role";
+                using (var s = db.PrepareStatement(sql))
+                {
+                    s.Bind("@media", credit.MediaEmbyId);
+                    foreach (var r in s.Rows()) rows.Add(new ObservedProviderCredit { Provider = r.GetString(0), MediaType = r.GetString(1), ProviderMediaId = r.GetString(2), ProviderPersonId = r.GetString(3), Role = r.GetString(4), RoleCategory = r.GetString(5), RoleName = Null(r, 6) });
+                }
+            }
+            var involved = new HashSet<string>(IdentityCase(caseId).Outcomes.SelectMany(x => x.ProviderIds.Where(y => y.Source == "native").Select(y => y.Provider + ":" + y.ProviderId)), StringComparer.Ordinal);
+            rows = rows.Where(x => involved.Contains(x.Provider + ":" + x.ProviderPersonId)).ToList();
+            var roles = rows.Select(x => x.Role).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.Ordinal).OrderBy(x => x, StringComparer.Ordinal).ToList();
+            var result = new List<RoleCorrectionChoice>();
+            foreach (var row in rows)
+            {
+                foreach (var role in roles.Where(x => !string.Equals(x, row.Role, StringComparison.Ordinal)))
+                    result.Add(new RoleCorrectionChoice
+                    {
+                        Caption = "Provider role: " + row.Provider.ToUpperInvariant() + " " + row.ProviderPersonId + " — " + role,
+                        Effect = "Replace the stored " + row.Provider.ToUpperInvariant() + " role '" + row.Role + "' with '" + role + "' for this title credit, then recalculate the case.",
+                        Correction = new ProviderCorrection { Kind = CorrectionKinds.MediaCreditRole, Operation = CorrectionOperations.Replace, Provider = row.Provider, MediaType = row.MediaType, ProviderMediaId = row.ProviderMediaId, ProviderPersonId = row.ProviderPersonId, CurrentValue = row.Role, ReplacementValue = role, Reason = "OPERATOR_ROLE_ATTRIBUTION", Note = "Operator correction from case " + caseId, Enabled = true }
+                    });
+                result.Add(new RoleCorrectionChoice
+                {
+                    Caption = "Provider role: mark " + row.Provider.ToUpperInvariant() + " " + row.ProviderPersonId + " role unusable",
+                    Effect = "Ignore this provider role value for resolution and recalculate the case.",
+                    Correction = new ProviderCorrection { Kind = CorrectionKinds.MediaCreditRole, Operation = CorrectionOperations.Unusable, Provider = row.Provider, MediaType = row.MediaType, ProviderMediaId = row.ProviderMediaId, ProviderPersonId = row.ProviderPersonId, CurrentValue = row.Role, Reason = "OPERATOR_ROLE_ATTRIBUTION", Note = "Operator correction from case " + caseId, Enabled = true }
+                });
+            }
+            return result.GroupBy(x => x.Caption, StringComparer.Ordinal).Select(x => x.First()).ToArray();
         }
 
         public void SaveBridge(string providerA, string providerIdA, string providerB, string providerIdB, bool reject)
@@ -593,7 +770,29 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
                         decision.Details = decision.Details.Concat(new[] { new DashboardDetail { DetailId = r.GetString(0) + ":m:" + r.GetInt(1).ToString(CultureInfo.InvariantCulture), Section = "Impacted titles", Order = 10000 + r.GetInt(1), Signal = r.GetString(2), Verdict = r.GetString(4), Explanation = r.GetString(3), RawMetric = string.Empty, EmbyMediaId = r.GetInt64(5), MediaType = r.GetString(2), TmdbId = Null(r, 6), TvdbId = Null(r, 7), ImdbId = Null(r, 8), TvdbSlug = Null(r, 9) } }).ToArray();
                 }
             }
-            return DashboardCaseBuilder.Build(result);
+            var dashboard = DashboardCaseBuilder.Build(result);
+            lock (sync)
+            {
+                var runId = LatestCompletedRunId();
+                var plans = new Dictionary<string, CaseHeader>(StringComparer.Ordinal);
+                using (var s = db.PrepareStatement("SELECT case_id,display_name,case_type,summary,warning,state,apply_caption FROM resolution_case WHERE run_id=@run"))
+                {
+                    s.Bind("@run", runId);
+                    foreach (var r in s.Rows()) plans[r.GetString(0)] = new CaseHeader { CaseId = r.GetString(0), DisplayName = r.GetString(1), CaseType = r.GetString(2), Summary = r.GetString(3), Warning = r.GetString(4), State = r.GetString(5), ApplyCaption = r.GetString(6) };
+                }
+                var caseByDecision = new Dictionary<string, string>(StringComparer.Ordinal);
+                using (var s = db.PrepareStatement("SELECT case_id,decision_id FROM resolution_case_decision WHERE run_id=@run")) { s.Bind("@run", runId); foreach (var r in s.Rows()) caseByDecision[r.GetString(1)] = r.GetString(0); }
+                foreach (var row in dashboard)
+                {
+                    var planId = (row.UnderlyingDecisionIds ?? new string[0]).Select(x => caseByDecision.TryGetValue(x, out var id) ? id : null).FirstOrDefault(x => x != null);
+                    if (planId == null || !plans.TryGetValue(planId, out var plan)) continue;
+                    row.CaseId = plan.CaseId; row.Person = plan.DisplayName; row.Status = plan.CaseType; row.Decision = plan.Summary;
+                    row.Action = plan.State == IdentityPlanStates.Complete ? plan.ApplyCaption : plan.State == IdentityPlanStates.Blocked ? "Blocked — incomplete scope" : "Correction required";
+                    row.Automation = plan.State == IdentityPlanStates.Complete ? "Ready to apply" : plan.State == IdentityPlanStates.Blocked ? "Blocked" : "Correction required";
+                    row.AutomationReason = string.IsNullOrWhiteSpace(plan.Warning) ? plan.Summary : plan.Summary + " " + plan.Warning;
+                }
+            }
+            return dashboard;
         }
 
         public DecisionChangeContext DecisionChangeContext(string decisionId)
@@ -677,6 +876,56 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
                     }
                 }
             }, TransactionMode.Immediate);
+        }
+
+        public long SaveCorrectionChoice(ProviderCorrection correction, long sourceRunId, string caseId, string questionId, string choiceId)
+        {
+            if (correction == null) throw new ArgumentNullException(nameof(correction));
+            if (string.IsNullOrWhiteSpace(caseId) || string.IsNullOrWhiteSpace(questionId) || string.IsNullOrWhiteSpace(choiceId)) throw new ArgumentException("The contextual correction selection is incomplete.");
+            correction.NormalizeAndValidate();
+            if (correction.CorrectionId > 0) throw new InvalidOperationException("A contextual correction choice must create a new durable correction.");
+            var now = Now(); var id = 0L;
+            lock (sync) db.RunInTransaction(x =>
+            {
+                Statement(x, "INSERT INTO provider_correction(kind,operation,provider,media_type,provider_media_id,provider_person_id,field_name,current_value,replacement_value,secondary_provider,secondary_id,emby_id,reason,note,enabled,created_utc,updated_utc) VALUES(@kind,@operation,@provider,coalesce(@mediaType,''),coalesce(@mediaId,''),coalesce(@personId,''),coalesce(@field,''),coalesce(@current,''),coalesce(@replacement,''),coalesce(@secondaryProvider,''),coalesce(@secondaryId,''),@emby,@reason,coalesce(@note,''),@enabled,@now,@now)", s => BindCorrection(s, correction, now));
+                using (var s = x.PrepareStatement("SELECT last_insert_rowid()")) foreach (var row in s.Rows()) id = row.GetInt64(0);
+                Statement(x, "INSERT INTO provider_correction_selection VALUES(@id,@run,@case,@question,@choice,@now)", s => { s.Bind("@id", id); s.Bind("@run", sourceRunId); s.Bind("@case", caseId); s.Bind("@question", questionId); s.Bind("@choice", choiceId); s.Bind("@now", now); });
+            }, TransactionMode.Immediate);
+            correction.CorrectionId = id; return id;
+        }
+
+        public long CommitIdentityCase(IdentityCasePlan plan, IdentityCaseApplyReceipt receipt)
+        {
+            if (plan == null) throw new ArgumentNullException(nameof(plan));
+            if (receipt == null) throw new ArgumentNullException(nameof(receipt));
+            var applyId = 0L; var now = Now();
+            lock (sync) db.RunInTransaction(x =>
+            {
+                Statement(x, "INSERT INTO identity_case_apply(source_run_id,case_id,reviewed_plan_hash,started_utc,finished_utc,status,summary) VALUES(@run,@case,@hash,@now,@now,'COMMITTED',@summary)", s => { s.Bind("@run", plan.RunId); s.Bind("@case", plan.CaseId); s.Bind("@hash", plan.PlanHash); s.Bind("@now", now); s.Bind("@summary", receipt.Summary); });
+                using (var s = x.PrepareStatement("SELECT last_insert_rowid()")) foreach (var r in s.Rows()) applyId = r.GetInt64(0);
+                for (var i = 0; i < receipt.Changes.Count; i++)
+                {
+                    var change = receipt.Changes[i];
+                    Statement(x, "INSERT INTO identity_case_apply_change VALUES(@apply,@order,@kind,@source,@target,@outcome,@media,@role,@provider,@old,@new,@summary)", s => { s.Bind("@apply", applyId); s.Bind("@order", i); s.Bind("@kind", change.Kind); s.Bind("@source", change.SourceEmbyId); s.Bind("@target", change.TargetEmbyId); s.Bind("@outcome", change.OutcomeId); s.Bind("@media", change.MediaEmbyId); s.Bind("@role", change.Role); s.Bind("@provider", change.Provider); s.Bind("@old", change.OldValue); s.Bind("@new", change.NewValue); s.Bind("@summary", change.Summary); });
+                }
+                foreach (var outcome in plan.Outcomes.Where(o => receipt.OutcomeEmbyIds.ContainsKey(o.OutcomeId)))
+                {
+                    var id = receipt.OutcomeEmbyIds[outcome.OutcomeId];
+                    var tmdb = outcome.ProviderIds.FirstOrDefault(y => y.Provider == ProviderNames.Tmdb)?.ProviderId;
+                    var tvdb = outcome.ProviderIds.FirstOrDefault(y => y.Provider == ProviderNames.Tvdb)?.ProviderId;
+                    var imdb = outcome.ProviderIds.FirstOrDefault(y => y.Provider == ProviderNames.Imdb)?.ProviderId;
+                    Statement(x, "INSERT OR REPLACE INTO current_local_person(emby_id,name,tmdb_id,tvdb_id,imdb_id) VALUES(@id,@name,@tmdb,@tvdb,@imdb)", s => { s.Bind("@id", id); s.Bind("@name", outcome.DisplayName); s.Bind("@tmdb", tmdb); s.Bind("@tvdb", tvdb); s.Bind("@imdb", imdb); });
+                    Statement(x, "INSERT OR REPLACE INTO global_local_person(emby_id,name,tmdb_id,tvdb_id,imdb_id) VALUES(@id,@name,@tmdb,@tvdb,@imdb)", s => { s.Bind("@id", id); s.Bind("@name", outcome.DisplayName); s.Bind("@tmdb", tmdb); s.Bind("@tvdb", tvdb); s.Bind("@imdb", imdb); });
+                }
+                foreach (var credit in plan.Credits.Where(c => receipt.OutcomeEmbyIds.ContainsKey(c.TargetOutcomeId)))
+                {
+                    var target = receipt.OutcomeEmbyIds[credit.TargetOutcomeId];
+                    if (target != credit.SourcePersonEmbyId)
+                        Statement(x, "DELETE FROM current_local_credit WHERE person_emby_id=@source AND media_emby_id=@media AND role=@role", s => { s.Bind("@source", credit.SourcePersonEmbyId); s.Bind("@media", credit.MediaEmbyId); s.Bind("@role", credit.Role); });
+                    Statement(x, "INSERT OR IGNORE INTO current_local_credit(person_emby_id,media_emby_id,role) VALUES(@target,@media,@role)", s => { s.Bind("@target", target); s.Bind("@media", credit.MediaEmbyId); s.Bind("@role", credit.Role); });
+                }
+            }, TransactionMode.Immediate);
+            return applyId;
         }
 
         private static string ProviderIdText(LocalPerson person)
@@ -826,6 +1075,17 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
             }
         }
 
+        private sealed class CaseHeader
+        {
+            public string CaseId { get; set; }
+            public string DisplayName { get; set; }
+            public string CaseType { get; set; }
+            public string Summary { get; set; }
+            public string Warning { get; set; }
+            public string State { get; set; }
+            public string ApplyCaption { get; set; }
+        }
+
         private static readonly string[] Schema =
         {
             "CREATE TABLE IF NOT EXISTS schema_info(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL)",
@@ -867,7 +1127,21 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
             "CREATE TABLE IF NOT EXISTS resolution_cluster_member(run_id INTEGER NOT NULL,cluster_id TEXT NOT NULL,provider TEXT NOT NULL,provider_person_id TEXT NOT NULL,PRIMARY KEY(run_id,cluster_id,provider,provider_person_id),FOREIGN KEY(run_id,cluster_id) REFERENCES resolution_cluster(run_id,cluster_id) ON DELETE CASCADE) WITHOUT ROWID",
             "CREATE TABLE IF NOT EXISTS provider_correction(correction_id INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL,operation TEXT NOT NULL,provider TEXT NOT NULL DEFAULT '',media_type TEXT NOT NULL DEFAULT '',provider_media_id TEXT NOT NULL DEFAULT '',provider_person_id TEXT NOT NULL DEFAULT '',field_name TEXT NOT NULL DEFAULT '',current_value TEXT NOT NULL DEFAULT '',replacement_value TEXT NOT NULL DEFAULT '',secondary_provider TEXT NOT NULL DEFAULT '',secondary_id TEXT NOT NULL DEFAULT '',emby_id INTEGER,reason TEXT NOT NULL,note TEXT NOT NULL DEFAULT '',enabled INTEGER NOT NULL CHECK(enabled IN(0,1)),created_utc INTEGER NOT NULL,updated_utc INTEGER NOT NULL)",
             "CREATE INDEX IF NOT EXISTS idx_provider_correction_enabled ON provider_correction(enabled,kind,provider)",
-            "CREATE TABLE IF NOT EXISTS correction_application(run_id INTEGER NOT NULL,correction_id INTEGER NOT NULL,matched_count INTEGER NOT NULL,changed_count INTEGER NOT NULL,summary TEXT NOT NULL,applied_utc INTEGER NOT NULL,PRIMARY KEY(run_id,correction_id),FOREIGN KEY(run_id) REFERENCES resolution_run(run_id) ON DELETE CASCADE,FOREIGN KEY(correction_id) REFERENCES provider_correction(correction_id) ON DELETE CASCADE) WITHOUT ROWID"
+            "CREATE TABLE IF NOT EXISTS correction_application(run_id INTEGER NOT NULL,correction_id INTEGER NOT NULL,matched_count INTEGER NOT NULL,changed_count INTEGER NOT NULL,summary TEXT NOT NULL,applied_utc INTEGER NOT NULL,PRIMARY KEY(run_id,correction_id),FOREIGN KEY(run_id) REFERENCES resolution_run(run_id) ON DELETE CASCADE,FOREIGN KEY(correction_id) REFERENCES provider_correction(correction_id) ON DELETE CASCADE) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS resolution_case(run_id INTEGER NOT NULL,case_id TEXT NOT NULL,plan_hash TEXT NOT NULL,display_name TEXT NOT NULL,case_type TEXT NOT NULL,summary TEXT NOT NULL,warning TEXT NOT NULL DEFAULT '',state TEXT NOT NULL CHECK(state IN('COMPLETE','CORRECTION_REQUIRED','BLOCKED')),apply_caption TEXT NOT NULL,PRIMARY KEY(run_id,case_id),FOREIGN KEY(run_id) REFERENCES resolution_run(run_id) ON DELETE CASCADE) WITHOUT ROWID",
+            "CREATE INDEX IF NOT EXISTS idx_resolution_case_ui ON resolution_case(run_id,state,display_name,case_id)",
+            "CREATE TABLE IF NOT EXISTS resolution_case_decision(run_id INTEGER NOT NULL,case_id TEXT NOT NULL,decision_id TEXT NOT NULL,sort_order INTEGER NOT NULL,PRIMARY KEY(run_id,case_id,decision_id),FOREIGN KEY(run_id,case_id) REFERENCES resolution_case(run_id,case_id) ON DELETE CASCADE,FOREIGN KEY(run_id,decision_id) REFERENCES resolution_decision(run_id,decision_id) ON DELETE CASCADE) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS resolution_identity_outcome(run_id INTEGER NOT NULL,case_id TEXT NOT NULL,outcome_id TEXT NOT NULL,sort_order INTEGER NOT NULL,cluster_key TEXT NOT NULL,target_kind TEXT NOT NULL CHECK(target_kind IN('EXISTING','NEW','UNRESOLVED')),target_emby_id INTEGER,display_name TEXT NOT NULL,outcome TEXT NOT NULL,PRIMARY KEY(run_id,case_id,outcome_id),CHECK((target_kind='EXISTING' AND target_emby_id IS NOT NULL) OR (target_kind IN('NEW','UNRESOLVED') AND target_emby_id IS NULL)),FOREIGN KEY(run_id,case_id) REFERENCES resolution_case(run_id,case_id) ON DELETE CASCADE) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS resolution_case_person_snapshot(run_id INTEGER NOT NULL,case_id TEXT NOT NULL,emby_id INTEGER NOT NULL,name TEXT NOT NULL,tmdb_id TEXT,tvdb_id TEXT,imdb_id TEXT,PRIMARY KEY(run_id,case_id,emby_id),FOREIGN KEY(run_id,case_id) REFERENCES resolution_case(run_id,case_id) ON DELETE CASCADE) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS resolution_identity_outcome_source(run_id INTEGER NOT NULL,case_id TEXT NOT NULL,outcome_id TEXT NOT NULL,source_emby_id INTEGER NOT NULL,PRIMARY KEY(run_id,case_id,outcome_id,source_emby_id),FOREIGN KEY(run_id,case_id,outcome_id) REFERENCES resolution_identity_outcome(run_id,case_id,outcome_id) ON DELETE CASCADE) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS resolution_identity_outcome_provider_id(run_id INTEGER NOT NULL,case_id TEXT NOT NULL,outcome_id TEXT NOT NULL,provider TEXT NOT NULL CHECK(provider IN('tmdb','tvdb','imdb')),provider_id TEXT NOT NULL,source TEXT NOT NULL CHECK(source IN('native','external')),PRIMARY KEY(run_id,case_id,outcome_id,provider,provider_id),FOREIGN KEY(run_id,case_id,outcome_id) REFERENCES resolution_identity_outcome(run_id,case_id,outcome_id) ON DELETE CASCADE) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS resolution_case_credit(run_id INTEGER NOT NULL,case_id TEXT NOT NULL,assignment_id TEXT NOT NULL,source_person_emby_id INTEGER NOT NULL,target_outcome_id TEXT NOT NULL,media_emby_id INTEGER NOT NULL,media_type TEXT NOT NULL,media_name TEXT NOT NULL,role TEXT NOT NULL,tmdb_id TEXT,tvdb_id TEXT,tvdb_slug TEXT,imdb_id TEXT,disposition TEXT NOT NULL CHECK(disposition IN('KEEP','MOVE')),rationale TEXT NOT NULL,correction_required INTEGER NOT NULL CHECK(correction_required IN(0,1)),PRIMARY KEY(run_id,case_id,assignment_id),FOREIGN KEY(run_id,case_id,target_outcome_id) REFERENCES resolution_identity_outcome(run_id,case_id,outcome_id) ON DELETE CASCADE) WITHOUT ROWID",
+            "CREATE INDEX IF NOT EXISTS idx_resolution_case_credit_media ON resolution_case_credit(run_id,case_id,media_emby_id)",
+            "CREATE TABLE IF NOT EXISTS resolution_question(run_id INTEGER NOT NULL,case_id TEXT NOT NULL,question_id TEXT NOT NULL,kind TEXT NOT NULL,outcome_id TEXT,assignment_id TEXT,narrative TEXT NOT NULL,PRIMARY KEY(run_id,case_id,question_id),FOREIGN KEY(run_id,case_id) REFERENCES resolution_case(run_id,case_id) ON DELETE CASCADE,FOREIGN KEY(run_id,case_id,outcome_id) REFERENCES resolution_identity_outcome(run_id,case_id,outcome_id) ON DELETE CASCADE,FOREIGN KEY(run_id,case_id,assignment_id) REFERENCES resolution_case_credit(run_id,case_id,assignment_id) ON DELETE CASCADE) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS resolution_question_choice(run_id INTEGER NOT NULL,case_id TEXT NOT NULL,question_id TEXT NOT NULL,choice_id TEXT NOT NULL,caption TEXT NOT NULL,effect TEXT NOT NULL,correction_kind TEXT NOT NULL,correction_operation TEXT NOT NULL,provider TEXT NOT NULL DEFAULT '',media_type TEXT NOT NULL DEFAULT '',provider_media_id TEXT NOT NULL DEFAULT '',provider_person_id TEXT NOT NULL DEFAULT '',field_name TEXT NOT NULL DEFAULT '',current_value TEXT NOT NULL DEFAULT '',replacement_value TEXT NOT NULL DEFAULT '',secondary_provider TEXT NOT NULL DEFAULT '',secondary_id TEXT NOT NULL DEFAULT '',emby_id INTEGER,reason TEXT NOT NULL,note TEXT NOT NULL DEFAULT '',PRIMARY KEY(run_id,case_id,question_id,choice_id),FOREIGN KEY(run_id,case_id,question_id) REFERENCES resolution_question(run_id,case_id,question_id) ON DELETE CASCADE) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS identity_case_apply(apply_id INTEGER PRIMARY KEY AUTOINCREMENT,source_run_id INTEGER NOT NULL,case_id TEXT NOT NULL,reviewed_plan_hash TEXT NOT NULL,started_utc INTEGER NOT NULL,finished_utc INTEGER,status TEXT NOT NULL CHECK(status IN('STARTED','COMMITTED','ROLLED_BACK','FAILED')),summary TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS identity_case_apply_change(apply_id INTEGER NOT NULL,change_order INTEGER NOT NULL,change_kind TEXT NOT NULL,source_emby_id INTEGER,target_emby_id INTEGER,outcome_id TEXT,media_emby_id INTEGER,role TEXT,provider TEXT,old_value TEXT,new_value TEXT,summary TEXT NOT NULL,PRIMARY KEY(apply_id,change_order),FOREIGN KEY(apply_id) REFERENCES identity_case_apply(apply_id) ON DELETE CASCADE) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS provider_correction_selection(correction_id INTEGER PRIMARY KEY,source_run_id INTEGER NOT NULL,case_id TEXT NOT NULL,question_id TEXT NOT NULL,choice_id TEXT NOT NULL,selected_utc INTEGER NOT NULL,FOREIGN KEY(correction_id) REFERENCES provider_correction(correction_id) ON DELETE CASCADE)"
         };
     }
 }

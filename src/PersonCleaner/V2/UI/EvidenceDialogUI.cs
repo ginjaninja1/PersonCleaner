@@ -107,7 +107,7 @@ namespace PersonCleaner.V2.UI
                 column.allowGrouping = true;
                 column.allowHeaderFiltering = true;
                 if (column.dataField == nameof(DashboardDecision.CaseId) || column.dataField == nameof(DashboardDecision.DecisionId) || column.dataField == nameof(DashboardDecision.UnderlyingDecisionIds) || column.dataField == nameof(DashboardDecision.UnderlyingDecisionLabels) || column.dataField == nameof(DashboardDecision.AutomationReason)) column.visible = false;
-                if (column.dataField == nameof(DashboardDecision.ReviewChanges)) { column.caption = "Review / update"; column.width = 110; column.allowEditing = true; column.allowGrouping = false; column.allowHeaderFiltering = false; }
+                if (column.dataField == nameof(DashboardDecision.ReviewChanges)) { column.caption = "Open case"; column.width = 100; column.allowEditing = true; column.allowGrouping = false; column.allowHeaderFiltering = false; }
                 if (column.dataField == nameof(DashboardDecision.Details)) { column.visible = false; column.isSecondaryGridDataSource = true; }
                 if (column.dataField == nameof(DashboardDecision.Status)) { column.caption = "Case type"; column.groupIndex = 0; column.showWhenGrouped = true; column.width = 120; }
                 if (column.dataField == nameof(DashboardDecision.Action)) { column.caption = "Safety mode"; column.width = 190; }

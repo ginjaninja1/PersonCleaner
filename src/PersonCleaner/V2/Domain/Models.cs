@@ -32,6 +32,7 @@ namespace PersonCleaner.V2.Domain
         public int? Year { get; set; }
         public string TmdbId { get; set; }
         public string TvdbId { get; set; }
+        public string TvdbSlug { get; set; }
         public string ImdbId { get; set; }
     }
 
@@ -127,6 +128,7 @@ namespace PersonCleaner.V2.Domain
         public List<PersonAcquisition> PersonAcquisitions { get; set; } = new List<PersonAcquisition>();
         public List<MediaAcquisition> MediaAcquisitions { get; set; } = new List<MediaAcquisition>();
         public List<CorrectionApplication> CorrectionApplications { get; set; } = new List<CorrectionApplication>();
+        public List<ProviderCorrection> ActiveCorrections { get; set; } = new List<ProviderCorrection>();
     }
 
     public sealed class ResolutionSettings

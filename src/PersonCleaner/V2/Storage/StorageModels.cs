@@ -117,4 +117,11 @@ namespace PersonCleaner.V2.Storage
         public int Decisions { get; set; }
         public string DecisionBreakdown { get; set; }
     }
+
+    public sealed class RoleCorrectionChoice
+    {
+        public string Caption { get; set; }
+        public string Effect { get; set; }
+        public ProviderCorrection Correction { get; set; }
+    }
 }

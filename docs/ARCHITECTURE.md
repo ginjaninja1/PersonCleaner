@@ -4,7 +4,7 @@
 
 1. **Local media is the anchor.** Provider person IDs are mutable observations, not the internal definition of a human identity.
 2. **Media discovers people.** Only people credited on selected media enter an evaluation cohort.
-3. **Evidence collection is read-only; commits are explicit.** Computed state and operator overrides remain private shadow data until an operator reviews a scoped change dialog and presses **Update Emby**.
+3. **Evidence collection is read-only; commits are explicit.** Computed state and operator overrides remain private shadow data until an operator reviews the complete case-wide final projection and presses **Apply**.
 4. **Network work is scheduled.** The UI executes bounded indexed reads and offline recalculation only.
 5. **A name is never proof.** Normalized names and aliases can corroborate an already media-blocked candidate; they cannot create a candidate edge alone.
 6. **Missing evidence is not destructive evidence.** Missing provider support becomes a review state.
@@ -59,7 +59,9 @@ Important table groups:
 | Flattened provider index | `provider_media`, `provider_media_observation`, `media_external_id`, `provider_media_credit`, `provider_person`, `person_external_id`, `person_alias` | Compact queryable evidence, structured roles and acquisition scope; no UI JSON parsing |
 | Human truth | `manual_bridge`, `provider_correction`, `correction_application` | Confirmed/rejected identity relations, persistent provider-fact overlays and per-run trigger audit |
 | Pair and cluster audit | `resolution_pair`, `resolution_pair_feature`, `resolution_cluster`, `resolution_cluster_member` | Versioned pair features, disposition, component membership and separate identity/anchor confidence |
-| Presentation/audit | `resolution_decision`, `resolution_evidence`, `resolution_media`, `resolution_credit_assignment` | Pre-rendered summaries, raw metrics, complete impacted-title attribution and immutable per-decision `KEEP`/`MOVE` plans |
+| Relationship audit | `resolution_decision`, `resolution_evidence`, `resolution_media`, `resolution_credit_assignment` | Pre-rendered relationship evidence and schema-8 per-decision assignment audit |
+| Final case projection | `resolution_case`, `resolution_case_decision`, `resolution_case_person_snapshot`, `resolution_identity_outcome*`, `resolution_case_credit`, `resolution_question*` | Case-wide current/final identities, final IDs, credit destinations and explicit durable correction choices |
+| Apply audit | `identity_case_apply`, `identity_case_apply_change` | Reviewed plan hash and the exact committed operations; no delete mutation exists |
 
 The schema is created idempotently by `ResolutionRepository`. It uses WAL, normal synchronous mode, foreign keys, a 30-second busy timeout, narrow primary keys, and reverse indexes for external-ID and person-credit lookup.
 
@@ -106,7 +108,8 @@ Raw payloads and flattened provider tables are immutable inputs from the operato
 - unusable or replacement person/media external-ID crosswalks;
 - unusable or replacement provider person names and birthdays;
 - unusable or replacement local Emby provider bindings; and
-- explicit same/different identity relations.
+- explicit same/different identity relations; and
+- case-specific identity targets and Emby-credit destinations selected by contextual review.
 
 Each scheduled or cached recalculation writes one `correction_application` row per active correction. A positive `matched_count` means the rule triggered against the run's source facts; `changed_count` records how many effective facts changed. A zero match remains an operator review state and is never interpreted automatically as a provider-side fix. Triggered rules emit an informational log line. Refreshing provider data never overwrites, deletes or silently resolves an operator correction.
 
@@ -228,7 +231,7 @@ The evidence page loads at most the configured summary limit (default 100), orde
 - expandable ordered evidence with verdicts and stored raw metrics; and
 - a capped display set of impacted titles, while all impacted rows remain stored.
 
-The **Change** checkbox opens a scoped commit preview. **Update Emby** validates the live records, applies every listed operation, synchronizes the local snapshot and reruns the offline graph/scoring stage. When a durable evidence override is recommended, the dialog opens the existing typed `provider_correction` editor prefilled from the decision.
+The **Open case** checkbox opens the holistic master/detail review dialog using the existing dialog replacement/parent-return lifecycle. Identity parents compare current and resulting Emby/provider IDs; media children show keep/move/receive actions. **Correct identity**, **Correct assignment** and **Correct role** Boolean columns open contextual choice dialogs. Saving a choice writes a durable provider correction, recalculates cached evidence and returns the exact rebuilt review parent. The top-level **Apply** `ButtonItem` is present only for a complete plan; it re-reads live Emby, validates the reviewed snapshot/hash, applies only listed ID/credit operations, records an apply receipt, recalculates, rebuilds the exact evidence parent and returns to it.
 
 ## Deliberate non-goals in v2
 

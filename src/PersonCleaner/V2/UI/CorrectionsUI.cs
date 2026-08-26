@@ -192,6 +192,22 @@ namespace PersonCleaner.V2.UI
         public string SecondaryId { get; set; }
     }
 
+    public sealed class ContextualCaseCorrectionUI : CorrectionEditorUIBase
+    {
+        [Browsable(false)]
+        public string Kind { get; set; }
+        [DisplayName("Provider (identity target)")]
+        public string Provider { get; set; }
+        [DisplayName("Provider person ID (identity target)")]
+        public string ProviderPersonId { get; set; }
+        [DisplayName("Emby media ID (credit target)")]
+        public long? EmbyId { get; set; }
+        [DisplayName("Current case value")]
+        public string CurrentValue { get; set; }
+        [DisplayName("Selected result")]
+        public string ReplacementValue { get; set; }
+    }
+
     internal static class CorrectionCommands
     {
         public const string Save = "correction-save";
@@ -334,6 +350,8 @@ namespace PersonCleaner.V2.UI
             if (c.Kind == CorrectionKinds.MediaExternalId) return c.Provider.ToUpperInvariant() + " " + c.MediaType + ":" + c.ProviderMediaId + " has " + Value(c) + " " + c.FieldName + " cross-reference";
             if (c.Kind == CorrectionKinds.PersonField) return c.Provider.ToUpperInvariant() + " person " + c.ProviderPersonId + " has " + Value(c) + " " + c.FieldName;
             if (c.Kind == CorrectionKinds.LocalPersonBinding || c.Kind == CorrectionKinds.LocalMediaBinding) return "Emby " + (c.Kind == CorrectionKinds.LocalPersonBinding ? "person " : "media ") + c.EmbyId + " has " + Value(c) + " " + c.Provider.ToUpperInvariant() + " binding";
+            if (c.Kind == CorrectionKinds.IdentityTarget) return c.Provider.ToUpperInvariant() + " person " + c.ProviderPersonId + " is assigned to " + c.ReplacementValue;
+            if (c.Kind == CorrectionKinds.LocalCreditTarget) return "Emby media " + c.EmbyId + " credit " + c.CurrentValue + " is assigned to " + c.ReplacementValue;
             return c.Provider + ":" + c.ProviderPersonId + " and " + c.SecondaryProvider + ":" + c.SecondaryId + " are " + c.Operation;
         }
         private static string Value(ProviderCorrection c) => c.Operation == CorrectionOperations.Unusable ? "no usable" : "replacement " + c.ReplacementValue;
@@ -387,6 +405,7 @@ namespace PersonCleaner.V2.UI
             if (c.Kind == CorrectionKinds.MediaExternalId) return Common(new MediaExternalIdCorrectionUI { Provider = c.Provider, MediaType = c.MediaType, ProviderMediaId = c.ProviderMediaId, FieldName = c.FieldName, CurrentValue = c.CurrentValue, ReplacementValue = c.Operation == CorrectionOperations.Replace ? c.ReplacementValue : null }, c);
             if (c.Kind == CorrectionKinds.PersonField) return Common(new PersonFieldCorrectionUI { Provider = c.Provider, ProviderPersonId = c.ProviderPersonId, FieldName = c.FieldName, CurrentValue = c.CurrentValue, ReplacementValue = c.Operation == CorrectionOperations.Replace ? c.ReplacementValue : null }, c);
             if (c.Kind == CorrectionKinds.LocalPersonBinding || c.Kind == CorrectionKinds.LocalMediaBinding) return Common(new LocalBindingCorrectionUI { Subject = c.Kind == CorrectionKinds.LocalPersonBinding ? "person" : "media", EmbyId = c.EmbyId ?? 0, Provider = c.Provider, CurrentValue = c.CurrentValue, ReplacementValue = c.Operation == CorrectionOperations.Replace ? c.ReplacementValue : null }, c);
+            if (c.Kind == CorrectionKinds.IdentityTarget || c.Kind == CorrectionKinds.LocalCreditTarget) return Common(new ContextualCaseCorrectionUI { Kind = c.Kind, Provider = c.Provider, ProviderPersonId = c.ProviderPersonId, EmbyId = c.EmbyId, CurrentValue = c.CurrentValue, ReplacementValue = c.ReplacementValue }, c);
             return Common(new IdentityRelationCorrectionUI { Relation = c.Operation, Provider = c.Provider, ProviderPersonId = c.ProviderPersonId, SecondaryProvider = c.SecondaryProvider, SecondaryId = c.SecondaryId }, c);
         }
 
@@ -420,6 +439,10 @@ namespace PersonCleaner.V2.UI
                 if (!string.Equals(x.Subject, "person", StringComparison.OrdinalIgnoreCase) && !string.Equals(x.Subject, "media", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("Local subject must be person or media.");
                 c.Kind = string.Equals(x.Subject, "media", StringComparison.OrdinalIgnoreCase) ? CorrectionKinds.LocalMediaBinding : CorrectionKinds.LocalPersonBinding; c.EmbyId = x.EmbyId; c.Provider = x.Provider; c.CurrentValue = x.CurrentValue; c.ReplacementValue = x.ReplacementValue;
             }
+            else if (c.Kind == CorrectionKinds.IdentityTarget || c.Kind == CorrectionKinds.LocalCreditTarget)
+            {
+                var x = json.DeserializeFromString<ContextualCaseCorrectionUI>(data); SetCommon(c, x); c.Kind = original.Kind; c.Operation = CorrectionOperations.Replace; c.Provider = x.Provider; c.ProviderPersonId = x.ProviderPersonId; c.EmbyId = x.EmbyId; c.CurrentValue = x.CurrentValue; c.ReplacementValue = x.ReplacementValue; return c;
+            }
             else
             {
                 var x = json.DeserializeFromString<IdentityRelationCorrectionUI>(data); SetCommon(c, x); c.Operation = original.Operation; c.Provider = x.Provider; c.ProviderPersonId = x.ProviderPersonId; c.SecondaryProvider = x.SecondaryProvider; c.SecondaryId = x.SecondaryId; return c;
@@ -439,7 +462,7 @@ namespace PersonCleaner.V2.UI
                 logger.Info("PersonCleaner run {0} provider correction {1} triggered during cached recalculation: matched={2}, changed={3}. {4}", run.RunId, application.CorrectionId, application.MatchedCount, application.ChangedCount, application.Summary);
             var c = Plugin.Instance.Configuration;
             var engine = new ResolutionEngine(); var decisions = engine.Resolve(input, new ResolutionSettings { AutomaticMatchThreshold = c.AutomaticMatchThreshold, HumanReviewThreshold = c.HumanReviewThreshold, MaximumMediaExamples = c.MaximumMediaExamplesPerDecision });
-            repository.SaveDecisions(run.RunId, decisions, engine.PairEvaluations, engine.Clusters);
+            repository.SaveDecisions(run.RunId, decisions, engine.PairEvaluations, engine.Clusters, input);
         }
     }
 }

@@ -66,6 +66,10 @@ internal static class Program
         Run("review case automation requires one converged correction", ReviewCaseAutomationRequiresConvergence);
         Run("review case automation respects incomplete scope", ReviewCaseAutomationRespectsScope);
         Run("review cases never group by display name alone", ReviewCasesDoNotGroupByName);
+        Run("holistic Lily plan creates one provider-identified person and moves two credits", HolisticLilyPlan);
+        Run("holistic Donna plan treats unopposed disconnected providers as a warning", HolisticDonnaPlan);
+        Run("holistic plan persists a genuine ambiguous media question", HolisticAmbiguousMediaQuestion);
+        Run("holistic planner remains bounded across 1600 cases", HolisticPlannerRemainsBounded);
         Run("large unrelated provider-credit sets remain bounded", LargeProviderCreditSetRemainsBounded);
         Console.WriteLine("Passed " + passed + " entity-resolution tests; failed " + failed + ".");
         return failed == 0 ? 0 : 1;
@@ -954,6 +958,79 @@ internal static class Program
         Equal(2, DashboardCaseBuilder.Build(rows).Length);
     }
 
+    private static void HolisticLilyPlan()
+    {
+        var input = new ResolutionInput();
+        var oldTmdb = Person(ProviderNames.Tmdb, "12539", "Lily Knight", ProviderNames.Imdb, "nm0460990");
+        var oldTvdb = Person(ProviderNames.Tvdb, "252656", "Lily Knight", ProviderNames.Tmdb, "12539");
+        var newTmdb = Person(ProviderNames.Tmdb, "2548051", "Lily Knight", ProviderNames.Imdb, "nm8424509");
+        var newTvdb = Person(ProviderNames.Tvdb, "9096777", "Lily Knight", ProviderNames.Imdb, "nm8424509");
+        input.ProviderPeople.AddRange(new[] { oldTmdb, oldTvdb, newTmdb, newTvdb });
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 13932, Name = "Lily Knight", TmdbId = "12539", TvdbId = "252656", ImdbId = "nm0460990" });
+        AddPlanMedia(input, 1, "A.I.", "644", "1062", "Actor: Voice", oldTmdb, oldTvdb);
+        AddPlanMedia(input, 2, "Secretary", "11013", null, "Actor: Paralegal", oldTmdb);
+        AddPlanMedia(input, 3, "The Artist", "74643", null, "Actor: Nurse", oldTmdb);
+        AddPlanMedia(input, 4, "Saint Maud", "575776", "99291", "Actor: Joy", newTmdb, newTvdb);
+        AddPlanMedia(input, 5, "Their Finest", "340101", "6563", "Actor: Rose", newTmdb, newTvdb);
+        var decision = new ResolutionDecision { DecisionId = "lily-split", Status = "SPLIT", Action = "FORCE_SPLIT_REVIEW", DisplayName = "Lily Knight", AnchorEmbyPersonId = 13932, ProviderKeys = "tmdb:12539,tvdb:252656,tmdb:2548051,tvdb:9096777" };
+        var clusters = new[] { Cluster("old", 13932, "tmdb:12539", "tvdb:252656"), Cluster("new", 13932, "tmdb:2548051", "tvdb:9096777") };
+        var plan = IdentityCasePlanner.Build(1, input, new[] { decision }, clusters).Single();
+        Equal(IdentityPlanStates.Complete, plan.State);
+        Equal(2, plan.Outcomes.Count(x => x.TargetKind == IdentityTargetKinds.New || x.TargetKind == IdentityTargetKinds.Existing));
+        Equal(1, plan.Outcomes.Count(x => x.TargetKind == IdentityTargetKinds.New));
+        Equal(2, plan.Credits.Count(x => x.Disposition == "MOVE"));
+        True(plan.ApplyCaption.Contains("create 1 person") && plan.ApplyCaption.Contains("move 2 credits"));
+    }
+
+    private static void HolisticDonnaPlan()
+    {
+        var input = new ResolutionInput();
+        var tmdb = Person(ProviderNames.Tmdb, "1996180", "Donna Ewin", null, null);
+        var tvdb = Person(ProviderNames.Tvdb, "259110", "Donna Ewin", null, null);
+        input.ProviderPeople.AddRange(new[] { tmdb, tvdb });
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 63839, Name = "Donna Ewin", TmdbId = "1996180", TvdbId = "259110" });
+        AddPlanMedia(input, 10, "Eyes Wide Shut", "345", null, "Actor: Principal", tmdb);
+        AddPlanMedia(input, 11, "The Fast Show", null, "70415", "Actor", tvdb);
+        var decision = new ResolutionDecision { DecisionId = "donna-split", Status = "SPLIT", Action = "FORCE_SPLIT_REVIEW", DisplayName = "Donna Ewin", AnchorEmbyPersonId = 63839, ProviderKeys = "tmdb:1996180,tvdb:259110" };
+        var plan = IdentityCasePlanner.Build(2, input, new[] { decision }, new[] { Cluster("tmdb", 63839, "tmdb:1996180"), Cluster("tvdb", 63839, "tvdb:259110") }).Single();
+        Equal(IdentityPlanStates.Complete, plan.State);
+        Equal(1, plan.Outcomes.Count);
+        Equal(0, plan.Credits.Count(x => x.Disposition == "MOVE"));
+        True(plan.Warning.Contains("no counter-evidence"));
+    }
+
+    private static void HolisticAmbiguousMediaQuestion()
+    {
+        var input = new ResolutionInput();
+        var tmdb = Person(ProviderNames.Tmdb, "1", "Alex Example", ProviderNames.Imdb, "nm1");
+        var tvdb = Person(ProviderNames.Tvdb, "2", "Alex Example", ProviderNames.Imdb, "nm2");
+        input.ProviderPeople.AddRange(new[] { tmdb, tvdb });
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 50, Name = "Alex Example", TmdbId = "1" });
+        AddPlanMedia(input, 20, "Disputed title", "20", "200", "Actor: Lead", tmdb, tvdb);
+        var decision = new ResolutionDecision { DecisionId = "alex-split", Status = "SPLIT", Action = "FORCE_SPLIT_REVIEW", DisplayName = "Alex Example", AnchorEmbyPersonId = 50, ProviderKeys = "tmdb:1,tvdb:2" };
+        var plan = IdentityCasePlanner.Build(3, input, new[] { decision }, new[] { Cluster("one", 50, "tmdb:1"), Cluster("two", 50, "tvdb:2") }).Single();
+        Equal(IdentityPlanStates.CorrectionRequired, plan.State);
+        True(plan.Questions.Any(x => x.Kind == CorrectionKinds.LocalCreditTarget && x.Choices.Count == 2));
+        True(plan.Credits.Single().CorrectionRequired);
+    }
+
+    private static void HolisticPlannerRemainsBounded()
+    {
+        const int count = 1600;
+        var input = new ResolutionInput(); var decisions = new List<ResolutionDecision>(); var clusters = new List<ResolutionClusterSnapshot>();
+        for (var i = 1; i <= count; i++)
+        {
+            var providerId = i.ToString(); var embyId = 100000L + i;
+            input.ProviderPeople.Add(Person(ProviderNames.Tmdb, providerId, "Person " + i, null, null));
+            input.LocalPeople.Add(new LocalPerson { EmbyId = embyId, Name = "Person " + i, TmdbId = providerId });
+            decisions.Add(new ResolutionDecision { DecisionId = "case-" + i, Status = "MATCH", Action = "CROSS_PROVIDER_IDENTITY", DisplayName = "Person " + i, AnchorEmbyPersonId = embyId, ProviderKeys = "tmdb:" + providerId });
+            clusters.Add(Cluster("cluster-" + i, embyId, "tmdb:" + providerId));
+        }
+        var clock = Stopwatch.StartNew(); var plans = IdentityCasePlanner.Build(1, input, decisions, clusters); clock.Stop();
+        Equal(count, plans.Count);
+        True(clock.Elapsed < TimeSpan.FromSeconds(5));
+    }
+
     private static void LargeProviderCreditSetRemainsBounded()
     {
         const int peoplePerProvider = 80;
@@ -1015,6 +1092,17 @@ internal static class Program
         person.Credits.Add(new ObservedProviderCredit { Provider = person.Provider, ProviderPersonId = person.ProviderId, PersonName = person.Name, CanonicalMediaKey = media, MediaType = mediaType, ProviderMediaId = providerMediaId, RoleCategory = category, RoleName = role, Role = category + ": " + role });
     }
     private static MediaSeed Media(long id, string name) => new MediaSeed { EmbyId = id, MediaType = MediaTypes.Movie, Name = name, TmdbId = id.ToString() };
+    private static ResolutionClusterSnapshot Cluster(string id, long anchor, params string[] keys) => new ResolutionClusterSnapshot { ClusterId = id, AnchorEmbyPersonId = anchor, ProviderKeys = keys.ToList() };
+    private static void AddPlanMedia(ResolutionInput input, long id, string name, string tmdbId, string tvdbId, string role, params ProviderPerson[] people)
+    {
+        input.Media.Add(new MediaSeed { EmbyId = id, MediaType = MediaTypes.Movie, Name = name, TmdbId = tmdbId, TvdbId = tvdbId });
+        input.LocalCredits.Add(new LocalCredit { PersonEmbyId = input.LocalPeople.Single().EmbyId, MediaEmbyId = id, Role = role });
+        foreach (var person in people)
+        {
+            var providerMediaId = person.Provider == ProviderNames.Tmdb ? tmdbId : tvdbId;
+            input.ProviderCredits.Add(new ObservedProviderCredit { Provider = person.Provider, ProviderPersonId = person.ProviderId, PersonName = person.Name, MediaType = MediaTypes.Movie, ProviderMediaId = providerMediaId, CanonicalMediaKey = "media:" + id, Role = role, RoleCategory = role.Split(':')[0], RoleName = role });
+        }
+    }
     private static LocalCredit Credit(long person, long media) => new LocalCredit { PersonEmbyId = person, MediaEmbyId = media, Role = "Actor" };
     private static ProviderMediaIdentity ProviderMedia(string provider, string id, params MediaExternalIdentity[] externalIds) => new ProviderMediaIdentity { Provider = provider, MediaType = MediaTypes.Movie, ProviderMediaId = id, ExternalIds = externalIds.ToList() };
     private static MediaExternalIdentity External(string provider, string id) => new MediaExternalIdentity { Provider = provider, Id = id };

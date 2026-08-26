@@ -14,11 +14,14 @@ namespace PersonCleaner.V2.Domain
         public const string LocalPersonBinding = "local-person-binding";
         public const string LocalMediaBinding = "local-media-binding";
         public const string IdentityRelation = "identity-relation";
+        public const string IdentityTarget = "identity-target";
+        public const string LocalCreditTarget = "local-credit-target";
 
         public static readonly string[] All =
         {
             MediaCredit, MediaCreditRole, PersonExternalId, MediaExternalId,
-            PersonField, LocalPersonBinding, LocalMediaBinding, IdentityRelation
+            PersonField, LocalPersonBinding, LocalMediaBinding, IdentityRelation,
+            IdentityTarget, LocalCreditTarget
         };
     }
 
@@ -68,6 +71,19 @@ namespace PersonCleaner.V2.Domain
                 RequireProvider(Provider); RequireProvider(SecondaryProvider);
                 if (ProviderPersonId.Length == 0 || SecondaryId.Length == 0 || Provider == SecondaryProvider && ProviderPersonId == SecondaryId) throw new ArgumentException("Enter two distinct provider person records.");
                 if (Operation != CorrectionOperations.Same && Operation != CorrectionOperations.Different) throw new ArgumentException("Identity relations must be same or different.");
+                return;
+            }
+            if (Kind == CorrectionKinds.IdentityTarget)
+            {
+                RequireProvider(Provider);
+                if (ProviderPersonId.Length == 0) throw new ArgumentException("Enter the provider person record that identifies the outcome.");
+                if (Operation != CorrectionOperations.Replace || ReplacementValue.Length == 0) throw new ArgumentException("Choose an existing Emby person or a provider-identified new person.");
+                return;
+            }
+            if (Kind == CorrectionKinds.LocalCreditTarget)
+            {
+                if (!EmbyId.HasValue || EmbyId.Value <= 0) throw new ArgumentException("Enter a valid Emby media ID.");
+                if (CurrentValue.Length == 0 || Operation != CorrectionOperations.Replace || ReplacementValue.Length == 0) throw new ArgumentException("Choose the corrected destination for this Emby credit.");
                 return;
             }
             if (Kind == CorrectionKinds.LocalPersonBinding || Kind == CorrectionKinds.LocalMediaBinding)
@@ -155,6 +171,10 @@ namespace PersonCleaner.V2.Domain
                 return "Emby person " + rule.EmbyId + " " + rule.Provider.ToUpperInvariant() + " binding is corrected.";
             if (rule.Kind == CorrectionKinds.LocalMediaBinding)
                 return "Emby media " + rule.EmbyId + " " + rule.Provider.ToUpperInvariant() + " binding is corrected.";
+            if (rule.Kind == CorrectionKinds.IdentityTarget)
+                return rule.Provider.ToUpperInvariant() + " person " + rule.ProviderPersonId + " is assigned to " + rule.ReplacementValue + ".";
+            if (rule.Kind == CorrectionKinds.LocalCreditTarget)
+                return "Emby media " + rule.EmbyId + " credit " + rule.CurrentValue + " is assigned to " + rule.ReplacementValue + ".";
             return rule.Provider + ":" + rule.ProviderPersonId + " and " + rule.SecondaryProvider + ":" + rule.SecondaryId + " are explicitly " + rule.Operation + ".";
         }
         private static string Display(string preferred, string fallback) => string.IsNullOrWhiteSpace(preferred) ? fallback : preferred;

@@ -114,7 +114,7 @@ namespace PersonCleaner.V2.Tasks
                     var diagnostic = engine.Diagnostics;
                     logger.Info("PersonCleaner run {0} candidate gate: examined {1} cross-provider blocked pair(s), admitted {2} ({3} hard external-ID, {4} shared-title plus compatible-name/alias), operator-rejected={5}; evidence model v2 produced automatic={6}, human-review={7}, below-review={8}, constraint-blocked={9}, graph-components={10}.", runId, diagnostic.BlockedCrossProviderPairs, diagnostic.AdmittedCandidates, diagnostic.HardIdentityCandidates, diagnostic.NameCompatibleCandidates, diagnostic.RejectedByOperator, diagnostic.AutomaticCandidates, diagnostic.ReviewCandidates, diagnostic.BelowReviewCandidates, diagnostic.ConstraintBlockedCandidates, diagnostic.GraphComponents);
                     logger.Info("PersonCleaner run {0} offline resolution calculated {1} decision summaries ({2}); persisting pre-rendered decisions, evidence and impacted media.", runId, decisions.Count, DecisionBreakdown(decisions));
-                    repository.SaveDecisions(runId, decisions, engine.PairEvaluations, engine.Clusters);
+                    repository.SaveDecisions(runId, decisions, engine.PairEvaluations, engine.Clusters, resolutionInput);
                     repository.FinishRun(runId, "completed", "Evidence is ready. The dashboard reads only pre-calculated rows; live Emby was not changed.", decisions.Count);
                     progress.Report(100);
                     logger.Info("PersonCleaner run {0} completed with {1} decision summaries ({2}). Workspace: {3}", runId, decisions.Count, DecisionBreakdown(decisions), repository.DatabasePath);
