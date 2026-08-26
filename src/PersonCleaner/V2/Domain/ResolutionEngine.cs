@@ -320,6 +320,7 @@ namespace PersonCleaner.V2.Domain
             var birthdayKnown = !string.IsNullOrWhiteSpace(left.Birthday) && !string.IsNullOrWhiteSpace(right.Birthday);
             var birthdayMatch = birthdayKnown && string.Equals(left.Birthday, right.Birthday, StringComparison.Ordinal);
             var birthdayConflict = birthdayKnown && !birthdayMatch;
+            var birthdayYearConflict = birthdayConflict && !SameBirthdayYear(left.Birthday, right.Birthday);
             var exactName = !string.IsNullOrWhiteSpace(left.CleanName) && string.Equals(left.CleanName, right.CleanName, StringComparison.Ordinal);
             var aliases = PersonNames(left);
             var otherAliases = PersonNames(right);
@@ -340,7 +341,7 @@ namespace PersonCleaner.V2.Domain
 
             var metadataPenalty = 0.0;
             if (identifier.Conflict) metadataPenalty += identifier.Match ? CorroboratedMetadataConflictPenalty : IdentifierConflictPenalty;
-            if (birthdayConflict) metadataPenalty += identifier.Match ? CorroboratedMetadataConflictPenalty : BirthdayConflictPenalty;
+            if (birthdayYearConflict) metadataPenalty += identifier.Match ? CorroboratedMetadataConflictPenalty : BirthdayConflictPenalty;
             if (mediaAttributionDominant) metadataPenalty = Math.Min(metadataPenalty, DominantMediaConflictPenaltyCap);
             var score = positiveScore - metadataPenalty;
             if (competing.Count > 0) score = Math.Min(score, 0.55);
@@ -361,13 +362,14 @@ namespace PersonCleaner.V2.Domain
                 CompetingAttributionCount = competing.Count,
                 CompetingAttributions = competing,
                 NameFrequency = Math.Max(1, nameFrequency),
-                BirthdayState = birthdayMatch ? "exact" : birthdayConflict ? "conflict" : "missing",
+                BirthdayState = birthdayMatch ? "exact" : birthdayYearConflict ? "year-conflict" : birthdayConflict ? "same-year-difference" : "missing",
                 BirthdayDetail = birthdayKnown ? left.Provider + ":" + left.Birthday + ";" + right.Provider + ":" + right.Birthday : null,
                 ExternalIdState = identifier.Match && identifier.Conflict ? "mixed" : identifier.Match ? "exact" : identifier.Conflict ? "conflict" : identifier.Any ? "missing-opposite" : "missing",
                 IdentifierMatchDetail = string.Join(";", identifier.Matches.Distinct(StringComparer.OrdinalIgnoreCase)),
                 IdentifierConflictDetail = string.Join(";", identifier.Conflicts.Distinct(StringComparer.OrdinalIgnoreCase)),
                 BirthdayMatch = birthdayMatch,
                 BirthdayConflict = birthdayConflict,
+                BirthdayYearConflict = birthdayYearConflict,
                 ExactNameMatch = exactName,
                 AliasMatch = aliasMatch,
                 HardIdentifierMatch = identifier.Match,
@@ -377,6 +379,12 @@ namespace PersonCleaner.V2.Domain
                 MediaAttributionDominant = mediaAttributionDominant,
                 Score = Math.Max(0, Math.Min(1, score))
             };
+        }
+
+        private static bool SameBirthdayYear(string left, string right)
+        {
+            if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right) || left.Length < 4 || right.Length < 4) return false;
+            return string.Equals(left.Substring(0, 4), right.Substring(0, 4), StringComparison.Ordinal);
         }
 
         private List<Candidate> BuildCandidates(
@@ -640,7 +648,7 @@ namespace PersonCleaner.V2.Domain
             var drift = !winner.Direct;
             var metadataConflict = accepted.Any(x => x.Score.HasMetadataConflict);
             var dominantAttribution = accepted.Any(x => x.Score.MediaAttributionDominant);
-            var conflictCount = accepted.Sum(x => (x.Score.BirthdayConflict ? 1 : 0) + (x.Score.IdentifierConflict ? 1 : 0));
+            var conflictCount = accepted.Sum(x => (x.Score.BirthdayYearConflict ? 1 : 0) + (x.Score.IdentifierConflict ? 1 : 0));
             var currentKeys = CurrentProviderKeys(winner.Person).ToList();
             var currentAcquisitions = CurrentAcquisitions(winner.Person, index);
             var confirmedAbsent = currentKeys.Count > 0 && currentKeys.All(x => currentAcquisitions.TryGetValue(x, out var acquisition) && acquisition.State == AcquisitionStates.Absent);
@@ -944,7 +952,20 @@ namespace PersonCleaner.V2.Domain
             if (score == null) return;
             decision.Evidence.Add(new EvidenceLine { SortOrder = 10, SignalType = "FILMOGRAPHY", Verdict = score.SharedMediaCount > 0 ? "supports" : "neutral", Narrative = score.SharedMediaCount + " shared canonical title(s); containment " + score.FilmographyContainment.ToString("0.000", CultureInfo.InvariantCulture) + "; Jaccard " + score.FilmographyJaccard.ToString("0.000", CultureInfo.InvariantCulture) + ". Unmatched titles are not negative evidence.", Metric = "shared=" + score.SharedMediaCount + ";left=" + score.LeftMediaCount + ";right=" + score.RightMediaCount + ";containment=" + score.FilmographyContainment.ToString("0.000000", CultureInfo.InvariantCulture) + ";jaccard=" + score.FilmographyJaccard.ToString("0.000000", CultureInfo.InvariantCulture) });
             decision.Evidence.Add(new EvidenceLine { SortOrder = 15, SignalType = "ROLE_AGREEMENT", Verdict = score.RoleAgreement > 0 ? "supports" : "unknown", Narrative = score.ExactRoleMatches + " exact and " + score.CompatibleRoleMatches + " compatible shared-title role match(es).", Metric = "exact=" + score.ExactRoleMatches + ";compatible=" + score.CompatibleRoleMatches + ";agreement=" + score.RoleAgreement.ToString("0.000000", CultureInfo.InvariantCulture) });
-            decision.Evidence.Add(new EvidenceLine { SortOrder = 20, SignalType = "BIRTHDAY", Verdict = score.BirthdayConflict ? "conflicts" : score.BirthdayMatch ? "supports" : "missing", Narrative = score.BirthdayConflict ? "Both providers supplied different birth dates (" + score.BirthdayDetail + "). This is negative metadata evidence, not by itself proof of separate identities." : score.BirthdayMatch ? "Both providers supplied the same birth date (" + score.BirthdayDetail + ")." : "A comparable birth date was not available; this contributes neither support nor a penalty.", Metric = score.BirthdayState + (string.IsNullOrWhiteSpace(score.BirthdayDetail) ? string.Empty : ";" + score.BirthdayDetail) });
+            decision.Evidence.Add(new EvidenceLine
+            {
+                SortOrder = 20,
+                SignalType = "BIRTHDAY",
+                Verdict = score.BirthdayYearConflict ? "conflicts" : score.BirthdayConflict ? "informational" : score.BirthdayMatch ? "supports" : "missing",
+                Narrative = score.BirthdayYearConflict
+                    ? "Both providers supplied birth dates in different years (" + score.BirthdayDetail + "). This is negative metadata evidence, not by itself proof of separate identities."
+                    : score.BirthdayConflict
+                    ? "Both providers supplied different month/day values in the same birth year (" + score.BirthdayDetail + "). This is recorded as provider metadata noise and does not make an otherwise aligned identity a problem case."
+                    : score.BirthdayMatch
+                    ? "Both providers supplied the same birth date (" + score.BirthdayDetail + ")."
+                    : "A comparable birth date was not available; this contributes neither support nor a penalty.",
+                Metric = score.BirthdayState + (string.IsNullOrWhiteSpace(score.BirthdayDetail) ? string.Empty : ";" + score.BirthdayDetail)
+            });
             decision.Evidence.Add(new EvidenceLine { SortOrder = 25, SignalType = "EXTERNAL_ID", Verdict = score.IdentifierConflict ? score.HardIdentifierMatch ? "mixed" : "conflicts" : score.HardIdentifierMatch ? "proves" : "missing", Narrative = score.IdentifierConflict && score.HardIdentifierMatch ? "Identity support (" + score.IdentifierMatchDetail + ") coexists with an external-ID disagreement (" + score.IdentifierConflictDetail + "); the disagreement reduces evidence strength but does not erase the independent match." : score.IdentifierConflict ? "The provider person records supply different IDs in the same namespace (" + score.IdentifierConflictDetail + "); this is negative evidence." : score.NativeProviderCrosswalkMatch ? "A provider explicitly cross-references the other provider's person ID (" + score.IdentifierMatchDetail + ")." : score.HardIdentifierMatch ? "The provider person records share a stable IMDb or Wikidata identifier (" + score.IdentifierMatchDetail + ")." : "No comparable stable person identifier was available; this is neutral.", Metric = score.ExternalIdState + (string.IsNullOrWhiteSpace(score.IdentifierMatchDetail) ? string.Empty : ";matches=" + score.IdentifierMatchDetail) + (string.IsNullOrWhiteSpace(score.IdentifierConflictDetail) ? string.Empty : ";conflicts=" + score.IdentifierConflictDetail) });
             decision.Evidence.Add(new EvidenceLine { SortOrder = 30, SignalType = "NAME", Verdict = score.ExactNameMatch || score.AliasMatch ? "supports" : "neutral", Narrative = score.ExactNameMatch ? "Normalized primary names match exactly; cohort frequency " + score.NameFrequency + "." : score.AliasMatch ? "A provider alias matches the other provider's name." : "Names did not add positive evidence.", Metric = (score.ExactNameMatch ? "exact" : score.AliasMatch ? "alias" : "none") + ";frequency=" + score.NameFrequency });
             if (score.CompetingAttributionCount > 0) decision.Evidence.Add(new EvidenceLine { SortOrder = 5, SignalType = "COMPETING_ATTRIBUTION", Verdict = "conflicts", Narrative = CompetingAttributionNarrative(score), Metric = "count=" + score.CompetingAttributionCount });

@@ -171,6 +171,7 @@ namespace PersonCleaner.V2.Domain
         public string IdentifierConflictDetail { get; set; }
         public bool BirthdayMatch { get; set; }
         public bool BirthdayConflict { get; set; }
+        public bool BirthdayYearConflict { get; set; }
         public bool ExactNameMatch { get; set; }
         public bool AliasMatch { get; set; }
         public bool HardIdentifierMatch { get; set; }
@@ -178,7 +179,7 @@ namespace PersonCleaner.V2.Domain
         public bool NativeProviderCrosswalkMatch { get; set; }
         public bool IdentifierConflict { get; set; }
         public bool MediaAttributionDominant { get; set; }
-        public bool HasMetadataConflict => BirthdayConflict || IdentifierConflict;
+        public bool HasMetadataConflict => BirthdayYearConflict || IdentifierConflict;
         public double Score { get; set; }
     }
 

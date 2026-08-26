@@ -55,7 +55,7 @@ namespace PersonCleaner.V2.UI
             }
         }
 
-        private static bool HasMutations(IdentityCasePlan plan)
+        internal static bool HasMutations(IdentityCasePlan plan)
         {
             if (plan.Credits.Any(x => x.Disposition == "MOVE") || plan.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.New)) return true;
             foreach (var snapshot in plan.CurrentPeople)
@@ -95,7 +95,13 @@ namespace PersonCleaner.V2.UI
                         throw new InvalidOperationException("The reviewed credit '" + credit.Role + "' on Emby media " + credit.MediaEmbyId + " changed after calculation.");
             }
             var currentIds = new HashSet<long>(plan.CurrentPeople.Select(x => x.EmbyId));
-            var global = library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { typeof(Person).Name }, Recursive = true }, CancellationToken.None).OfType<Person>().ToList();
+            var requestedProviderIds = plan.Outcomes.SelectMany(x => x.ProviderIds)
+                .Where(x => !string.IsNullOrWhiteSpace(x.ProviderId))
+                .Select(x => new KeyValuePair<string, string>(ProviderName(x.Provider), x.ProviderId))
+                .Distinct(ProviderIdPairComparer.Instance).ToList();
+            var global = requestedProviderIds.Count == 0
+                ? new List<Person>()
+                : library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { typeof(Person).Name }, Recursive = true, AnyProviderIdEquals = requestedProviderIds }, CancellationToken.None).OfType<Person>().ToList();
             foreach (var outcome in plan.Outcomes)
             foreach (var id in outcome.ProviderIds)
             {
@@ -249,6 +255,12 @@ namespace PersonCleaner.V2.UI
         private static string ProviderName(string provider) => provider == ProviderNames.Tmdb ? MetadataProviders.Tmdb.ToString() : provider == ProviderNames.Tvdb ? MetadataProviders.Tvdb.ToString() : MetadataProviders.Imdb.ToString();
         private static string RoleText(PersonInfo person) => person.Type + (string.IsNullOrWhiteSpace(person.Role) ? string.Empty : ": " + person.Role);
         private static bool Same(string a, string b) => string.Equals(a ?? string.Empty, b ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+        private sealed class ProviderIdPairComparer : IEqualityComparer<KeyValuePair<string, string>>
+        {
+            public static readonly ProviderIdPairComparer Instance = new ProviderIdPairComparer();
+            public bool Equals(KeyValuePair<string, string> x, KeyValuePair<string, string> y) => Same(x.Key, y.Key) && Same(x.Value, y.Value);
+            public int GetHashCode(KeyValuePair<string, string> value) => StringComparer.OrdinalIgnoreCase.GetHashCode(value.Key ?? string.Empty) ^ StringComparer.OrdinalIgnoreCase.GetHashCode(value.Value ?? string.Empty);
+        }
         private sealed class PersonSnapshot { public Person Person { get; set; } public Dictionary<string, string> ProviderIds { get; set; } }
     }
 }

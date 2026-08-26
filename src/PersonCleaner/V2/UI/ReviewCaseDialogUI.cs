@@ -54,7 +54,7 @@ namespace PersonCleaner.V2.UI
                 CorrectionQuestions = new LabelItem(questions.Count == 0 ? "No genuine correction questions remain." : string.Join(Environment.NewLine, questions.Select((x, i) => (i + 1) + ". " + x))),
                 Identities = new DxDataGrid(master), Rows = rows
             };
-            if (plan.State == IdentityPlanStates.Complete)
+            if (plan.State == IdentityPlanStates.Complete && IdentityCaseExecutor.HasMutations(plan))
                 ui.Apply = new ButtonItem(plan.ApplyCaption) { CommandId = ReviewCaseCommands.Apply, ConfirmationPrompt = "Apply exactly the reviewed person-ID and media-credit changes after re-reading live Emby?" };
             return ui;
         }
@@ -263,20 +263,18 @@ namespace PersonCleaner.V2.UI
                     var fresh = LoadPlan();
                     if (fresh.PlanHash != reviewedHash) throw new InvalidOperationException("The persisted projection changed after it was displayed. Review the recalculated case before applying.");
                     if (fresh.State != IdentityPlanStates.Complete) throw new InvalidOperationException("This case still contains a genuine correction question.");
-                    var executor = new IdentityCaseExecutor(host.Resolve<ILibraryManager>());
+                    if (!IdentityCaseExecutor.HasMutations(fresh)) throw new InvalidOperationException("This case requires no Emby changes and therefore has nothing to apply.");
+                    var library = host.Resolve<ILibraryManager>();
+                    var beforeMetadata = IdentityApplyAudit.CaptureBefore(fresh, library);
+                    var executor = new IdentityCaseExecutor(library);
                     IdentityCaseApplyReceipt receipt;
                     using (var repository = Open())
                     {
                         receipt = executor.Apply(fresh, committed => repository.CommitIdentityCase(fresh, committed));
                         applyCommitted = true;
-                        try { CorrectionRuntime.Recalculate(repository, logger); }
-                        catch (Exception recalculate)
-                        {
-                            result = "Apply committed, but cached evidence could not be recalculated: " + recalculate.Message + " Run the evidence task before reviewing this case again.";
-                            logger.ErrorException("PersonCleaner applied case " + fresh.CaseId + " but could not recalculate evidence", recalculate); Rebuild(); Refresh(); return Task.FromResult<IPluginUIView>(this);
-                        }
                     }
-                    logger.Info("PersonCleaner applied identity case {0}: {1}", fresh.CaseId, receipt.Summary);
+                    IdentityApplyAudit.Log(fresh, receipt, beforeMetadata, library, logger);
+                    logger.Info("PersonCleaner applied identity case {0}: {1} The cached whole-run graph was not rebuilt interactively; the next PersonCleaner evidence task will refresh related cases.", fresh.CaseId, receipt.Summary);
                     rebuildParent(); return Task.FromResult(parent);
                 }
             }

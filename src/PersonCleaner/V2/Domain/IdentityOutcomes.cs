@@ -158,7 +158,7 @@ namespace PersonCleaner.V2.Domain
                 DecisionIds = decisions.Select(x => x.DecisionId).ToList()
             };
             foreach (var warning in decisions.SelectMany(x => x.Evidence ?? new List<EvidenceLine>())
-                .Where(x => string.Equals(x.SignalType, "BIRTHDAY", StringComparison.OrdinalIgnoreCase) && string.Equals(x.Verdict, "conflicts", StringComparison.OrdinalIgnoreCase))
+                .Where(x => string.Equals(x.SignalType, "BIRTHDAY", StringComparison.OrdinalIgnoreCase) && (string.Equals(x.Verdict, "conflicts", StringComparison.OrdinalIgnoreCase) || string.Equals(x.Verdict, "informational", StringComparison.OrdinalIgnoreCase)))
                 .Select(x => x.Narrative).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.Ordinal))
                 AppendWarning(plan, "Informational metadata warning: " + warning);
 
@@ -365,14 +365,16 @@ namespace PersonCleaner.V2.Domain
             var moves = plan.Credits.Count(x => x.Disposition == "MOVE" && !x.CorrectionRequired);
             var changes = ProviderIdChangeCount(plan, input);
             var retained = plan.Outcomes.Count(x => x.TargetKind == IdentityTargetKinds.Existing && plan.Credits.Any(c => c.TargetOutcomeId == x.OutcomeId));
-            var parts = new List<string>();
-            if (retained > 0) parts.Add("retain " + retained + " person" + (retained == 1 ? string.Empty : "s"));
-            if (creates > 0) parts.Add("create " + creates + " person" + (creates == 1 ? string.Empty : "s"));
-            if (moves > 0) parts.Add("move " + moves + " credit" + (moves == 1 ? string.Empty : "s"));
-            if (changes > 0) parts.Add("change " + changes + " ID" + (changes == 1 ? string.Empty : "s"));
-            plan.ApplyCaption = "Apply: " + (parts.Count == 0 ? "no Emby changes" : string.Join(", ", parts));
+            var resultParts = new List<string>();
+            var mutationParts = new List<string>();
+            if (retained > 0) resultParts.Add("retain " + retained + " person" + (retained == 1 ? string.Empty : "s"));
+            if (creates > 0) mutationParts.Add("create " + creates + " person" + (creates == 1 ? string.Empty : "s"));
+            if (moves > 0) mutationParts.Add("move " + moves + " credit" + (moves == 1 ? string.Empty : "s"));
+            if (changes > 0) mutationParts.Add("change " + changes + " ID" + (changes == 1 ? string.Empty : "s"));
+            resultParts.AddRange(mutationParts);
+            plan.ApplyCaption = mutationParts.Count == 0 ? "No Emby changes required" : "Apply: " + string.Join(", ", mutationParts);
             var outcomes = plan.Outcomes.Count(x => x.TargetKind != IdentityTargetKinds.Unresolved && plan.Credits.Any(c => c.TargetOutcomeId == x.OutcomeId));
-            plan.Summary = plan.DisplayName + " will become " + outcomes + " provider-identified Emby " + (outcomes == 1 ? "person" : "people") + ". " + (parts.Count == 0 ? "No Emby changes are required." : char.ToUpperInvariant(parts[0][0]) + parts[0].Substring(1) + (parts.Count > 1 ? ", " + string.Join(", ", parts.Skip(1)) : string.Empty) + ".");
+            plan.Summary = plan.DisplayName + " will become " + outcomes + " provider-identified Emby " + (outcomes == 1 ? "person" : "people") + ". " + (mutationParts.Count == 0 ? "No Emby changes are required." : char.ToUpperInvariant(resultParts[0][0]) + resultParts[0].Substring(1) + (resultParts.Count > 1 ? ", " + string.Join(", ", resultParts.Skip(1)) : string.Empty) + ".");
             if (plan.CaseType == "Provider records agree" && changes > 0)
                 AppendWarning(plan, "The provider records agree with each other, but the current Emby person still differs by " + changes + " provider ID" + (changes == 1 ? string.Empty : "s") + "; the reviewed plan shows that pending Emby alignment explicitly.");
             if (plan.State == IdentityPlanStates.CorrectionRequired) plan.Summary += " A human correction is required before Apply is available.";

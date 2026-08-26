@@ -151,11 +151,12 @@ namespace PersonCleaner.V2.UI
         private readonly IApplicationPaths paths;
         private readonly IJsonSerializer json;
         private readonly ILogger logger;
+        private readonly bool problemsOnly;
         private string focusedDecisionId;
 
-        public EvidenceDialogView(PluginInfo plugin, IServerApplicationHost host, ILogger logger) : base(plugin.Id)
+        public EvidenceDialogView(PluginInfo plugin, IServerApplicationHost host, ILogger logger, bool problemsOnly = false) : base(plugin.Id)
         {
-            this.plugin = plugin; this.host = host; this.logger = logger; this.paths = host.Resolve<IApplicationPaths>(); this.json = host.Resolve<IJsonSerializer>();
+            this.plugin = plugin; this.host = host; this.logger = logger; this.problemsOnly = problemsOnly; this.paths = host.Resolve<IApplicationPaths>(); this.json = host.Resolve<IJsonSerializer>();
             AllowOk = false;
             AllowCancel = true;
             Rebuild();
@@ -167,19 +168,20 @@ namespace PersonCleaner.V2.UI
             {
                 repository.Initialize();
                 var rows = repository.Dashboard(Plugin.Instance.Configuration.MaximumMediaExamplesPerDecision);
+                if (problemsOnly) rows = rows.Where(x => !string.Equals(x.Automation, "No work required", StringComparison.Ordinal) && !string.Equals(x.Automation, "Applied", StringComparison.Ordinal)).ToArray();
                 var run = repository.LatestRun();
                 string serverId = null;
                 try { serverId = host.GetPublicSystemInfo(CancellationToken.None).GetAwaiter().GetResult()?.Id; }
                 catch (Exception ex) { logger.Warn("PersonCleaner could not resolve the Emby server ID; provider links will remain available but Emby item links will be plain text. {0}", ex.Message); }
                 EvidenceLinks.Apply(rows, serverId);
-                logger.Info("PersonCleaner full-screen evidence dialog loaded {0} review case row(s) in {1} status group(s), with {2} attached assessment/relationship/title detail row(s), from run {3}.", rows.Length, rows.Select(x => x.Status).Distinct(StringComparer.Ordinal).Count(), rows.Sum(x => x.Details == null ? 0 : x.Details.Length), run == null ? 0 : run.RunId);
+                logger.Info("PersonCleaner full-screen {0} evidence dialog loaded {1} review case row(s) in {2} status group(s), with {3} attached assessment/relationship/title detail row(s), from run {4}.", problemsOnly ? "problem-case" : "all-case", rows.Length, rows.Select(x => x.Status).Distinct(StringComparer.Ordinal).Count(), rows.Sum(x => x.Details == null ? 0 : x.Details.Length), run == null ? 0 : run.RunId);
                 var focused = rows.FirstOrDefault(x => string.Equals(x.CaseId, focusedDecisionId, StringComparison.Ordinal) || (x.UnderlyingDecisionIds ?? new string[0]).Contains(focusedDecisionId, StringComparer.Ordinal));
                 var focus = focused == null ? null : focused.CaseId;
                 ContentData = EvidenceDialogUI.Build(rows, run, focus);
             }
         }
 
-        public override string Caption => "Person resolution evidence";
+        public override string Caption => problemsOnly ? "Person resolution evidence — problem cases" : "Person resolution evidence — all cases";
         public override bool ShowDialogFullScreen => true;
         public override Task OnCancelCommand() => Task.CompletedTask;
         public override Task OnOkCommand(string providerId, string commandId, string data) => Task.CompletedTask;

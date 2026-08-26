@@ -17,7 +17,8 @@ namespace PersonCleaner.V2.UI
         public override string EditorTitle => "Person resolution decisions";
         public override string EditorDescription => description ?? "No calculation run is available.";
         public CaptionItem RunSummary { get; set; }
-        public ButtonItem OpenEvidence { get; set; } = new ButtonItem("Open decision evidence full screen") { CommandId = "open-evidence" };
+        public ButtonItem OpenProblemEvidence { get; set; } = new ButtonItem("Open decision evidence Full Screen (Problem cases)") { CommandId = "open-problem-evidence" };
+        public ButtonItem OpenEvidence { get; set; } = new ButtonItem("Open decision evidence Full Screen (All cases)") { CommandId = "open-evidence" };
 
         public static EvidenceUI Build(RunStatus run)
         {
@@ -46,8 +47,10 @@ namespace PersonCleaner.V2.UI
         {
             try
             {
+                if (commandId == "open-problem-evidence")
+                    return Task.FromResult<IPluginUIView>(new EvidenceDialogView(plugin, host, logger, true));
                 if (commandId == "open-evidence")
-                    return Task.FromResult<IPluginUIView>(new EvidenceDialogView(plugin, host, logger));
+                    return Task.FromResult<IPluginUIView>(new EvidenceDialogView(plugin, host, logger, false));
             }
             catch (Exception ex) { logger.ErrorException("Unable to open the PersonCleaner evidence dialog", ex); }
             Rebuild(); Refresh();

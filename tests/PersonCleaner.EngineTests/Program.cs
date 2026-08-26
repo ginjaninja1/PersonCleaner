@@ -30,7 +30,7 @@ internal static class Program
         Run("specific competing attribution suggests a provider credit replacement", CompetingAttributionSuggestsProviderCorrection);
         Run("identity conflicts name the disagreeing provider IDs", IdentityConflictNamesProviderIds);
         Run("unopposed birthday conflict remains reviewable negative evidence", BirthdayConflictRequiresReview);
-        Run("Gerald Sim corroborated identity outweighs a birthday conflict", GeraldSimBirthdayConflictRetainsIdentity);
+        Run("same-year birthday disagreement stays informational", GeraldSimBirthdayConflictRetainsIdentity);
         Run("Kyle Hebert role-aware media dominance outweighs correlated TVDB conflicts", KyleHebertMediaDominanceOutweighsTvdbConflicts);
         Run("local media mass survives provider id drift", MediaMassSurvivesIdDrift);
         Run("out-of-scope global provider owner withholds drift action", OutOfScopeProviderOwnerWithholdsDrift);
@@ -378,8 +378,10 @@ internal static class Program
         var input = BaseInput(tmdb, tvdb);
         input.LocalPeople.Add(new LocalPerson { EmbyId = 300, Name = "Chris Example", TmdbId = "12", TvdbId = "22" });
         input.Media.Add(Media(1, "Shared")); input.LocalCredits.Add(Credit(300, 1));
-        var decisions = new ResolutionEngine().Resolve(input, new ResolutionSettings());
+        var engine = new ResolutionEngine();
+        var decisions = engine.Resolve(input, new ResolutionSettings());
         var review = decisions.Single(x => x.Status == "CONFLATION");
+        True(engine.PairEvaluations.Single().Score.BirthdayYearConflict);
         True(review.Evidence.Any(x => x.SignalType == "BIRTHDAY" && x.Verdict == "conflicts"));
         True(!decisions.Any(x => x.Action == "AUTO_MERGE_SHADOW"));
         True(!decisions.Any(x => x.Status == "SPLIT"));
@@ -402,13 +404,14 @@ internal static class Program
         input.LocalCredits.AddRange(new[] { Credit(23430, 298340), Credit(23430, 113) });
         var engine = new ResolutionEngine();
         var decisions = engine.Resolve(input, new ResolutionSettings());
-        var decision = decisions.Single(x => x.Status == "MATCH_WITH_CONFLICT");
+        var decision = decisions.Single(x => x.Status == "MATCH");
         var score = engine.PairEvaluations.Single().Score;
         True(score.BirthdayConflict);
+        True(!score.BirthdayYearConflict);
         True(score.HardIdentifierMatch);
         True(score.Score >= 0.75);
-        Equal("CROSS_PROVIDER_IDENTITY_WITH_METADATA_CONFLICT", decision.Action);
-        True(decision.Evidence.Any(x => x.SignalType == "BIRTHDAY" && x.Narrative.Contains("not by itself proof")));
+        Equal("CROSS_PROVIDER_IDENTITY", decision.Action);
+        True(decision.Evidence.Any(x => x.SignalType == "BIRTHDAY" && x.Verdict == "informational" && x.Narrative.Contains("same birth year")));
         True(decision.Evidence.Any(x => x.SignalType == "BIRTHDAY" && x.Metric.Contains("1925-02-04") && x.Metric.Contains("1925-06-04")));
         True(!decisions.Any(x => x.Status == "SPLIT"));
     }
@@ -432,6 +435,7 @@ internal static class Program
         var score = engine.PairEvaluations.Single().Score;
         True(score.MediaAttributionDominant);
         True(score.IdentifierConflict && score.BirthdayConflict);
+        True(!score.BirthdayYearConflict);
         True(score.PositiveEvidenceScore >= 0.75);
         Equal(0.15, score.MetadataConflictPenalty);
         True(score.Score < 0.75);
@@ -1035,7 +1039,7 @@ internal static class Program
         Equal(IdentityTargetKinds.Existing, outcome.TargetKind);
         Equal("1809473", outcome.ProviderIds.Single(x => x.Provider == ProviderNames.Tmdb).ProviderId);
         Equal("nm8745734", outcome.ProviderIds.Single(x => x.Provider == ProviderNames.Imdb).ProviderId);
-        Equal("Apply: retain 1 person", plan.ApplyCaption);
+        Equal("No Emby changes required", plan.ApplyCaption);
     }
 
     private static void HolisticExistingNameIsHonest()
@@ -1061,8 +1065,8 @@ internal static class Program
         input.ProviderPeople.AddRange(new[] { tmdb, tvdb });
         input.LocalPeople.Add(new LocalPerson { EmbyId = 38308, Name = "Tomiwa Edun", TmdbId = "1576541", TvdbId = "7891155", ImdbId = "nm3643989" });
         AddPlanMedia(input, 66626, "Merlin", "7225", "83123", "Actor: Sir Elyan", tmdb, tvdb);
-        var decision = new ResolutionDecision { DecisionId = "conflict", Status = "MATCH_WITH_CONFLICT", Action = "CROSS_PROVIDER_IDENTITY_WITH_METADATA_CONFLICT", DisplayName = "Tomiwa Edun", AnchorEmbyPersonId = 38308, ProviderKeys = "tmdb:1576541,tvdb:7891155" };
-        decision.Evidence.Add(new EvidenceLine { SignalType = "BIRTHDAY", Verdict = "conflicts", Narrative = "Both providers supplied different birth dates (tmdb:1984-01-01;tvdb:1984-03-04)." });
+        var decision = new ResolutionDecision { DecisionId = "match", Status = "MATCH", Action = "CROSS_PROVIDER_IDENTITY", DisplayName = "Tomiwa Edun", AnchorEmbyPersonId = 38308, ProviderKeys = "tmdb:1576541,tvdb:7891155" };
+        decision.Evidence.Add(new EvidenceLine { SignalType = "BIRTHDAY", Verdict = "informational", Narrative = "Both providers supplied different month/day values in the same birth year (tmdb:1984-01-01;tvdb:1984-03-04)." });
 
         var plan = IdentityCasePlanner.Build(7, input, new[] { decision }, new[] { Cluster("identity", 38308, "tmdb:1576541", "tvdb:7891155") }).Single();
 

@@ -775,10 +775,16 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
             {
                 var runId = LatestCompletedRunId();
                 var plans = new Dictionary<string, CaseHeader>(StringComparer.Ordinal);
-                using (var s = db.PrepareStatement("SELECT case_id,display_name,case_type,summary,warning,state,apply_caption FROM resolution_case WHERE run_id=@run"))
+                using (var s = db.PrepareStatement("SELECT case_id,plan_hash,display_name,case_type,summary,warning,state,apply_caption FROM resolution_case WHERE run_id=@run"))
                 {
                     s.Bind("@run", runId);
-                    foreach (var r in s.Rows()) plans[r.GetString(0)] = new CaseHeader { CaseId = r.GetString(0), DisplayName = r.GetString(1), CaseType = r.GetString(2), Summary = r.GetString(3), Warning = r.GetString(4), State = r.GetString(5), ApplyCaption = r.GetString(6) };
+                    foreach (var r in s.Rows()) plans[r.GetString(0)] = new CaseHeader { CaseId = r.GetString(0), PlanHash = r.GetString(1), DisplayName = r.GetString(2), CaseType = r.GetString(3), Summary = r.GetString(4), Warning = r.GetString(5), State = r.GetString(6), ApplyCaption = r.GetString(7) };
+                }
+                var applied = new HashSet<string>(StringComparer.Ordinal);
+                using (var s = db.PrepareStatement("SELECT case_id,reviewed_plan_hash FROM identity_case_apply WHERE source_run_id=@run AND status='COMMITTED'"))
+                {
+                    s.Bind("@run", runId);
+                    foreach (var r in s.Rows()) applied.Add(r.GetString(0) + "\n" + r.GetString(1));
                 }
                 var caseByDecision = new Dictionary<string, string>(StringComparer.Ordinal);
                 using (var s = db.PrepareStatement("SELECT case_id,decision_id FROM resolution_case_decision WHERE run_id=@run")) { s.Bind("@run", runId); foreach (var r in s.Rows()) caseByDecision[r.GetString(1)] = r.GetString(0); }
@@ -787,9 +793,13 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
                     var planId = (row.UnderlyingDecisionIds ?? new string[0]).Select(x => caseByDecision.TryGetValue(x, out var id) ? id : null).FirstOrDefault(x => x != null);
                     if (planId == null || !plans.TryGetValue(planId, out var plan)) continue;
                     row.CaseId = plan.CaseId; row.Person = plan.DisplayName; row.Status = plan.CaseType; row.Decision = plan.Summary;
-                    row.Action = plan.State == IdentityPlanStates.Complete ? plan.ApplyCaption : plan.State == IdentityPlanStates.Blocked ? "Blocked — incomplete scope" : "Correction required";
-                    row.Automation = plan.State == IdentityPlanStates.Complete ? "Ready to apply" : plan.State == IdentityPlanStates.Blocked ? "Blocked" : "Correction required";
+                    var wasApplied = applied.Contains(plan.CaseId + "\n" + plan.PlanHash);
+                    var hasMutations = HasMutationCaption(plan.ApplyCaption);
+                    var noWork = plan.State == IdentityPlanStates.Complete && !hasMutations && string.Equals(plan.CaseType, "Provider records agree", StringComparison.Ordinal);
+                    row.Action = wasApplied ? "Applied" : noWork ? "No Emby changes required" : plan.State == IdentityPlanStates.Complete && !hasMutations ? "No Emby changes proposed" : plan.State == IdentityPlanStates.Complete ? plan.ApplyCaption : plan.State == IdentityPlanStates.Blocked ? "Blocked — incomplete scope" : "Correction required";
+                    row.Automation = wasApplied ? "Applied" : noWork ? "No work required" : plan.State == IdentityPlanStates.Complete && !hasMutations ? "Review evidence" : plan.State == IdentityPlanStates.Complete ? "Ready to apply" : plan.State == IdentityPlanStates.Blocked ? "Blocked" : "Correction required";
                     row.AutomationReason = string.IsNullOrWhiteSpace(plan.Warning) ? plan.Summary : plan.Summary + " " + plan.Warning;
+                    if (wasApplied) row.AutomationReason += " This exact reviewed plan has already been applied.";
                 }
             }
             return dashboard;
@@ -876,6 +886,11 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
                     }
                 }
             }, TransactionMode.Immediate);
+        }
+
+        private static bool HasMutationCaption(string caption)
+        {
+            return !string.IsNullOrWhiteSpace(caption) && (caption.IndexOf("create ", StringComparison.OrdinalIgnoreCase) >= 0 || caption.IndexOf("move ", StringComparison.OrdinalIgnoreCase) >= 0 || caption.IndexOf("change ", StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
         public long SaveCorrectionChoice(ProviderCorrection correction, long sourceRunId, string caseId, string questionId, string choiceId)
@@ -1078,6 +1093,7 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
         private sealed class CaseHeader
         {
             public string CaseId { get; set; }
+            public string PlanHash { get; set; }
             public string DisplayName { get; set; }
             public string CaseType { get; set; }
             public string Summary { get; set; }
