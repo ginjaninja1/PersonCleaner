@@ -909,6 +909,22 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
             correction.CorrectionId = id; return id;
         }
 
+        public int PendingCorrectionSelections(string caseId)
+        {
+            if (string.IsNullOrWhiteSpace(caseId)) return 0;
+            var count = 0;
+            lock (sync) using (var s = db.PrepareStatement(@"SELECT count(*)
+FROM provider_correction_selection s
+JOIN provider_correction c ON c.correction_id=s.correction_id AND c.enabled=1
+LEFT JOIN correction_application a ON a.run_id=(SELECT run_id FROM resolution_run WHERE status='completed' ORDER BY run_id DESC LIMIT 1) AND a.correction_id=s.correction_id
+WHERE s.case_id=@case AND a.correction_id IS NULL"))
+            {
+                s.Bind("@case", caseId);
+                foreach (var row in s.Rows()) count = row.GetInt(0);
+            }
+            return count;
+        }
+
         public long CommitIdentityCase(IdentityCasePlan plan, IdentityCaseApplyReceipt receipt)
         {
             if (plan == null) throw new ArgumentNullException(nameof(plan));

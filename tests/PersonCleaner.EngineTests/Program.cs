@@ -1130,11 +1130,17 @@ internal static class Program
         True(current.ProviderIds.Any(x => x.Provider == ProviderNames.Tmdb && x.ProviderId == "15739" && x.Source == "native"));
         True(current.ProviderIds.Any(x => x.Provider == ProviderNames.Tvdb && x.ProviderId == "457122" && x.Source == "native"));
         True(!plan.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.New && x.ProviderIds.Any(y => y.Provider == ProviderNames.Tmdb && y.ProviderId == "15739")));
-        Equal(IdentityTargetKinds.Unresolved, plan.Outcomes.Single(x => x.ProviderIds.Any(y => y.Provider == ProviderNames.Tvdb && y.ProviderId == "8302951" && y.Source == "native")).TargetKind);
+        Equal(IdentityTargetKinds.New, plan.Outcomes.Single(x => x.ProviderIds.Any(y => y.Provider == ProviderNames.Tvdb && y.ProviderId == "8302951" && y.Source == "native")).TargetKind);
         Equal(1, plan.Credits.Count(x => x.CorrectionRequired));
         True(plan.Credits.Single(x => x.MediaName == "Your Christmas or Mine 2").CorrectionRequired);
         True(plan.Credits.Where(x => x.MediaName != "Your Christmas or Mine 2").All(x => x.Disposition == "KEEP" && !x.CorrectionRequired));
         Equal(1, plan.Questions.Count(x => x.Kind == CorrectionKinds.LocalCreditTarget));
+        var providerChoice = plan.Questions.Single().Choices.Single(x => x.Caption.Contains("Emby 44676"));
+        Equal(CorrectionKinds.MediaCredit, providerChoice.Correction.Kind);
+        Equal(ProviderNames.Tvdb, providerChoice.Correction.Provider);
+        Equal("351731", providerChoice.Correction.ProviderMediaId);
+        Equal("8302951", providerChoice.Correction.ProviderPersonId);
+        Equal("457122", providerChoice.Correction.ReplacementValue);
         True(plan.Warning.Contains("already bound to Emby person 44676"));
 
         var disputed = plan.Credits.Single(x => x.MediaName == "Your Christmas or Mine 2");
@@ -1144,9 +1150,21 @@ internal static class Program
             CurrentValue = disputed.SourcePersonEmbyId + "|" + disputed.Role, ReplacementValue = "existing:44676", Reason = "OPERATOR_MEDIA_ASSIGNMENT", Enabled = true
         });
         var locallyPinned = IdentityCasePlanner.Build(10, input, decisions, clusters).Single();
-        Equal(0, locallyPinned.Questions.Count);
+        Equal(1, locallyPinned.Questions.Count);
         Equal(IdentityPlanStates.CorrectionRequired, locallyPinned.State);
-        True(locallyPinned.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.Unresolved));
+        Equal(CorrectionKinds.MediaCredit, locallyPinned.Questions.Single().Choices.Single(x => x.Caption.Contains("Emby 44676")).Correction.Kind);
+
+        var providerCorrection = locallyPinned.Questions.Single().Choices.Single(x => x.Caption.Contains("Emby 44676")).Correction;
+        var tracker = new CorrectionApplicationTracker(new[] { providerCorrection });
+        ProviderCorrectionOverlay.Apply(input, tracker);
+        Equal(1, tracker.Results.Single().ChangedCount);
+        True(!input.ProviderCredits.Any(x => x.Provider == ProviderNames.Tvdb && x.ProviderMediaId == "351731" && x.ProviderPersonId == "8302951"));
+        input.ProviderPeople.Add(alternativeTvdb); // Preserve a stale provider-only alternative to prove the planner prunes it.
+        var providerCorrected = IdentityCasePlanner.Build(11, input, decisions, clusters).Single();
+        Equal(0, providerCorrected.Questions.Count);
+        Equal(IdentityPlanStates.Complete, providerCorrected.State);
+        True(!providerCorrected.Outcomes.Any(x => x.ProviderIds.Any(y => y.Provider == ProviderNames.Tvdb && y.ProviderId == "8302951")));
+        Equal("No Emby changes required", providerCorrected.ApplyCaption);
     }
 
     private static void HolisticPlannerRemainsBounded()

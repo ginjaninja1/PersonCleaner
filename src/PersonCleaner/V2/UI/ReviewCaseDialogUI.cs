@@ -29,13 +29,14 @@ namespace PersonCleaner.V2.UI
         public LabelItem InformationalWarnings { get; set; }
         public LabelItem CorrectionQuestions { get; set; }
         public ButtonItem SuggestedProviderCorrections { get; set; }
+        public ButtonItem RecalculatePendingCorrections { get; set; }
         public ButtonItem BackToAllCases { get; set; } = new ButtonItem("Back to all cases") { CommandId = ReviewCaseCommands.Back };
         public ButtonItem Apply { get; set; }
         [GridDataSource(nameof(Rows))]
         public DxDataGrid Identities { get; set; }
         public ReviewIdentityRow[] Rows { get; set; } = new ReviewIdentityRow[0];
 
-        public static ReviewCaseDialogUI Build(IdentityCasePlan plan, LocalPerson[] people, string serverId, string result, IReadOnlyList<ProviderCorrection> suggestedCorrections = null)
+        public static ReviewCaseDialogUI Build(IdentityCasePlan plan, LocalPerson[] people, string serverId, string result, IReadOnlyList<ProviderCorrection> suggestedCorrections = null, int pendingCorrections = 0)
         {
             var byId = (people ?? new LocalPerson[0]).GroupBy(x => x.EmbyId).ToDictionary(x => x.Key, x => x.First());
             var rows = plan.Outcomes.OrderBy(x => x.SortOrder).ThenBy(x => x.OutcomeId, StringComparer.Ordinal).Select(x => BuildIdentity(plan, x, byId, serverId)).ToArray();
@@ -59,6 +60,7 @@ namespace PersonCleaner.V2.UI
             var correctionButtons = corrections.Select((x, i) => new ButtonItem(SuggestedCorrectionCaption(plan, x)) { CommandId = ReviewCaseCommands.ProviderCorrection + i.ToString(CultureInfo.InvariantCulture) }).ToList();
             if (correctionButtons.Count == 1) ui.SuggestedProviderCorrections = correctionButtons[0];
             if (correctionButtons.Count > 1) ui.SuggestedProviderCorrections = new ButtonItem("Review one of " + correctionButtons.Count + " suggested provider corrections") { SubMenuButtons = correctionButtons };
+            if (pendingCorrections > 0) ui.RecalculatePendingCorrections = new ButtonItem("Recalculate " + pendingCorrections + " saved correction" + (pendingCorrections == 1 ? string.Empty : "s")) { CommandId = ReviewCaseCommands.RecalculatePending, ConfirmationPrompt = "Recalculate the complete evidence graph once using every saved correction?" };
             if (plan.State == IdentityPlanStates.Complete && IdentityCaseExecutor.HasMutations(plan))
                 ui.Apply = new ButtonItem(plan.ApplyCaption) { CommandId = ReviewCaseCommands.Apply, ConfirmationPrompt = "Apply exactly the reviewed person-ID and media-credit changes after re-reading live Emby?" };
             return ui;
@@ -230,6 +232,7 @@ namespace PersonCleaner.V2.UI
         public const string IdentityGrid = "case-correct-identity";
         public const string MediaGrid = "case-correct-media";
         public const string ProviderCorrection = "case-provider-correction:";
+        public const string RecalculatePending = "case-recalculate-pending";
     }
 
     internal sealed class ReviewCaseDialogView : DialogViewBase
@@ -283,6 +286,12 @@ namespace PersonCleaner.V2.UI
                         throw new InvalidOperationException("The selected provider correction is no longer available.");
                     return Task.FromResult<IPluginUIView>(new CorrectionDialogView(plugin, host, logger, this, Rebuild, suggestedCorrections[index]));
                 }
+                if (commandId == ReviewCaseCommands.RecalculatePending)
+                {
+                    using (var repository = Open()) CorrectionRuntime.Recalculate(repository, logger);
+                    result = "Saved corrections were recalculated together.";
+                    Rebuild(); Refresh(); return Task.FromResult<IPluginUIView>(this);
+                }
                 if (commandId == ReviewCaseCommands.Apply)
                 {
                     var reviewedHash = plan.PlanHash;
@@ -324,8 +333,9 @@ namespace PersonCleaner.V2.UI
                 {
                     plan = repository.IdentityCaseByReference(caseId, originalEmbyIds); caseId = plan.CaseId; foreach (var id in plan.CurrentPeople.Select(x => x.EmbyId)) originalEmbyIds.Add(id);
                     suggestedCorrections = SuggestedCorrections(repository, plan);
+                    var pendingCorrections = repository.PendingCorrectionSelections(caseId);
                     string serverId = null; try { serverId = host.GetPublicSystemInfo(CancellationToken.None).GetAwaiter().GetResult()?.Id; } catch { }
-                    ContentData = ReviewCaseDialogUI.Build(plan, repository.LocalPeople(), serverId, result, suggestedCorrections);
+                    ContentData = ReviewCaseDialogUI.Build(plan, repository.LocalPeople(), serverId, result, suggestedCorrections, pendingCorrections);
                 }
             }
             catch (Exception ex)

@@ -255,7 +255,7 @@ namespace PersonCleaner.V2.Domain
             PreserveUnopposedExistingIds(plan, currentPeople);
             BuildIdentityQuestions(plan, input, provisional);
 
-            MarkUnassignedNewOutcomesUnresolved(plan);
+            PruneUnassignedNewOutcomes(plan);
             var blocked = decisions.Any(x => x.Action == ResolutionActions.IncompleteScope);
             plan.State = blocked ? IdentityPlanStates.Blocked : plan.Questions.Count > 0 || plan.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.Unresolved) || plan.Credits.Any(x => x.CorrectionRequired) ? IdentityPlanStates.CorrectionRequired : IdentityPlanStates.Complete;
             CompleteSummaries(plan, input);
@@ -267,6 +267,7 @@ namespace PersonCleaner.V2.Domain
         {
             var mediaById = index.MediaById;
             var outcomeByBuilder = builders.Select((x, i) => new { Builder = x, Outcome = plan.Outcomes[i] }).ToList();
+            var outcomeByProviderKey = outcomeByBuilder.SelectMany(x => x.Builder.Keys.Select(y => new { Key = y, x.Outcome })).GroupBy(x => x.Key, StringComparer.Ordinal).ToDictionary(x => x.Key, x => x.First().Outcome, StringComparer.Ordinal);
             var providerCreditIndex = index.ProviderCreditsByMedia;
             var relevantCredits = plan.CurrentPeople.SelectMany(x => index.LocalCreditsByPerson.TryGetValue(x.EmbyId, out var rows) ? rows : Enumerable.Empty<LocalCredit>());
             foreach (var credit in relevantCredits.Where(x => mediaById.ContainsKey(x.MediaEmbyId)).OrderBy(x => x.MediaEmbyId).ThenBy(x => x.Role, StringComparer.Ordinal).ThenBy(x => x.PersonEmbyId))
@@ -282,7 +283,8 @@ namespace PersonCleaner.V2.Domain
                 if (correction != null) target = ResolveOverrideTarget(plan, correction.ReplacementValue);
                 if (target == null && matches.Count == 1) target = matches[0];
                 if (target == null && matches.Count == 0) target = plan.Outcomes.FirstOrDefault(x => x.TargetEmbyId == credit.PersonEmbyId) ?? plan.Outcomes.FirstOrDefault(x => x.SourceEmbyIds.Contains(credit.PersonEmbyId));
-                var ambiguous = target == null || matches.Count > 1 && correction == null;
+                var repairableProviderDisagreement = target != null && matches.Count > 1 && ProviderAttributionCorrection(plan, credit, media, target, observed, outcomeByProviderKey) != null;
+                var ambiguous = target == null || matches.Count > 1 && (correction == null || repairableProviderDisagreement);
                 if (target == null) target = plan.Outcomes.FirstOrDefault(x => x.SourceEmbyIds.Contains(credit.PersonEmbyId)) ?? plan.Outcomes.First();
                 var assignmentId = "credit-" + StableHash(credit.PersonEmbyId + "|" + credit.MediaEmbyId + "|" + credit.Role);
                 var disposition = target.TargetKind == IdentityTargetKinds.Existing && target.TargetEmbyId == credit.PersonEmbyId ? "KEEP" : "MOVE";
@@ -291,22 +293,45 @@ namespace PersonCleaner.V2.Domain
                     AssignmentId = assignmentId, SourcePersonEmbyId = credit.PersonEmbyId, TargetOutcomeId = target.OutcomeId, MediaEmbyId = media.EmbyId,
                     MediaType = media.MediaType, MediaName = media.Name, Role = credit.Role, TmdbId = media.TmdbId, TvdbId = media.TvdbId, TvdbSlug = media.TvdbSlug, ImdbId = media.ImdbId,
                     Disposition = disposition, CorrectionRequired = ambiguous,
-                    Rationale = ambiguous ? "More than one materially different identity can receive this credit." : matches.Count == 1 ? "Provider title credits identify the resulting person." : "No provider counter-attribution changes the current Emby assignment."
+                    Rationale = repairableProviderDisagreement ? "A local assignment exists, but a conflicting provider title attribution still requires correction." : ambiguous ? "More than one materially different identity can receive this credit." : matches.Count == 1 ? "Provider title credits identify the resulting person." : "No provider counter-attribution changes the current Emby assignment."
                 });
-                if (ambiguous) BuildCreditQuestion(plan, input, credit, media, assignmentId);
+                if (ambiguous) BuildCreditQuestion(plan, input, credit, media, assignmentId, observed, outcomeByProviderKey);
             }
         }
 
-        private static void BuildCreditQuestion(IdentityCasePlan plan, ResolutionInput input, LocalCredit credit, MediaSeed media, string assignmentId)
+        private static void BuildCreditQuestion(IdentityCasePlan plan, ResolutionInput input, LocalCredit credit, MediaSeed media, string assignmentId, List<ObservedProviderCredit> observed, IReadOnlyDictionary<string, IdentityOutcome> outcomeByProviderKey)
         {
             var q = new IdentityQuestion { QuestionId = "question-" + assignmentId, Kind = CorrectionKinds.LocalCreditTarget, AssignmentId = assignmentId, Narrative = "Which person should receive " + media.Name + " — " + credit.Role + "?" };
             foreach (var outcome in plan.Outcomes.Where(x => x.TargetKind != IdentityTargetKinds.Unresolved && x.ProviderIds.Any()))
             {
                 var target = outcome.TargetKind == IdentityTargetKinds.Existing ? "existing:" + outcome.TargetEmbyId : "outcome:" + outcome.OutcomeId;
-                q.Choices.Add(Choice(q.QuestionId, target, "Assign to " + TargetCaption(outcome), "The complete projection will be recalculated with this media credit assigned to " + TargetCaption(outcome) + ".",
-                    new ProviderCorrection { Kind = CorrectionKinds.LocalCreditTarget, Operation = CorrectionOperations.Replace, EmbyId = media.EmbyId, CurrentValue = credit.PersonEmbyId + "|" + credit.Role, ReplacementValue = target, Reason = "OPERATOR_MEDIA_ASSIGNMENT", Note = "Selected from identity case " + plan.CaseId, Enabled = true }));
+                var correction = ProviderAttributionCorrection(plan, credit, media, outcome, observed, outcomeByProviderKey)
+                    ?? new ProviderCorrection { Kind = CorrectionKinds.LocalCreditTarget, Operation = CorrectionOperations.Replace, EmbyId = media.EmbyId, CurrentValue = credit.PersonEmbyId + "|" + credit.Role, ReplacementValue = target, Reason = "OPERATOR_MEDIA_ASSIGNMENT", Note = "Selected from identity case " + plan.CaseId, Enabled = true };
+                var providerAssertion = correction.Kind == CorrectionKinds.MediaCredit;
+                var caption = (providerAssertion ? "Provider credit belongs to " : "Assign to ") + TargetCaption(outcome);
+                var effect = providerAssertion
+                    ? correction.Provider.ToUpperInvariant() + " " + correction.MediaType + " " + correction.ProviderMediaId + " will replace person " + correction.ProviderPersonId + " with " + correction.ReplacementValue + "; the complete identity case will then be recalculated."
+                    : "The complete projection will be recalculated with this media credit assigned to " + TargetCaption(outcome) + ".";
+                q.Choices.Add(Choice(q.QuestionId, target, caption, effect, correction));
             }
             plan.Questions.Add(q);
+        }
+
+        private static ProviderCorrection ProviderAttributionCorrection(IdentityCasePlan plan, LocalCredit credit, MediaSeed media, IdentityOutcome selected, IEnumerable<ObservedProviderCredit> observed, IReadOnlyDictionary<string, IdentityOutcome> outcomeByProviderKey)
+        {
+            var roleCategory = RoleCategory(credit.Role);
+            var conflicts = observed.Where(x => CompatibleRole(roleCategory, x.RoleCategory) && outcomeByProviderKey.TryGetValue(x.PersonKey, out var owner) && owner.OutcomeId != selected.OutcomeId)
+                .GroupBy(x => x.Provider + "|" + x.MediaType + "|" + x.ProviderMediaId + "|" + x.ProviderPersonId + "|" + x.Role, StringComparer.Ordinal).Select(x => x.First()).ToList();
+            if (conflicts.Count != 1) return null;
+            var conflict = conflicts[0];
+            var replacements = selected.ProviderIds.Where(x => x.Source == "native" && x.Provider == conflict.Provider).Select(x => x.ProviderId).Distinct(StringComparer.Ordinal).ToList();
+            if (replacements.Count != 1 || replacements[0] == conflict.ProviderPersonId) return null;
+            return new ProviderCorrection
+            {
+                Kind = CorrectionKinds.MediaCredit, Operation = CorrectionOperations.Replace, Provider = conflict.Provider, MediaType = conflict.MediaType,
+                ProviderMediaId = conflict.ProviderMediaId, ProviderPersonId = conflict.ProviderPersonId, CurrentValue = conflict.Role, ReplacementValue = replacements[0],
+                Reason = "OPERATOR_PROVIDER_ATTRIBUTION", Note = "Selected from identity case " + plan.CaseId + " for Emby media " + media.EmbyId, Enabled = true
+            };
         }
 
         private static void BuildIdentityQuestions(IdentityCasePlan plan, ResolutionInput input, List<OutcomeBuilder> builders)
@@ -394,13 +419,11 @@ namespace PersonCleaner.V2.Domain
             if (plan.State == IdentityPlanStates.Blocked) plan.Summary += " The current scope is incomplete, so Apply is unavailable.";
         }
 
-        private static void MarkUnassignedNewOutcomesUnresolved(IdentityCasePlan plan)
+        private static void PruneUnassignedNewOutcomes(IdentityCasePlan plan)
         {
-            foreach (var outcome in plan.Outcomes.Where(x => x.TargetKind == IdentityTargetKinds.New && !plan.Credits.Any(c => c.TargetOutcomeId == x.OutcomeId)))
-            {
-                outcome.TargetKind = IdentityTargetKinds.Unresolved;
-                outcome.Outcome = "Provider alternative — no Emby person is proposed without an assigned media credit";
-            }
+            var referenced = new HashSet<string>(plan.Questions.Where(x => !string.IsNullOrWhiteSpace(x.OutcomeId)).Select(x => x.OutcomeId), StringComparer.Ordinal);
+            foreach (var value in plan.Questions.SelectMany(x => x.Choices).Select(x => x.Correction?.ReplacementValue).Where(x => (x ?? string.Empty).StartsWith("outcome:", StringComparison.Ordinal))) referenced.Add(value.Substring(8));
+            plan.Outcomes.RemoveAll(x => x.TargetKind == IdentityTargetKinds.New && !plan.Credits.Any(c => c.TargetOutcomeId == x.OutcomeId) && !referenced.Contains(x.OutcomeId));
         }
 
         private static int ProviderIdChangeCount(IdentityCasePlan plan, ResolutionInput input)

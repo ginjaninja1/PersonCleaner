@@ -48,6 +48,7 @@ namespace PersonCleaner.V2.UI
         [DisplayName("Effect")]
         public LabelItem SelectedEffect { get; set; }
         public ButtonItem Save { get; set; }
+        public ButtonItem SaveWithoutRecalculation { get; set; }
         public LabelItem ValidationStatus { get; set; }
 
         internal static CorrectionChoiceDialogUI Build(CorrectionContext context, int selectedIndex, string status)
@@ -59,7 +60,8 @@ namespace PersonCleaner.V2.UI
                 AffectedRecord = new LabelItem(context.AffectedRecord), Question = new LabelItem(context.Question), CurrentProposal = new LabelItem(context.CurrentProposal),
                 Choices = buttons.Count == 1 ? buttons[0] : new ButtonItem("Choose one of " + buttons.Count + " explicit outcomes") { SubMenuButtons = buttons },
                 SelectedChoice = new LabelItem(selected == null ? "No correction selected." : selected.Caption), SelectedEffect = new LabelItem(selected == null ? "Select a correction to see its effect on the recalculated case." : selected.Effect),
-                Save = selected == null ? null : new ButtonItem("Save provider correction and recalculate") { CommandId = CorrectionChoiceCommands.Save, ConfirmationPrompt = "Save this durable correction and recalculate the complete identity case?" },
+                Save = selected == null ? null : new ButtonItem("Save correction and recalculate now") { CommandId = CorrectionChoiceCommands.Save, ConfirmationPrompt = "Save this durable correction and recalculate the complete identity case now?" },
+                SaveWithoutRecalculation = selected == null ? null : new ButtonItem("Save correction for batch recalculation") { CommandId = CorrectionChoiceCommands.SaveWithoutRecalculation, ConfirmationPrompt = "Save this correction without recalculating yet? The case will remain unchanged until batch recalculation is run." },
                 ValidationStatus = new LabelItem(status ?? "Nothing is saved until the Save button is pressed.")
             };
             var links = context.RelevantRecords.Take(6).ToArray();
@@ -73,6 +75,7 @@ namespace PersonCleaner.V2.UI
     {
         public const string Select = "case-correction-choice:";
         public const string Save = "case-correction-save";
+        public const string SaveWithoutRecalculation = "case-correction-save-only";
     }
 
     internal sealed class CorrectionContext
@@ -162,7 +165,7 @@ namespace PersonCleaner.V2.UI
                 if (int.TryParse(commandId.Substring(CorrectionChoiceCommands.Select.Length), NumberStyles.Integer, CultureInfo.InvariantCulture, out index) && index >= 0 && index < context.Choices.Count) selectedIndex = index;
                 status = null; Rebuild(); Refresh(); return Task.FromResult<IPluginUIView>(this);
             }
-            if (commandId == CorrectionChoiceCommands.Save)
+            if (commandId == CorrectionChoiceCommands.Save || commandId == CorrectionChoiceCommands.SaveWithoutRecalculation)
             {
                 try
                 {
@@ -172,9 +175,11 @@ namespace PersonCleaner.V2.UI
                     {
                         repository.Initialize();
                         correction.CorrectionId = repository.SaveCorrectionChoice(correction, context.RunId, context.CaseId, context.QuestionId, context.Choices[selectedIndex].ChoiceId);
-                        CorrectionRuntime.Recalculate(repository, logger);
+                        if (commandId == CorrectionChoiceCommands.Save) CorrectionRuntime.Recalculate(repository, logger);
                     }
-                    logger.Info("PersonCleaner saved contextual provider correction {0} ({1}) and recalculated its identity case.", correction.CorrectionId, correction.Kind);
+                    logger.Info(commandId == CorrectionChoiceCommands.Save
+                        ? "PersonCleaner saved contextual provider correction {0} ({1}) and recalculated its identity case."
+                        : "PersonCleaner saved contextual provider correction {0} ({1}) for later batch recalculation.", correction.CorrectionId, correction.Kind);
                     rebuildParent(); return Task.FromResult(parent);
                 }
                 catch (Exception ex)
