@@ -578,6 +578,7 @@ WHERE a.run_id=@run AND a.outcome='PRESENT'";
                 var ids = new HashSet<long>(sourceEmbyIds ?? Enumerable.Empty<long>());
                 if (ids.Count == 0) throw;
                 string replacement = null; var best = -1;
+                IdentityCasePlan terminal = null;
                 lock (sync)
                 {
                     var runId = LatestCompletedRunId();
@@ -588,10 +589,48 @@ WHERE a.run_id=@run AND a.outcome='PRESENT'";
                         foreach (var r in s.Rows()) if (ids.Contains(r.GetInt64(1))) counts[r.GetString(0)] = counts.TryGetValue(r.GetString(0), out var count) ? count + 1 : 1;
                         foreach (var row in counts.OrderByDescending(x => x.Value).ThenBy(x => x.Key, StringComparer.Ordinal)) if (row.Value > best) { replacement = row.Key; best = row.Value; }
                     }
+                    if (replacement == null)
+                    {
+                        var people = new List<LocalPerson>();
+                        foreach (var id in ids.OrderBy(x => x))
+                        using (var s = db.PrepareStatement("SELECT emby_id,name,tmdb_id,tvdb_id,imdb_id FROM global_local_person WHERE emby_id=@emby LIMIT 1"))
+                        {
+                            s.Bind("@emby", id);
+                            foreach (var r in s.Rows()) people.Add(new LocalPerson { EmbyId = r.GetInt64(0), Name = r.GetString(1), TmdbId = Null(r, 2), TvdbId = Null(r, 3), ImdbId = Null(r, 4) });
+                        }
+                        if (people.Count > 0) terminal = ResolvedReferencePlan(runId, caseId, people);
+                    }
                 }
-                if (replacement == null) throw;
+                if (replacement == null)
+                {
+                    if (terminal != null) return terminal;
+                    throw;
+                }
                 return IdentityCase(replacement);
             }
+        }
+
+        private static IdentityCasePlan ResolvedReferencePlan(long runId, string caseId, IReadOnlyList<LocalPerson> people)
+        {
+            var displayName = string.Join(" / ", people.Select(x => x.Name).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.Ordinal).DefaultIfEmpty("Resolved identity case"));
+            var plan = new IdentityCasePlan
+            {
+                RunId = runId, CaseId = caseId, PlanHash = "resolved-reference:" + runId + ":" + caseId,
+                DisplayName = displayName, CaseType = "No longer requires identity review",
+                Summary = "The previous case is no longer emitted by the latest evidence run. The current Emby people are shown below; no further change is available from this obsolete case.",
+                Warning = "Return to the case list. If a provider correction should produce an Emby ID cleanup, the latest run will expose that as a separate case.",
+                State = IdentityPlanStates.Complete, ApplyCaption = "No Emby changes available from this obsolete case"
+            };
+            foreach (var person in people)
+            {
+                plan.CurrentPeople.Add(new LocalPerson { EmbyId = person.EmbyId, Name = person.Name, TmdbId = person.TmdbId, TvdbId = person.TvdbId, ImdbId = person.ImdbId });
+                var outcome = new IdentityOutcome { OutcomeId = "resolved-existing:" + person.EmbyId, SortOrder = plan.Outcomes.Count, TargetKind = IdentityTargetKinds.Existing, TargetEmbyId = person.EmbyId, DisplayName = person.Name, Outcome = "Current Emby state; the previous identity case has resolved", SourceEmbyIds = new List<long> { person.EmbyId } };
+                if (!string.IsNullOrWhiteSpace(person.TmdbId)) outcome.ProviderIds.Add(new IdentityProviderId { Provider = ProviderNames.Tmdb, ProviderId = person.TmdbId, Source = "native" });
+                if (!string.IsNullOrWhiteSpace(person.TvdbId)) outcome.ProviderIds.Add(new IdentityProviderId { Provider = ProviderNames.Tvdb, ProviderId = person.TvdbId, Source = "native" });
+                if (!string.IsNullOrWhiteSpace(person.ImdbId)) outcome.ProviderIds.Add(new IdentityProviderId { Provider = ProviderNames.Imdb, ProviderId = person.ImdbId, Source = "external" });
+                plan.Outcomes.Add(outcome);
+            }
+            return plan;
         }
 
         public LocalPerson[] LocalPeople()

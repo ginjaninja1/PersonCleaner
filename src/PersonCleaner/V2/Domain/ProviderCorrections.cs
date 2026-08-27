@@ -182,6 +182,25 @@ namespace PersonCleaner.V2.Domain
 
     public static class ProviderCorrectionOverlay
     {
+        public static IReadOnlyList<string> ExplicitlyDiscreditedLocalBindings(ResolutionInput input, LocalPerson person)
+        {
+            if (input == null || person == null) return new string[0];
+            var result = new List<string>();
+            foreach (var provider in new[] { ProviderNames.Tmdb, ProviderNames.Tvdb })
+            {
+                var providerPersonId = GetPersonBinding(person, provider);
+                if (string.IsNullOrWhiteSpace(providerPersonId)) continue;
+                var exclusions = (input.ActiveCorrections ?? new List<ProviderCorrection>()).Where(x => x.Enabled && x.Kind == CorrectionKinds.MediaCredit && x.Operation == CorrectionOperations.Unusable && x.Provider == provider && x.ProviderPersonId == providerPersonId).ToList();
+                if (exclusions.Count == 0) continue;
+                var localMedia = new HashSet<long>((input.LocalCredits ?? new List<LocalCredit>()).Where(x => x.PersonEmbyId == person.EmbyId).Select(x => x.MediaEmbyId));
+                var providerMediaIds = new HashSet<string>((input.Media ?? new List<MediaSeed>()).Where(x => localMedia.Contains(x.EmbyId)).Select(x => provider == ProviderNames.Tmdb ? x.TmdbId : x.TvdbId).Where(x => !string.IsNullOrWhiteSpace(x)), StringComparer.Ordinal);
+                if ((input.ProviderCredits ?? new List<ObservedProviderCredit>()).Any(x => x.Provider == provider && x.ProviderPersonId == providerPersonId && providerMediaIds.Contains(x.ProviderMediaId))) continue;
+                if (exclusions.Any(x => (input.Media ?? new List<MediaSeed>()).Any(m => localMedia.Contains(m.EmbyId) && m.MediaType == x.MediaType && (provider == ProviderNames.Tmdb ? m.TmdbId : m.TvdbId) == x.ProviderMediaId)))
+                    result.Add(provider + ":" + providerPersonId);
+            }
+            return result;
+        }
+
         public static void ApplyMediaIdentities(IList<ProviderMediaIdentity> media, CorrectionApplicationTracker tracker)
         {
             foreach (var rule in tracker.Rules.Where(x => x.Kind == CorrectionKinds.MediaExternalId))

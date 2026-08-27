@@ -252,6 +252,8 @@ namespace PersonCleaner.V2.Domain
 
             AddEmptyExistingOutcomes(plan, currentPeople);
             BuildCredits(plan, input, planner, provisional);
+            foreach (var outcome in plan.Outcomes.Where(x => x.TargetKind == IdentityTargetKinds.Existing && plan.Credits.Any(c => c.TargetOutcomeId == x.OutcomeId)))
+                outcome.Outcome = "Retain Emby person " + outcome.TargetEmbyId;
             PreserveUnopposedExistingIds(plan, input, currentPeople);
             BuildIdentityQuestions(plan, input, provisional);
 
@@ -438,7 +440,7 @@ namespace PersonCleaner.V2.Domain
                     var currentId = LocalId(current, provider);
                     if (string.IsNullOrWhiteSpace(currentId)) continue;
                     if (plan.Outcomes.Where(x => x != outcome).SelectMany(x => x.ProviderIds).Any(x => x.Provider == provider && string.Equals(x.ProviderId, currentId, StringComparison.OrdinalIgnoreCase))) continue;
-                    if (BindingExplicitlyDiscredited(input, plan, current, provider, currentId)) continue;
+                    if (BindingExplicitlyDiscredited(input, current, provider, currentId)) continue;
                     outcome.ProviderIds.Add(new IdentityProviderId { Provider = provider, ProviderId = currentId, Source = provider == ProviderNames.Imdb ? "external" : "native" });
                 }
                 outcome.ProviderIds = outcome.ProviderIds.OrderBy(x => x.Provider, StringComparer.Ordinal).ThenBy(x => x.ProviderId, StringComparer.Ordinal).ToList();
@@ -474,15 +476,9 @@ namespace PersonCleaner.V2.Domain
             if (plan.State == IdentityPlanStates.Blocked) plan.Summary += " The current scope is incomplete, so Apply is unavailable.";
         }
 
-        private static bool BindingExplicitlyDiscredited(ResolutionInput input, IdentityCasePlan plan, LocalPerson person, string provider, string providerPersonId)
+        private static bool BindingExplicitlyDiscredited(ResolutionInput input, LocalPerson person, string provider, string providerPersonId)
         {
-            var explicitExclusions = (input.ActiveCorrections ?? new List<ProviderCorrection>()).Where(x => x.Enabled && x.Kind == CorrectionKinds.MediaCredit && x.Operation == CorrectionOperations.Unusable && x.Provider == provider && x.ProviderPersonId == providerPersonId).ToList();
-            if (explicitExclusions.Count == 0) return false;
-            var localMedia = new HashSet<long>(input.LocalCredits.Where(x => x.PersonEmbyId == person.EmbyId).Select(x => x.MediaEmbyId));
-            var mediaIds = new HashSet<string>(input.Media.Where(x => localMedia.Contains(x.EmbyId)).Select(x => provider == ProviderNames.Tmdb ? x.TmdbId : x.TvdbId).Where(x => !string.IsNullOrWhiteSpace(x)), StringComparer.Ordinal);
-            var stillSupported = input.ProviderCredits.Any(x => x.Provider == provider && x.ProviderPersonId == providerPersonId && mediaIds.Contains(x.ProviderMediaId));
-            if (stillSupported) return false;
-            return explicitExclusions.Any(x => plan.Credits.Any(c => c.SourcePersonEmbyId == person.EmbyId && c.MediaType == x.MediaType && (provider == ProviderNames.Tmdb ? c.TmdbId : c.TvdbId) == x.ProviderMediaId));
+            return ProviderCorrectionOverlay.ExplicitlyDiscreditedLocalBindings(input, person).Contains(provider + ":" + providerPersonId);
         }
 
         private static void PruneUnassignedNewOutcomes(IdentityCasePlan plan)

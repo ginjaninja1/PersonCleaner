@@ -345,7 +345,9 @@ namespace PersonCleaner.V2.UI
             {
                 logger.ErrorException("Unable to rebuild the PersonCleaner identity case dialog", ex);
                 plan = plan ?? new IdentityCasePlan { CaseId = caseId, DisplayName = "Selected identity case", CaseType = "Unavailable", Summary = "The case is no longer available.", State = IdentityPlanStates.Blocked };
-                ContentData = ReviewCaseDialogUI.Build(plan, new LocalPerson[0], null, result ?? "The case could not be reloaded: " + ex.Message);
+                var people = plan.CurrentPeople.ToArray();
+                string serverId = null; try { serverId = host.GetPublicSystemInfo(CancellationToken.None).GetAwaiter().GetResult()?.Id; } catch { }
+                ContentData = ReviewCaseDialogUI.Build(plan, people, serverId, result ?? "The case could not be reloaded: " + ex.Message);
             }
         }
 

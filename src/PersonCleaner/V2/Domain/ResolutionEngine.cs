@@ -201,7 +201,10 @@ namespace PersonCleaner.V2.Domain
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var local = input.LocalPeople[localPersonIndex];
-                if (!resolvedLocalPeople.Contains(local.EmbyId) && localIndex.CreditsByPerson.ContainsKey(local.EmbyId) && EvidenceIsCompleteForLocal(local, input, localIndex))
+                var discreditedBindings = ProviderCorrectionOverlay.ExplicitlyDiscreditedLocalBindings(input, local);
+                if (discreditedBindings.Count > 0 && !decisions.Any(x => x.AnchorEmbyPersonId == local.EmbyId) && localIndex.CreditsByPerson.ContainsKey(local.EmbyId))
+                    decisions.Add(BuildCorrectedBindingCleanupDecision(local, discreditedBindings, input, settings));
+                else if (!resolvedLocalPeople.Contains(local.EmbyId) && localIndex.CreditsByPerson.ContainsKey(local.EmbyId) && EvidenceIsCompleteForLocal(local, input, localIndex))
                     decisions.Add(BuildOrphanDecision(local, input, settings, localIndex));
                 if ((localPersonIndex & 255) == 0 || localPersonIndex + 1 == input.LocalPeople.Count)
                     Report(progress, cancellationToken, "Checking unresolved local people", localPersonIndex + 1, Math.Max(1, input.LocalPeople.Count), 0.83 + 0.07 * (localPersonIndex + 1) / Math.Max(1, input.LocalPeople.Count));
@@ -943,6 +946,28 @@ namespace PersonCleaner.V2.Domain
             decision.Evidence.Add(new EvidenceLine { SortOrder = 1, SignalType = "NO_PROVIDER_SUPPORT", Verdict = "missing", Narrative = "The media-derived provider graph contains no matching identity node.", Metric = "provider_nodes=0" });
             AddAcquisitionEvidence(decision, local, index);
             AddMediaAcquisitionEvidence(decision, local, input, index);
+            AddMediaExamples(decision, new[] { local.EmbyId }, input, settings.MaximumMediaExamples);
+            return decision;
+        }
+
+        private static ResolutionDecision BuildCorrectedBindingCleanupDecision(LocalPerson local, IReadOnlyList<string> discreditedBindings, ResolutionInput input, ResolutionSettings settings)
+        {
+            var effectiveKeys = new HashSet<string>((input.ProviderPeople ?? new List<ProviderPerson>()).Select(x => x.Key), StringComparer.Ordinal);
+            var retainedKeys = CurrentProviderKeys(local).Where(effectiveKeys.Contains).OrderBy(x => x, StringComparer.Ordinal).ToList();
+            var decision = new ResolutionDecision
+            {
+                DecisionId = StableId("cleanup", local.EmbyId + "|" + string.Join("|", discreditedBindings.OrderBy(x => x, StringComparer.Ordinal))),
+                Status = "DRIFT",
+                Action = "REVIEW_REMOVE_CORRECTED_BINDING",
+                DisplayName = local.Name,
+                AnchorEmbyPersonId = local.EmbyId,
+                ProviderKeys = retainedKeys.Count == 0 ? "No hydrated provider identity" : string.Join(", ", retainedKeys),
+                Confidence = 1,
+                LocalAnchorConfidence = 1,
+                Headline = "A reviewed provider-credit correction removed the last media support for " + string.Join(", ", discreditedBindings) + " on Emby person " + local.EmbyId + ".",
+                Explanation = "Retain the Emby person and its media credits. Review removal of only the now-unsupported local provider binding; the provider correction itself does not edit Emby."
+            };
+            decision.Evidence.Add(new EvidenceLine { SortOrder = 1, SignalType = "CORRECTION_CONSEQUENCE", Verdict = "review", Narrative = "The operator marked the exact provider title-credit assertion unusable, and no remaining sampled provider credit supports " + string.Join(", ", discreditedBindings) + ".", Metric = "bindings=" + string.Join(",", discreditedBindings) });
             AddMediaExamples(decision, new[] { local.EmbyId }, input, settings.MaximumMediaExamples);
             return decision;
         }

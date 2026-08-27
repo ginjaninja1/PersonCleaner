@@ -1134,8 +1134,12 @@ internal static class Program
 
         input.ActiveCorrections.Add(exclusion);
         ProviderCorrectionOverlay.Apply(input, new CorrectionApplicationTracker(new[] { exclusion }));
-        var correctedDecision = new ResolutionDecision { DecisionId = "michael-corrected", Status = "MATCH", Action = "CROSS_PROVIDER_IDENTITY", DisplayName = "Michael Rogers", AnchorEmbyPersonId = 178672, ProviderKeys = "tmdb:216444" };
-        var corrected = IdentityCasePlanner.Build(13, input, new[] { correctedDecision }, new[] { Cluster("michael-corrected", 178672, "tmdb:216444") }).Single();
+        var engine = new ResolutionEngine();
+        var correctedDecisions = engine.Resolve(input, new ResolutionSettings());
+        var cleanup = correctedDecisions.Single(x => x.Action == "REVIEW_REMOVE_CORRECTED_BINDING");
+        Equal(178672L, cleanup.AnchorEmbyPersonId.Value);
+        True(cleanup.Headline.Contains("tvdb:271293"));
+        var corrected = IdentityCasePlanner.Build(13, input, correctedDecisions, engine.Clusters).Single(x => x.DecisionIds.Contains(cleanup.DecisionId));
 
         Equal(IdentityPlanStates.Complete, corrected.State);
         var result = corrected.Outcomes.Single();
