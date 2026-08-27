@@ -20,21 +20,26 @@ namespace PersonCleaner.V2.UI
         {
             if (plan == null) throw new ArgumentNullException(nameof(plan));
             if (persistCommit == null) throw new ArgumentNullException(nameof(persistCommit));
-            Preflight(plan);
+            var liveMediaPeople = plan.Credits.Select(x => x.MediaEmbyId).Distinct().ToDictionary(x => x, ReadPeople);
+            Preflight(plan, liveMediaPeople);
             var receipt = new IdentityCaseApplyReceipt();
             foreach (var outcome in plan.Outcomes.Where(x => x.TargetEmbyId.HasValue)) receipt.OutcomeEmbyIds[outcome.OutcomeId] = outcome.TargetEmbyId.Value;
             var personSnapshots = SnapshotPeople(plan.CurrentPeople.Select(x => x.EmbyId));
-            var mediaSnapshots = plan.Credits.Where(x => x.Disposition == "MOVE").Select(x => x.MediaEmbyId).Distinct().ToDictionary(x => x, ReadPeople);
+            var mediaSnapshots = plan.Credits.Where(x => x.Disposition == "MOVE").Select(x => x.MediaEmbyId).Distinct().ToDictionary(x => x, x => liveMediaPeople[x].Select(Clone).ToList());
             var written = HasMutations(plan);
+            var resolverTokens = new Dictionary<long, string>();
+            var targetPeople = new Dictionary<long, Person>();
             try
             {
                 ApplyExistingProviderIds(plan, receipt);
-                foreach (var media in plan.Credits.Where(x => x.Disposition == "MOVE").GroupBy(x => x.MediaEmbyId).OrderBy(x => x.Key))
+                try
                 {
-                    ApplyMedia(plan, media.Key, media.ToList(), receipt);
+                    foreach (var media in plan.Credits.Where(x => x.Disposition == "MOVE").GroupBy(x => x.MediaEmbyId).OrderBy(x => x.Key))
+                        ApplyMedia(plan, media.Key, media.ToList(), liveMediaPeople, receipt, resolverTokens, targetPeople);
                 }
+                finally { RemoveResolverTokens(resolverTokens, targetPeople); }
                 ApplyNewProviderIds(plan, receipt);
-                Postflight(plan, receipt);
+                Postflight(plan, receipt, liveMediaPeople);
                 receipt.Summary = plan.ApplyCaption.Substring("Apply: ".Length) + ".";
                 persistCommit(receipt);
                 return receipt;
@@ -66,7 +71,7 @@ namespace PersonCleaner.V2.UI
             return false;
         }
 
-        private void Preflight(IdentityCasePlan plan)
+        private void Preflight(IdentityCasePlan plan, IReadOnlyDictionary<long, List<PersonInfo>> liveMediaPeople)
         {
             if (plan.State != IdentityPlanStates.Complete) throw new InvalidOperationException("The reviewed case is not complete.");
             if (plan.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.New && (!x.ProviderIds.Any(y => y.Source == "native") || !plan.Credits.Any(c => c.TargetOutcomeId == x.OutcomeId))))
@@ -84,7 +89,7 @@ namespace PersonCleaner.V2.UI
             foreach (var mediaGroup in plan.Credits.GroupBy(x => x.MediaEmbyId))
             {
                 if (library.GetItemById(mediaGroup.Key) == null) throw new InvalidOperationException("Emby media " + mediaGroup.Key + " no longer exists.");
-                var live = ReadPeople(mediaGroup.Key);
+                var live = liveMediaPeople[mediaGroup.Key];
                 foreach (var credit in mediaGroup)
                     if (!live.Any(x => x.Id == credit.SourcePersonEmbyId && RoleText(x) == credit.Role))
                         throw new InvalidOperationException("The reviewed credit '" + credit.Role + "' on Emby media " + credit.MediaEmbyId + " changed after calculation.");
@@ -109,91 +114,101 @@ namespace PersonCleaner.V2.UI
         private bool ApplyExistingProviderIds(IdentityCasePlan plan, IdentityCaseApplyReceipt receipt)
         {
             var desired = plan.CurrentPeople.ToDictionary(x => x.EmbyId, x => plan.Outcomes.FirstOrDefault(o => o.TargetEmbyId == x.EmbyId));
+            var live = plan.CurrentPeople.ToDictionary(x => x.EmbyId, x => (Person)library.GetItemById(x.EmbyId));
             var changed = false;
+
+            // Release only IDs that must move between two in-scope people (or from
+            // an existing person to a new outcome). Ordinary replacement does not
+            // need a separate remove write before the final value is stored.
+            var releases = new Dictionary<long, HashSet<string>>();
+            foreach (var outcome in plan.Outcomes)
+            foreach (var id in DesiredProviderIds(outcome))
+            foreach (var owner in plan.CurrentPeople.Where(x => Same(LocalProviderId(x, id.Key), id.Value) && (!outcome.TargetEmbyId.HasValue || x.EmbyId != outcome.TargetEmbyId.Value)))
+            {
+                if (!releases.TryGetValue(owner.EmbyId, out var providers)) releases[owner.EmbyId] = providers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                providers.Add(id.Key);
+            }
+            foreach (var release in releases)
+            {
+                var person = live[release.Key];
+                foreach (var provider in release.Value) SetProviderId(person, provider, null);
+                library.UpdateItem(person, null, ItemUpdateType.MetadataEdit);
+            }
+
             foreach (var snapshot in plan.CurrentPeople)
             {
                 var outcome = desired[snapshot.EmbyId];
-                var person = (Person)library.GetItemById(snapshot.EmbyId);
-                var personChanged = false;
+                var person = live[snapshot.EmbyId]; var personChanged = false;
                 foreach (var provider in new[] { ProviderNames.Tmdb, ProviderNames.Tvdb, ProviderNames.Imdb })
                 {
-                    var before = ProviderId(person, provider);
+                    var before = LocalProviderId(snapshot, provider);
                     var after = DesiredProviderId(outcome, provider);
                     if (Same(before, after)) continue;
-                    if (!string.IsNullOrWhiteSpace(before)) { SetProviderId(person, provider, null); personChanged = true; changed = true; }
-                    receipt.Changes.Add(new IdentityCaseAppliedChange { Kind = "person-provider-id", SourceEmbyId = person.InternalId, TargetEmbyId = person.InternalId, OutcomeId = outcome?.OutcomeId, Provider = provider, OldValue = before, NewValue = after, Summary = (string.IsNullOrWhiteSpace(after) ? "Remove " : string.IsNullOrWhiteSpace(before) ? "Add " : "Replace ") + provider.ToUpperInvariant() + " ID on Emby person " + person.InternalId + "." });
-                }
-                if (personChanged) library.UpdateItem(person, null, ItemUpdateType.MetadataEdit);
-            }
-            foreach (var snapshot in plan.CurrentPeople)
-            {
-                var outcome = desired[snapshot.EmbyId];
-                var person = (Person)library.GetItemById(snapshot.EmbyId); var personChanged = false;
-                foreach (var provider in new[] { ProviderNames.Tmdb, ProviderNames.Tvdb, ProviderNames.Imdb })
-                {
-                    var after = DesiredProviderId(outcome, provider);
-                    if (string.IsNullOrWhiteSpace(after) || Same(ProviderId(person, provider), after)) continue;
                     SetProviderId(person, provider, after); personChanged = true; changed = true;
+                    receipt.Changes.Add(new IdentityCaseAppliedChange { Kind = "person-provider-id", SourceEmbyId = person.InternalId, TargetEmbyId = person.InternalId, OutcomeId = outcome?.OutcomeId, Provider = provider, OldValue = before, NewValue = after, Summary = (string.IsNullOrWhiteSpace(after) ? "Remove " : string.IsNullOrWhiteSpace(before) ? "Add " : "Replace ") + provider.ToUpperInvariant() + " ID on Emby person " + person.InternalId + "." });
                 }
                 if (personChanged) library.UpdateItem(person, null, ItemUpdateType.MetadataEdit);
             }
             return changed;
         }
 
-        private void ApplyMedia(IdentityCasePlan plan, long mediaId, List<IdentityCreditOutcome> changes, IdentityCaseApplyReceipt receipt)
+        private void ApplyMedia(IdentityCasePlan plan, long mediaId, List<IdentityCreditOutcome> changes, Dictionary<long, List<PersonInfo>> liveMediaPeople, IdentityCaseApplyReceipt receipt, Dictionary<long, string> tokens, Dictionary<long, Person> targetPeople)
         {
             var media = library.GetItemById(mediaId) ?? throw new InvalidOperationException("Emby media " + mediaId + " no longer exists.");
-            var people = ReadPeople(mediaId);
-            var tokens = new Dictionary<long, string>();
-            try
+            var people = liveMediaPeople[mediaId].Select(Clone).ToList();
+            foreach (var outcome in changes.Select(x => plan.Outcomes.First(o => o.OutcomeId == x.TargetOutcomeId)).Where(x => receipt.OutcomeEmbyIds.ContainsKey(x.OutcomeId)).Distinct())
             {
-                foreach (var outcome in changes.Select(x => plan.Outcomes.First(o => o.OutcomeId == x.TargetOutcomeId)).Where(x => receipt.OutcomeEmbyIds.ContainsKey(x.OutcomeId)).Distinct())
+                var person = EnsureResolverToken(receipt.OutcomeEmbyIds[outcome.OutcomeId], tokens, targetPeople);
+                foreach (var row in people.Where(x => x.Id == person.InternalId)) SetResolver(row, person, tokens[person.InternalId]);
+            }
+            foreach (var change in changes)
+            {
+                var outcome = plan.Outcomes.First(x => x.OutcomeId == change.TargetOutcomeId);
+                var sources = people.Where(x => x.Id == change.SourcePersonEmbyId && RoleText(x) == change.Role).ToList();
+                foreach (var source in sources)
                 {
-                    var person = (Person)library.GetItemById(receipt.OutcomeEmbyIds[outcome.OutcomeId]);
-                    var token = Guid.NewGuid().ToString("N"); tokens[person.InternalId] = token; person.ProviderIds[ResolverTokenProvider] = token; library.UpdateItem(person, null, ItemUpdateType.MetadataEdit);
-                    foreach (var row in people.Where(x => x.Id == person.InternalId)) SetResolver(row, person, token);
-                }
-                foreach (var change in changes)
-                {
-                    var outcome = plan.Outcomes.First(x => x.OutcomeId == change.TargetOutcomeId);
-                    var sources = people.Where(x => x.Id == change.SourcePersonEmbyId && RoleText(x) == change.Role).ToList();
-                    foreach (var source in sources)
+                    long targetId;
+                    if (receipt.OutcomeEmbyIds.TryGetValue(outcome.OutcomeId, out targetId))
                     {
-                        long targetId;
-                        if (receipt.OutcomeEmbyIds.TryGetValue(outcome.OutcomeId, out targetId))
-                        {
-                            var target = (Person)library.GetItemById(targetId);
-                            if (people.Any(x => x.Id == targetId && x.Type == source.Type && string.Equals(x.Role ?? string.Empty, source.Role ?? string.Empty, StringComparison.Ordinal))) people.Remove(source);
-                            else SetResolver(source, target, tokens[targetId]);
-                        }
-                        else
-                        {
-                            source.Id = 0; source.Guid = Guid.Empty; source.Name = outcome.DisplayName; source.ProviderIds = ProviderDictionary(outcome);
-                        }
+                        var target = targetPeople.TryGetValue(targetId, out var cached) ? cached : EnsureResolverToken(targetId, tokens, targetPeople);
+                        if (people.Any(x => x.Id == targetId && x.Type == source.Type && string.Equals(x.Role ?? string.Empty, source.Role ?? string.Empty, StringComparison.Ordinal))) people.Remove(source);
+                        else SetResolver(source, target, tokens[targetId]);
                     }
-                }
-                library.UpdatePeople(media, people, false);
-                var after = ReadPeople(mediaId);
-                foreach (var outcome in changes.Select(x => plan.Outcomes.First(o => o.OutcomeId == x.TargetOutcomeId)).Where(x => !receipt.OutcomeEmbyIds.ContainsKey(x.OutcomeId)).Distinct())
-                {
-                    var resolved = after.FirstOrDefault(x => outcome.ProviderIds.Where(y => y.Source == "native").All(y => Same(PersonInfoProviderId(x, y.Provider), y.ProviderId)));
-                    if (resolved == null || resolved.Id <= 0) throw new InvalidOperationException("Emby did not create or resolve the provider-identified person for outcome " + outcome.OutcomeId + ".");
-                    receipt.OutcomeEmbyIds[outcome.OutcomeId] = resolved.Id;
-                    receipt.Changes.Add(new IdentityCaseAppliedChange { Kind = "create-person", TargetEmbyId = resolved.Id, OutcomeId = outcome.OutcomeId, Summary = "Create provider-identified Emby person " + resolved.Id + " (" + outcome.DisplayName + ")." });
-                }
-                foreach (var change in changes)
-                {
-                    var targetId = receipt.OutcomeEmbyIds[change.TargetOutcomeId];
-                    receipt.Changes.Add(new IdentityCaseAppliedChange { Kind = "move-credit", SourceEmbyId = change.SourcePersonEmbyId, TargetEmbyId = targetId, OutcomeId = change.TargetOutcomeId, MediaEmbyId = change.MediaEmbyId, Role = change.Role, Summary = "Move '" + change.Role + "' on Emby media " + change.MediaEmbyId + " from person " + change.SourcePersonEmbyId + " to person " + targetId + "." });
+                    else { source.Id = 0; source.Guid = Guid.Empty; source.Name = outcome.DisplayName; source.ProviderIds = ProviderDictionary(outcome); }
                 }
             }
-            finally
+            library.UpdatePeople(media, people, false);
+            var after = ReadPeople(mediaId);
+            liveMediaPeople[mediaId] = after;
+            foreach (var outcome in changes.Select(x => plan.Outcomes.First(o => o.OutcomeId == x.TargetOutcomeId)).Where(x => !receipt.OutcomeEmbyIds.ContainsKey(x.OutcomeId)).Distinct())
             {
-                foreach (var id in tokens.Keys)
-                {
-                    var person = library.GetItemById(id) as Person; if (person == null) continue;
-                    person.ProviderIds.Remove(ResolverTokenProvider); library.UpdateItem(person, null, ItemUpdateType.MetadataEdit);
-                }
+                var resolved = after.FirstOrDefault(x => outcome.ProviderIds.Where(y => y.Source == "native").All(y => Same(PersonInfoProviderId(x, y.Provider), y.ProviderId)));
+                if (resolved == null || resolved.Id <= 0) throw new InvalidOperationException("Emby did not create or resolve the provider-identified person for outcome " + outcome.OutcomeId + ".");
+                receipt.OutcomeEmbyIds[outcome.OutcomeId] = resolved.Id;
+                receipt.Changes.Add(new IdentityCaseAppliedChange { Kind = "create-person", TargetEmbyId = resolved.Id, OutcomeId = outcome.OutcomeId, Summary = "Create provider-identified Emby person " + resolved.Id + " (" + outcome.DisplayName + ")." });
+            }
+            foreach (var change in changes)
+            {
+                var targetId = receipt.OutcomeEmbyIds[change.TargetOutcomeId];
+                receipt.Changes.Add(new IdentityCaseAppliedChange { Kind = "move-credit", SourceEmbyId = change.SourcePersonEmbyId, TargetEmbyId = targetId, OutcomeId = change.TargetOutcomeId, MediaEmbyId = change.MediaEmbyId, Role = change.Role, Summary = "Move '" + change.Role + "' on Emby media " + change.MediaEmbyId + " from person " + change.SourcePersonEmbyId + " to person " + targetId + "." });
+            }
+        }
+
+        private Person EnsureResolverToken(long id, Dictionary<long, string> tokens, Dictionary<long, Person> targetPeople)
+        {
+            if (!targetPeople.TryGetValue(id, out var person)) targetPeople[id] = person = library.GetItemById(id) as Person ?? throw new InvalidOperationException("Target Emby person " + id + " no longer exists.");
+            if (tokens.ContainsKey(id)) return person;
+            var token = Guid.NewGuid().ToString("N"); tokens[id] = token; person.ProviderIds[ResolverTokenProvider] = token; library.UpdateItem(person, null, ItemUpdateType.MetadataEdit);
+            return person;
+        }
+
+        private void RemoveResolverTokens(Dictionary<long, string> tokens, Dictionary<long, Person> targetPeople)
+        {
+            foreach (var id in tokens.Keys.ToList())
+            {
+                var person = targetPeople.TryGetValue(id, out var cached) ? cached : library.GetItemById(id) as Person;
+                if (person == null) continue;
+                person.ProviderIds.Remove(ResolverTokenProvider); library.UpdateItem(person, null, ItemUpdateType.MetadataEdit);
             }
         }
 
@@ -207,7 +222,7 @@ namespace PersonCleaner.V2.UI
             }
         }
 
-        private void Postflight(IdentityCasePlan plan, IdentityCaseApplyReceipt receipt)
+        private void Postflight(IdentityCasePlan plan, IdentityCaseApplyReceipt receipt, IReadOnlyDictionary<long, List<PersonInfo>> liveMediaPeople)
         {
             foreach (var outcome in plan.Outcomes.Where(x => receipt.OutcomeEmbyIds.ContainsKey(x.OutcomeId)))
             {
@@ -215,11 +230,15 @@ namespace PersonCleaner.V2.UI
                 foreach (var provider in new[] { ProviderNames.Tmdb, ProviderNames.Tvdb, ProviderNames.Imdb })
                     if (!Same(ProviderId(person, provider), DesiredProviderId(outcome, provider))) throw new InvalidOperationException("Postflight found an unexpected " + provider.ToUpperInvariant() + " ID on Emby person " + person.InternalId + ".");
             }
-            foreach (var credit in plan.Credits)
+            foreach (var media in plan.Credits.GroupBy(x => x.MediaEmbyId))
             {
-                var target = receipt.OutcomeEmbyIds[credit.TargetOutcomeId]; var people = ReadPeople(credit.MediaEmbyId);
-                if (!people.Any(x => x.Id == target && RoleText(x) == credit.Role) || target != credit.SourcePersonEmbyId && people.Any(x => x.Id == credit.SourcePersonEmbyId && RoleText(x) == credit.Role))
-                    throw new InvalidOperationException("Postflight found an unexpected assignment for '" + credit.Role + "' on Emby media " + credit.MediaEmbyId + ".");
+                var people = liveMediaPeople[media.Key];
+                foreach (var credit in media)
+                {
+                    var target = receipt.OutcomeEmbyIds[credit.TargetOutcomeId];
+                    if (!people.Any(x => x.Id == target && RoleText(x) == credit.Role) || target != credit.SourcePersonEmbyId && people.Any(x => x.Id == credit.SourcePersonEmbyId && RoleText(x) == credit.Role))
+                        throw new InvalidOperationException("Postflight found an unexpected assignment for '" + credit.Role + "' on Emby media " + credit.MediaEmbyId + ".");
+                }
             }
         }
 

@@ -74,9 +74,11 @@ internal static class Program
         Run("holistic provider agreement identifies pending Emby ID alignment", HolisticProviderAgreementShowsPendingEmbyAlignment);
         Run("holistic metadata conflict exposes the birthday warning", HolisticBirthdayConflictWarning);
         Run("holistic plan persists a genuine ambiguous media question", HolisticAmbiguousMediaQuestion);
-        Run("holistic provider conflict offers exact credit exclusion and retains the current Emby person", HolisticUnsupportedProviderCredit);
+        Run("holistic crosswalk conflict does not become a title-credit dispute", HolisticCrosswalkConflictDoesNotDisputeCredit);
+        Run("holistic IMDb conflict retains the current Emby ID and provider-owner matrix", HolisticImdbConflictRetainsCurrentId);
         Run("holistic planner keeps compatible current IDs together beside a conflicting alternative", HolisticCurrentIdentitySubsetRemainsTogether);
         Run("holistic planner remains bounded across 1600 cases", HolisticPlannerRemainsBounded);
+        Run("case planning does not scan 300000 unrelated global Emby people", CasePlanningIgnoresLargeGlobalPopulation);
         Run("large unrelated provider-credit sets remain bounded", LargeProviderCreditSetRemainsBounded);
         Console.WriteLine("Passed " + passed + " entity-resolution tests; failed " + failed + ".");
         return failed == 0 ? 0 : 1;
@@ -1106,7 +1108,7 @@ internal static class Program
         True(plan.Credits.Single().CorrectionRequired);
     }
 
-    private static void HolisticUnsupportedProviderCredit()
+    private static void HolisticCrosswalkConflictDoesNotDisputeCredit()
     {
         var input = new ResolutionInput();
         var tmdb = Person(ProviderNames.Tmdb, "216444", "Michael Rogers", ProviderNames.Imdb, "nm0737089");
@@ -1120,35 +1122,47 @@ internal static class Program
         var plan = IdentityCasePlanner.Build(12, input, new[] { decision }, clusters).Single();
 
         Equal(1, plan.Outcomes.Count);
-        Equal(IdentityTargetKinds.Unresolved, plan.Outcomes.Single().TargetKind);
-        True(plan.Outcomes.Single().SourceEmbyIds.Contains(178672));
+        Equal(IdentityTargetKinds.Existing, plan.Outcomes.Single().TargetKind);
+        Equal(178672L, plan.Outcomes.Single().TargetEmbyId.Value);
         Equal("216444", IdentityCasePlanner.PreferredProviderId(plan.Outcomes.Single(), ProviderNames.Tmdb));
-        True(plan.Summary.Contains("remains on the current Emby person") && !plan.Summary.Contains("0 provider-identified"));
-        Equal(1, plan.Questions.Count);
-        Equal(CorrectionKinds.MediaCredit, plan.Questions.Single().Kind);
-        Equal(2, plan.Questions.Single().Choices.Count);
-        var exclusion = plan.Questions.Single().Choices.Single(x => x.Correction.Provider == ProviderNames.Tvdb).Correction;
-        Equal(CorrectionOperations.Unusable, exclusion.Operation);
-        Equal("6697", exclusion.ProviderMediaId);
-        Equal("271293", exclusion.ProviderPersonId);
+        Equal("271293", IdentityCasePlanner.PreferredProviderId(plan.Outcomes.Single(), ProviderNames.Tvdb));
+        Equal(IdentityPlanStates.Complete, plan.State);
+        Equal(0, plan.Questions.Count);
+        Equal("KEEP", plan.Credits.Single().Disposition);
+        True(!plan.Credits.Single().CorrectionRequired);
+        Equal(2, plan.Credits.Single().Attributions.Count);
+        True(plan.Credits.Single().Rationale.Contains("providers agree", StringComparison.OrdinalIgnoreCase));
+        True(plan.Warning.Contains("TVDB person 271293 claims TMDB person 134708") && plan.Warning.Contains("native TMDB person is 216444"));
+        True(plan.ApplyCaption.Contains("change 1 ID") && !plan.ApplyCaption.Contains("move") && !plan.ApplyCaption.Contains("create"));
+    }
 
-        input.ActiveCorrections.Add(exclusion);
-        ProviderCorrectionOverlay.Apply(input, new CorrectionApplicationTracker(new[] { exclusion }));
-        var engine = new ResolutionEngine();
-        var correctedDecisions = engine.Resolve(input, new ResolutionSettings());
-        var cleanup = correctedDecisions.Single(x => x.Action == "REVIEW_REMOVE_CORRECTED_BINDING");
-        Equal(178672L, cleanup.AnchorEmbyPersonId.Value);
-        True(cleanup.Headline.Contains("tvdb:271293"));
-        var corrected = IdentityCasePlanner.Build(13, input, correctedDecisions, engine.Clusters).Single(x => x.DecisionIds.Contains(cleanup.DecisionId));
+    private static void HolisticImdbConflictRetainsCurrentId()
+    {
+        var input = new ResolutionInput();
+        var tmdb = Person(ProviderNames.Tmdb, "1846245", "Julie Cohen", ProviderNames.Imdb, "nm0169528");
+        var tvdb = Person(ProviderNames.Tvdb, "436876", "Julie Cohen", ProviderNames.Imdb, "nm3792517");
+        tvdb.ExternalIds[ProviderNames.Tmdb] = "196334";
+        input.ProviderPeople.AddRange(new[] { tmdb, tvdb });
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 164032, Name = "Julie Cohen", TmdbId = "1846245", TvdbId = "436876", ImdbId = "nm0169528" });
+        AddPlanMedia(input, 297300, "Once Upon a Time in America", "311", "873", "Actor: Young Peggy", tmdb, tvdb);
+        var decision = new ResolutionDecision { DecisionId = "julie-conflict", Status = "MATCH_WITH_CONFLICT", Action = "CROSS_PROVIDER_IDENTITY_WITH_METADATA_CONFLICT", DisplayName = "Julie Cohen", AnchorEmbyPersonId = 164032, ProviderKeys = "tmdb:1846245,tvdb:436876" };
 
-        Equal(IdentityPlanStates.Complete, corrected.State);
-        var result = corrected.Outcomes.Single();
-        Equal(IdentityTargetKinds.Existing, result.TargetKind);
-        Equal(178672L, result.TargetEmbyId.Value);
-        Equal("216444", IdentityCasePlanner.PreferredProviderId(result, ProviderNames.Tmdb));
-        True(string.IsNullOrWhiteSpace(IdentityCasePlanner.PreferredProviderId(result, ProviderNames.Tvdb)));
-        Equal("KEEP", corrected.Credits.Single().Disposition);
-        True(corrected.ApplyCaption.Contains("change 2 IDs") && !corrected.ApplyCaption.Contains("move") && !corrected.ApplyCaption.Contains("create"));
+        var plan = IdentityCasePlanner.Build(12, input, new[] { decision }, new[] { Cluster("julie", 164032, "tmdb:1846245", "tvdb:436876") }).Single();
+        var outcome = plan.Outcomes.Single();
+        var credit = plan.Credits.Single();
+
+        Equal(IdentityTargetKinds.Existing, outcome.TargetKind);
+        Equal("1846245", IdentityCasePlanner.PreferredProviderId(outcome, ProviderNames.Tmdb));
+        Equal("436876", IdentityCasePlanner.PreferredProviderId(outcome, ProviderNames.Tvdb));
+        Equal("nm0169528", IdentityCasePlanner.PreferredProviderId(outcome, ProviderNames.Imdb));
+        Equal(IdentityPlanStates.Complete, plan.State);
+        Equal(0, plan.Questions.Count);
+        Equal("KEEP", credit.Disposition);
+        Equal(2, credit.Attributions.Count);
+        True(credit.Attributions.Any(x => x.Provider == ProviderNames.Tmdb && x.ProviderPersonId == "1846245" && x.Role == "Actor: Young Peggy"));
+        True(credit.Attributions.Any(x => x.Provider == ProviderNames.Tvdb && x.ProviderPersonId == "436876" && x.Role == "Actor: Young Peggy"));
+        True(plan.Warning.Contains("claims TMDB person 196334") && plan.Warning.Contains("claim different IMDb IDs") && plan.Warning.Contains("nm0169528 is retained"));
+        Equal("No Emby changes required", plan.ApplyCaption);
     }
 
     private static void HolisticCurrentIdentitySubsetRemainsTogether()
@@ -1264,6 +1278,25 @@ internal static class Program
         clock.Stop();
         Equal(peoplePerProvider * peoplePerProvider, engine.Diagnostics.BlockedCrossProviderPairs);
         True(clock.Elapsed < TimeSpan.FromSeconds(10));
+    }
+
+    private static void CasePlanningIgnoresLargeGlobalPopulation()
+    {
+        const int globalCount = 300000;
+        var input = new ResolutionInput();
+        var tmdb = Person(ProviderNames.Tmdb, "42", "Case Local Person", null, null);
+        input.ProviderPeople.Add(tmdb);
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 42, Name = "Case Local Person", TmdbId = "42" });
+        input.GlobalLocalPeople.Capacity = globalCount;
+        for (var i = 0; i < globalCount; i++) input.GlobalLocalPeople.Add(new LocalPerson { EmbyId = 1000000L + i, Name = "Unrelated " + i, TmdbId = "unrelated-" + i });
+        var decision = new ResolutionDecision { DecisionId = "case-local", Status = "MATCH", Action = "CROSS_PROVIDER_IDENTITY", DisplayName = "Case Local Person", AnchorEmbyPersonId = 42, ProviderKeys = "tmdb:42" };
+
+        var clock = Stopwatch.StartNew();
+        var plan = IdentityCasePlanner.Build(1, input, new[] { decision }, new[] { Cluster("case-local", 42, "tmdb:42") }).Single();
+        clock.Stop();
+
+        Equal(IdentityTargetKinds.Existing, plan.Outcomes.Single().TargetKind);
+        True(clock.Elapsed < TimeSpan.FromSeconds(2));
     }
 
     private static ResolutionInput BaseInput(params ProviderPerson[] people) => new ResolutionInput { ProviderPeople = people.ToList() };

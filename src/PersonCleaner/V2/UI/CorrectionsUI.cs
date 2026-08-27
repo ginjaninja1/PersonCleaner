@@ -15,6 +15,7 @@ using PersonCleaner.V2.Storage;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
@@ -457,12 +458,16 @@ namespace PersonCleaner.V2.UI
         public static void Recalculate(ResolutionRepository repository, ILogger logger)
         {
             var run = repository.LatestRun(); if (run == null || !string.Equals(run.Status, "completed", StringComparison.OrdinalIgnoreCase)) return;
+            var total = Stopwatch.StartNew();
             var input = repository.LoadResolutionInput(run.RunId);
+            var loadedAt = total.Elapsed;
             foreach (var application in input.CorrectionApplications.Where(x => x.Triggered))
                 logger.Info("PersonCleaner run {0} provider correction {1} triggered during cached recalculation: matched={2}, changed={3}. {4}", run.RunId, application.CorrectionId, application.MatchedCount, application.ChangedCount, application.Summary);
             var c = Plugin.Instance.Configuration;
             var engine = new ResolutionEngine(); var decisions = engine.Resolve(input, new ResolutionSettings { AutomaticMatchThreshold = c.AutomaticMatchThreshold, HumanReviewThreshold = c.HumanReviewThreshold, MaximumMediaExamples = c.MaximumMediaExamplesPerDecision });
+            var resolvedAt = total.Elapsed;
             repository.SaveDecisions(run.RunId, decisions, engine.PairEvaluations, engine.Clusters, input);
+            logger.Info("PersonCleaner cached provider correction recalculation for run {0}: loaded {1} provider people and {2} targeted global Emby binding owner(s) in {3:F2}s; resolved {4} decisions in {5:F2}s; persisted decisions and case projections in {6:F2}s; total {7:F2}s.", run.RunId, input.ProviderPeople.Count, input.GlobalLocalPeople.Count, loadedAt.TotalSeconds, decisions.Count, (resolvedAt - loadedAt).TotalSeconds, (total.Elapsed - resolvedAt).TotalSeconds, total.Elapsed.TotalSeconds);
         }
     }
 }

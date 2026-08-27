@@ -146,7 +146,7 @@ namespace PersonCleaner.V2.Storage
                 case "CONFLATION": return "Provider attribution disagreement";
                 case "DRIFT": return "Emby provider-ID drift";
                 case "MATCH": return "Provider records agree";
-                case "MATCH_WITH_CONFLICT": return "Identity match; metadata differs";
+                case "MATCH_WITH_CONFLICT": return "Identity aligned; provider metadata warning";
                 case "ORPHAN": return "Provider identity missing";
                 case "REALIGNMENT": return "Credits assigned to the wrong Emby person";
                 case "SPLIT": return "Possible combined identities";

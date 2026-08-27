@@ -60,7 +60,7 @@ Important table groups:
 | Human truth | `manual_bridge`, `provider_correction`, `correction_application` | Confirmed/rejected identity relations, persistent provider-fact overlays and per-run trigger audit |
 | Pair and cluster audit | `resolution_pair`, `resolution_pair_feature`, `resolution_cluster`, `resolution_cluster_member` | Versioned pair features, disposition, component membership and separate identity/anchor confidence |
 | Relationship audit | `resolution_decision`, `resolution_evidence`, `resolution_media`, `resolution_credit_assignment` | Pre-rendered relationship evidence and schema-8 per-decision assignment audit |
-| Final case projection | `resolution_case`, `resolution_case_decision`, `resolution_case_person_snapshot`, `resolution_identity_outcome*`, `resolution_case_credit`, `resolution_question*` | Case-wide current/final identities, final IDs, credit destinations and explicit durable correction choices |
+| Final case projection | `resolution_case`, `resolution_case_decision`, `resolution_case_person_snapshot`, `resolution_identity_outcome*`, `resolution_case_credit`, `resolution_case_credit_attribution`, `resolution_question*` | Case-wide current/final identities, final IDs, credit destinations, provider-native title owners and explicit durable correction choices |
 | Apply audit | `identity_case_apply`, `identity_case_apply_change` | Reviewed plan hash and the exact committed operations; no delete mutation exists |
 
 The schema is created idempotently by `ResolutionRepository`. It uses WAL, normal synchronous mode, foreign keys, a 30-second busy timeout, narrow primary keys, and reverse indexes for external-ID and person-credit lookup.
@@ -113,7 +113,7 @@ Raw payloads and flattened provider tables are immutable inputs from the operato
 
 Each scheduled or cached recalculation writes one `correction_application` row per active correction. A positive `matched_count` means the rule triggered against the run's source facts; `changed_count` records how many effective facts changed. A zero match remains an operator review state and is never interpreted automatically as a provider-side fix. Triggered rules emit an informational log line. Refreshing provider data never overwrites, deletes or silently resolves an operator correction.
 
-The Provider corrections tab presents task-oriented dialogs rather than a generic table editor. Leaving a replacement blank means that the selected provider fact is unusable; entering a replacement substitutes that value only in effective analysis. Disabling is reversible, while removal deletes the rule and its application audit. Saving, enabling, disabling or removing a rule recalculates the latest cached decision set without provider requests.
+The Provider corrections tab presents task-oriented dialogs rather than a generic table editor. Leaving a replacement blank means that the selected provider fact is unusable; entering a replacement substitutes that value only in effective analysis. Disabling is reversible, while removal deletes the rule and its application audit. Saving, enabling, disabling or removing a rule recalculates the latest cached decision set without provider requests. Recalculation loads global Emby people only when they own a native or external ID that the effective provider graph could assign, using partial indexes on each TMDB/TVDB/IMDb binding. It never materializes the full 300,000-person collision table. The final persistence transaction reuses one prepared SQLite statement per SQL shape across all decisions, pair features and case rows.
 
 ## Canonical media and candidate blocking
 
@@ -185,7 +185,17 @@ Construction is proportional to the observed graph, not all people or all possib
 
 The result remains a proposal in plugin shadow storage until explicit operator approval. The commit path validates live preconditions, then applies only the provider-ID and persisted credit moves shown in the dialog. It does not delete people, media, or images.
 
-Before assigning a provider person ID, commit preflight re-reads all live Emby people and rejects an owner outside the evaluated scope. This repeats the calculation-time global-binding veto without turning global people into resolution evidence.
+Before assigning a provider person ID, commit preflight asks Emby's indexed `AnyProviderIdEquals` query only for owners of the IDs being assigned and rejects an owner outside the evaluated scope. This repeats the calculation-time global-binding veto without scanning the library or turning global people into resolution evidence.
+
+## Final identity, attribution and metadata policy
+
+The correction projection separates three questions that have different consequences:
+
+1. **Identity:** do provider person records represent the same human? Role-aware overlap and stable identifiers answer this. A birthday typo or secondary crosswalk conflict may remain a warning without undoing independently strong identity evidence.
+2. **Attribution:** who does each provider say owns this exact role on this exact title? `resolution_case_credit_attribution` persists the provider-native person ID, provider-media ID, name and role beside the Emby assignment. A hard correction question exists only when providers select different final identities, one provider selects competing owners, or the credit cannot be assigned to a final identity.
+3. **Metadata:** which external IDs or biography facts disagree? Native TMDB and TVDB person IDs are authoritative for their own namespaces. A provider's crosswalk into the other provider is fallback evidence, not authority over that provider's native ID. Conflicting IMDb claims and biography differences are retained as warnings unless they are the only available identity evidence.
+
+Accordingly, exact provider agreement on a title/role is displayed as agreement even when one record carries a bad crosswalk. Metadata-only warnings do not enter the repair queue and never manufacture a per-title provider-choice question. Multiple native IDs from one provider inside one proposed final person, or multiple distinct final people demanded by one local relationship, remain hard stops.
 
 ## Confirmed Emby mutation and metadata-folder lifecycle
 
@@ -231,7 +241,9 @@ The evidence page loads at most the configured summary limit (default 100), orde
 - expandable ordered evidence with verdicts and stored raw metrics; and
 - a capped display set of impacted titles, while all impacted rows remain stored.
 
-The **Open case** checkbox opens the holistic master/detail review dialog using the existing dialog replacement/parent-return lifecycle. Identity parents compare current and resulting Emby/provider IDs; media children show keep/move/receive actions. **Correct identity**, **Correct assignment** and **Correct role** Boolean columns open contextual choice dialogs. Saving a choice writes a durable provider correction, recalculates cached evidence and returns the exact rebuilt review parent. The top-level **Apply** `ButtonItem` is present only for a complete plan; it re-reads live Emby, validates the reviewed snapshot/hash, applies only listed ID/credit operations, records an apply receipt, recalculates, rebuilds the exact evidence parent and returns to it.
+The **Open case** checkbox opens the holistic master/detail review dialog using the existing dialog replacement/parent-return lifecycle. Identity parents compare current and resulting Emby/provider IDs. Media rows show the native TMDB owner, native TVDB owner and whether those assertions agree on the final identity and role; keep/move/receive is a separate Emby action. **Correct identity**, **Correct assignment** and **Correct role** Boolean columns open contextual choice dialogs. Saving a choice writes a durable provider correction, recalculates cached evidence and returns the exact rebuilt review parent. The top-level **Apply** `ButtonItem` is present only for a complete plan; it validates the reviewed snapshot/hash, applies only listed ID/credit operations and records an apply receipt. Interactive apply does not rebuild the whole provider graph; the next evidence task refreshes related cases.
+
+Apply reads each affected title's live people once for preflight and once after an actual relationship change. Postflight verifies grouped in-memory results instead of rereading a title once per credit. Temporary resolver tokens are installed once per destination person for the whole case and removed before commit verification.
 
 ## Deliberate non-goals in v2
 

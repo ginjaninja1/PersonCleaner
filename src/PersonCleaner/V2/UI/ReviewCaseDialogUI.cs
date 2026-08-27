@@ -36,9 +36,9 @@ namespace PersonCleaner.V2.UI
         public DxDataGrid Identities { get; set; }
         public ReviewIdentityRow[] Rows { get; set; } = new ReviewIdentityRow[0];
 
-        public static ReviewCaseDialogUI Build(IdentityCasePlan plan, LocalPerson[] people, string serverId, string result, IReadOnlyList<ProviderCorrection> suggestedCorrections = null, int pendingCorrections = 0)
+        public static ReviewCaseDialogUI Build(IdentityCasePlan plan, string serverId, string result, IReadOnlyList<ProviderCorrection> suggestedCorrections = null, int pendingCorrections = 0)
         {
-            var byId = (people ?? new LocalPerson[0]).GroupBy(x => x.EmbyId).ToDictionary(x => x.Key, x => x.First());
+            var byId = (plan.CurrentPeople ?? new List<LocalPerson>()).GroupBy(x => x.EmbyId).ToDictionary(x => x.Key, x => x.First());
             var rows = plan.Outcomes.OrderBy(x => x.SortOrder).ThenBy(x => x.OutcomeId, StringComparer.Ordinal).Select(x => BuildIdentity(plan, x, byId, serverId)).ToArray();
             var master = Grid(new ReviewIdentityRow(), nameof(ReviewIdentityRow.RowId), ReviewCaseCommands.IdentityGrid);
             var detail = Grid(new ReviewMediaRow(), nameof(ReviewMediaRow.RowId), ReviewCaseCommands.MediaGrid);
@@ -124,8 +124,13 @@ namespace PersonCleaner.V2.UI
                 if (c.dataField == nameof(ReviewMediaRow.RowId) || c.dataField == nameof(ReviewMediaRow.AssignmentId)) c.visible = false;
                 if (c.dataField == nameof(ReviewMediaRow.Media)) { c.encodeHtml = false; c.width = 260; }
                 if (c.dataField == nameof(ReviewMediaRow.Role)) c.width = 210;
-                if (c.dataField == nameof(ReviewMediaRow.Tmdb) || c.dataField == nameof(ReviewMediaRow.Tvdb) || c.dataField == nameof(ReviewMediaRow.Imdb)) { c.encodeHtml = false; c.width = 105; }
-                if (c.dataField == nameof(ReviewMediaRow.Action)) c.width = 330;
+                if (c.dataField == nameof(ReviewMediaRow.Tmdb)) { c.caption = "TMDB title"; c.encodeHtml = false; c.width = 95; }
+                if (c.dataField == nameof(ReviewMediaRow.Tvdb)) { c.caption = "TVDB title"; c.encodeHtml = false; c.width = 95; }
+                if (c.dataField == nameof(ReviewMediaRow.Imdb)) { c.caption = "IMDb title"; c.encodeHtml = false; c.width = 105; }
+                if (c.dataField == nameof(ReviewMediaRow.TmdbOwner)) { c.caption = "TMDB credit owner"; c.encodeHtml = false; c.width = 230; }
+                if (c.dataField == nameof(ReviewMediaRow.TvdbOwner)) { c.caption = "TVDB credit owner"; c.encodeHtml = false; c.width = 230; }
+                if (c.dataField == nameof(ReviewMediaRow.Attribution)) { c.caption = "Provider attribution"; c.width = 180; }
+                if (c.dataField == nameof(ReviewMediaRow.Action)) c.width = 280;
                 if (c.dataField == nameof(ReviewMediaRow.CorrectAssignment)) { c.caption = "Correct attribution"; c.allowEditing = true; c.width = 125; }
                 if (c.dataField == nameof(ReviewMediaRow.CorrectRole)) { c.caption = "Override role"; c.allowEditing = true; c.width = 95; }
             }
@@ -173,8 +178,29 @@ namespace PersonCleaner.V2.UI
             {
                 RowId = credit.AssignmentId + (received ? ":receive:" : ":source:") + owner.OutcomeId, AssignmentId = credit.AssignmentId,
                 Media = CaseLinks.Emby(credit.MediaEmbyId, serverId, credit.MediaName), Role = credit.Role,
-                Tmdb = CaseLinks.Media(ProviderNames.Tmdb, credit.MediaType, credit.TmdbId), Tvdb = CaseLinks.Media(ProviderNames.Tvdb, credit.MediaType, credit.TvdbId, credit.TvdbSlug), Imdb = CaseLinks.Media(ProviderNames.Imdb, credit.MediaType, credit.ImdbId), Action = action
+                Tmdb = CaseLinks.Media(ProviderNames.Tmdb, credit.MediaType, credit.TmdbId), Tvdb = CaseLinks.Media(ProviderNames.Tvdb, credit.MediaType, credit.TvdbId, credit.TvdbSlug), Imdb = CaseLinks.Media(ProviderNames.Imdb, credit.MediaType, credit.ImdbId),
+                TmdbOwner = ProviderOwners(credit, ProviderNames.Tmdb), TvdbOwner = ProviderOwners(credit, ProviderNames.Tvdb), Attribution = AttributionVerdict(credit), Action = action
             };
+        }
+
+        private static string ProviderOwners(IdentityCreditOutcome credit, string provider)
+        {
+            var rows = credit.Attributions.Where(x => x.Provider == provider).OrderBy(x => x.ProviderPersonId, StringComparer.Ordinal).ThenBy(x => x.Role, StringComparer.Ordinal).ToList();
+            if (rows.Count == 0) return "—";
+            return string.Join("<br/>", rows.Select(x => (string.IsNullOrWhiteSpace(x.PersonName) ? string.Empty : WebUtility.HtmlEncode(x.PersonName) + " ") + CaseLinks.Person(provider, x.ProviderPersonId) + " — " + WebUtility.HtmlEncode(x.Role)));
+        }
+
+        private static string AttributionVerdict(IdentityCreditOutcome credit)
+        {
+            var rows = credit.Attributions ?? new List<IdentityCreditAttribution>();
+            if (rows.Count == 0) return "No provider assertion — current assignment unopposed";
+            var providerGroups = rows.GroupBy(x => x.Provider, StringComparer.Ordinal).ToList();
+            if (providerGroups.Any(x => x.Select(y => y.OutcomeId).Distinct(StringComparer.Ordinal).Count() > 1)) return "Competing owners within one provider";
+            var outcomes = rows.Select(x => x.OutcomeId).Distinct(StringComparer.Ordinal).Count();
+            if (outcomes > 1) return "Providers disagree on the credit owner";
+            if (providerGroups.Count > 1)
+                return rows.All(x => string.Equals(x.Role, credit.Role, StringComparison.Ordinal)) ? "Providers agree — exact owner and role" : "Providers agree — owner; role wording is compatible";
+            return "One-provider support — opposite provider is neutral";
         }
 
         private static string Id(IdentityOutcome outcome, string provider) => IdentityCasePlanner.PreferredProviderId(outcome, provider);
@@ -223,6 +249,9 @@ namespace PersonCleaner.V2.UI
         public string Tmdb { get; set; }
         public string Tvdb { get; set; }
         public string Imdb { get; set; }
+        public string TmdbOwner { get; set; }
+        public string TvdbOwner { get; set; }
+        public string Attribution { get; set; }
         public string Action { get; set; }
         public bool CorrectAssignment { get; set; }
         public bool CorrectRole { get; set; }
@@ -338,16 +367,15 @@ namespace PersonCleaner.V2.UI
                     suggestedCorrections = SuggestedCorrections(repository, plan);
                     var pendingCorrections = repository.PendingCorrectionSelections(caseId);
                     string serverId = null; try { serverId = host.GetPublicSystemInfo(CancellationToken.None).GetAwaiter().GetResult()?.Id; } catch { }
-                    ContentData = ReviewCaseDialogUI.Build(plan, repository.LocalPeople(), serverId, result, suggestedCorrections, pendingCorrections);
+                    ContentData = ReviewCaseDialogUI.Build(plan, serverId, result, suggestedCorrections, pendingCorrections);
                 }
             }
             catch (Exception ex)
             {
                 logger.ErrorException("Unable to rebuild the PersonCleaner identity case dialog", ex);
                 plan = plan ?? new IdentityCasePlan { CaseId = caseId, DisplayName = "Selected identity case", CaseType = "Unavailable", Summary = "The case is no longer available.", State = IdentityPlanStates.Blocked };
-                var people = plan.CurrentPeople.ToArray();
                 string serverId = null; try { serverId = host.GetPublicSystemInfo(CancellationToken.None).GetAwaiter().GetResult()?.Id; } catch { }
-                ContentData = ReviewCaseDialogUI.Build(plan, people, serverId, result ?? "The case could not be reloaded: " + ex.Message);
+                ContentData = ReviewCaseDialogUI.Build(plan, serverId, result ?? "The case could not be reloaded: " + ex.Message);
             }
         }
 

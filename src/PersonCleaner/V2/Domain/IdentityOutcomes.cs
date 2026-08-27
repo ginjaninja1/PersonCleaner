@@ -76,6 +76,18 @@ namespace PersonCleaner.V2.Domain
         public string Disposition { get; set; }
         public string Rationale { get; set; }
         public bool CorrectionRequired { get; set; }
+        public List<IdentityCreditAttribution> Attributions { get; set; } = new List<IdentityCreditAttribution>();
+    }
+
+    public sealed class IdentityCreditAttribution
+    {
+        public string Provider { get; set; }
+        public string ProviderMediaId { get; set; }
+        public string ProviderPersonId { get; set; }
+        public string PersonName { get; set; }
+        public string Role { get; set; }
+        public string RoleCategory { get; set; }
+        public string OutcomeId { get; set; }
     }
 
     public sealed class IdentityQuestion
@@ -215,7 +227,7 @@ namespace PersonCleaner.V2.Domain
                 if (targetOverride != null && targetOverride.ReplacementValue.StartsWith("existing:", StringComparison.Ordinal))
                 {
                     long id;
-                    if (long.TryParse(targetOverride.ReplacementValue.Substring(9), NumberStyles.Integer, CultureInfo.InvariantCulture, out id)) selected = input.GlobalLocalPeople.Concat(input.LocalPeople).FirstOrDefault(x => x.EmbyId == id);
+                    if (long.TryParse(targetOverride.ReplacementValue.Substring(9), NumberStyles.Integer, CultureInfo.InvariantCulture, out id)) selected = planner.PersonById(id);
                 }
                 if (targetOverride != null && targetOverride.ReplacementValue == "new") selected = null;
                 if (selected != null) usedTargets.Add(selected.EmbyId);
@@ -227,9 +239,11 @@ namespace PersonCleaner.V2.Domain
             for (var index = 0; index < provisional.Count; index++)
             {
                 var builder = provisional[index];
-                var ids = FinalProviderIds(builder.Keys, providerPeople);
+                var projection = FinalProviderIds(builder.Keys, providerPeople, builder.Selected);
+                var ids = projection.ProviderIds;
+                foreach (var warning in projection.Warnings) AppendWarning(plan, warning);
                 var targetKind = builder.Selected != null ? IdentityTargetKinds.Existing : ids.Any(x => x.Source == "native") ? IdentityTargetKinds.New : IdentityTargetKinds.Unresolved;
-                if (ids.GroupBy(x => x.Provider, StringComparer.OrdinalIgnoreCase).Any(x => x.Select(y => y.ProviderId).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1)) targetKind = IdentityTargetKinds.Unresolved;
+                if (HasNativeProviderIdConflict(ids)) targetKind = IdentityTargetKinds.Unresolved;
                 // Existing-person Apply changes provider IDs and credit ownership, not names.
                 // Keep the result name honest about what Emby will actually retain.
                 var identityName = builder.Selected?.Name ?? builder.Keys.Select(x => providerPeople.ContainsKey(x) ? providerPeople[x].Name : null).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)) ?? displayName;
@@ -260,7 +274,7 @@ namespace PersonCleaner.V2.Domain
             PruneUnassignedNewOutcomes(plan);
             var blocked = decisions.Any(x => x.Action == ResolutionActions.IncompleteScope);
             plan.State = blocked ? IdentityPlanStates.Blocked : plan.Questions.Count > 0 || plan.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.Unresolved) || plan.Credits.Any(x => x.CorrectionRequired) ? IdentityPlanStates.CorrectionRequired : IdentityPlanStates.Complete;
-            CompleteSummaries(plan, input);
+            CompleteSummaries(plan, planner);
             plan.PlanHash = StableHash(Canonical(plan));
             return plan;
         }
@@ -285,45 +299,30 @@ namespace PersonCleaner.V2.Domain
                 if (correction != null) target = ResolveOverrideTarget(plan, correction.ReplacementValue);
                 if (target == null && matches.Count == 1) target = matches[0];
                 if (target == null && matches.Count == 0) target = plan.Outcomes.FirstOrDefault(x => x.TargetEmbyId == credit.PersonEmbyId) ?? plan.Outcomes.FirstOrDefault(x => x.SourceEmbyIds.Contains(credit.PersonEmbyId));
-                var unresolvedProviderDisagreement = target != null && target.TargetKind == IdentityTargetKinds.Unresolved && matches.Count == 1 && HasProviderIdConflict(target);
                 var repairableProviderDisagreement = target != null && matches.Count > 1 && ProviderAttributionCorrection(plan, credit, media, target, observed, outcomeByProviderKey) != null;
-                var ambiguous = target == null || unresolvedProviderDisagreement || matches.Count > 1 && (correction == null || repairableProviderDisagreement);
+                var ambiguous = target == null || matches.Count > 1 && (correction == null || repairableProviderDisagreement);
                 if (target == null) target = plan.Outcomes.FirstOrDefault(x => x.SourceEmbyIds.Contains(credit.PersonEmbyId)) ?? plan.Outcomes.First();
                 var assignmentId = "credit-" + StableHash(credit.PersonEmbyId + "|" + credit.MediaEmbyId + "|" + credit.Role);
-                var disposition = target.TargetKind == IdentityTargetKinds.Existing && target.TargetEmbyId == credit.PersonEmbyId ? "KEEP" : "MOVE";
+                var disposition = target.TargetKind == IdentityTargetKinds.Unresolved && target.SourceEmbyIds.Contains(credit.PersonEmbyId) || target.TargetKind == IdentityTargetKinds.Existing && target.TargetEmbyId == credit.PersonEmbyId ? "KEEP" : "MOVE";
+                var attributions = observed.Where(x => CompatibleRole(roleCategory, x.RoleCategory) && outcomeByProviderKey.ContainsKey(x.PersonKey))
+                    .GroupBy(x => x.Provider + "|" + x.ProviderMediaId + "|" + x.ProviderPersonId + "|" + x.Role, StringComparer.Ordinal).Select(x => x.First())
+                    .OrderBy(x => x.Provider, StringComparer.Ordinal).ThenBy(x => x.ProviderPersonId, StringComparer.Ordinal).ThenBy(x => x.Role, StringComparer.Ordinal)
+                    .Select(x => new IdentityCreditAttribution
+                    {
+                        Provider = x.Provider, ProviderMediaId = x.ProviderMediaId, ProviderPersonId = x.ProviderPersonId,
+                        PersonName = x.PersonName, Role = x.Role, RoleCategory = x.RoleCategory,
+                        OutcomeId = outcomeByProviderKey[x.PersonKey].OutcomeId
+                    }).ToList();
                 plan.Credits.Add(new IdentityCreditOutcome
                 {
                     AssignmentId = assignmentId, SourcePersonEmbyId = credit.PersonEmbyId, TargetOutcomeId = target.OutcomeId, MediaEmbyId = media.EmbyId,
                     MediaType = media.MediaType, MediaName = media.Name, Role = credit.Role, TmdbId = media.TmdbId, TvdbId = media.TvdbId, TvdbSlug = media.TvdbSlug, ImdbId = media.ImdbId,
                     Disposition = disposition, CorrectionRequired = ambiguous,
-                    Rationale = unresolvedProviderDisagreement ? "The providers agree on the local title and role but disagree about the person's identity; correct the title-credit assertion before changing Emby." : repairableProviderDisagreement ? "A local assignment exists, but a conflicting provider title attribution still requires correction." : ambiguous ? "More than one materially different identity can receive this credit." : matches.Count == 1 ? "Provider title credits identify the resulting person." : "No provider counter-attribution changes the current Emby assignment."
+                    Rationale = repairableProviderDisagreement ? "A local assignment exists, but a conflicting provider title attribution still requires correction." : ambiguous ? "More than one materially different identity can receive this credit." : AttributionRationale(attributions, target) ,
+                    Attributions = attributions
                 });
-                if (unresolvedProviderDisagreement) BuildProviderDisagreementQuestion(plan, credit, media, assignmentId, target, observed, outcomeByProviderKey);
-                else if (ambiguous) BuildCreditQuestion(plan, input, credit, media, assignmentId, observed, outcomeByProviderKey);
+                if (ambiguous) BuildCreditQuestion(plan, input, credit, media, assignmentId, observed, outcomeByProviderKey);
             }
-        }
-
-        private static void BuildProviderDisagreementQuestion(IdentityCasePlan plan, LocalCredit credit, MediaSeed media, string assignmentId, IdentityOutcome outcome, IEnumerable<ObservedProviderCredit> observed, IReadOnlyDictionary<string, IdentityOutcome> outcomeByProviderKey)
-        {
-            var roleCategory = RoleCategory(credit.Role);
-            var assertions = observed.Where(x => CompatibleRole(roleCategory, x.RoleCategory) && outcomeByProviderKey.TryGetValue(x.PersonKey, out var owner) && owner.OutcomeId == outcome.OutcomeId)
-                .GroupBy(x => x.Provider + "|" + x.MediaType + "|" + x.ProviderMediaId + "|" + x.ProviderPersonId + "|" + x.Role, StringComparer.Ordinal).Select(x => x.First()).ToList();
-            if (assertions.Select(x => x.Provider).Distinct(StringComparer.Ordinal).Count() < 2) return;
-            var q = new IdentityQuestion
-            {
-                QuestionId = "question-" + assignmentId,
-                Kind = CorrectionKinds.MediaCredit,
-                AssignmentId = assignmentId,
-                Narrative = "Providers disagree about who appears in " + media.Name + ". Which provider title-credit assertion is wrong? Choose 'does not belong' when that provider has no record for the correct person."
-            };
-            foreach (var assertion in assertions.OrderBy(x => x.Provider, StringComparer.Ordinal).ThenBy(x => x.ProviderPersonId, StringComparer.Ordinal))
-            {
-                var correction = UnusableAttribution(plan, credit, media, assertion.Provider, assertion.MediaType, assertion.ProviderMediaId, assertion.ProviderPersonId, assertion.Role);
-                var caption = assertion.Provider.ToUpperInvariant() + " credit does not belong — person " + assertion.ProviderPersonId + " is not " + assertion.Role + " on " + media.Name;
-                var effect = "Ignore only this exact " + assertion.Provider.ToUpperInvariant() + " title-credit assertion and recalculate. The Emby credit stays on Emby person " + credit.PersonEmbyId + "; if its " + assertion.Provider.ToUpperInvariant() + " person ID then has no support, removal will be shown as a separate Emby change.";
-                q.Choices.Add(Choice(q.QuestionId, assertion.Provider + ":" + assertion.ProviderMediaId + ":" + assertion.ProviderPersonId + ":unusable", caption, effect, correction));
-            }
-            plan.Questions.Add(q);
         }
 
         private static void BuildCreditQuestion(IdentityCasePlan plan, ResolutionInput input, LocalCredit credit, MediaSeed media, string assignmentId, List<ObservedProviderCredit> observed, IReadOnlyDictionary<string, IdentityOutcome> outcomeByProviderKey)
@@ -447,11 +446,11 @@ namespace PersonCleaner.V2.Domain
             }
         }
 
-        private static void CompleteSummaries(IdentityCasePlan plan, ResolutionInput input)
+        private static void CompleteSummaries(IdentityCasePlan plan, PlannerIndex planner)
         {
             var creates = plan.Outcomes.Count(x => x.TargetKind == IdentityTargetKinds.New);
             var moves = plan.Credits.Count(x => x.Disposition == "MOVE" && !x.CorrectionRequired);
-            var changes = ProviderIdChangeCount(plan, input);
+            var changes = ProviderIdChangeCount(plan, planner);
             var retained = plan.Outcomes.Count(x => x.TargetKind == IdentityTargetKinds.Existing && plan.Credits.Any(c => c.TargetOutcomeId == x.OutcomeId));
             var resultParts = new List<string>();
             var mutationParts = new List<string>();
@@ -490,12 +489,12 @@ namespace PersonCleaner.V2.Domain
             plan.Outcomes.RemoveAll(x => x.TargetKind == IdentityTargetKinds.New && !plan.Credits.Any(c => c.TargetOutcomeId == x.OutcomeId) && !referenced.Contains(x.OutcomeId));
         }
 
-        private static int ProviderIdChangeCount(IdentityCasePlan plan, ResolutionInput input)
+        private static int ProviderIdChangeCount(IdentityCasePlan plan, PlannerIndex planner)
         {
             var count = 0;
             foreach (var outcome in plan.Outcomes.Where(x => x.TargetEmbyId.HasValue))
             {
-                var current = input.LocalPeople.FirstOrDefault(x => x.EmbyId == outcome.TargetEmbyId.Value) ?? input.GlobalLocalPeople.FirstOrDefault(x => x.EmbyId == outcome.TargetEmbyId.Value);
+                var current = planner.PersonById(outcome.TargetEmbyId.Value);
                 if (current == null) continue;
                 foreach (var provider in new[] { ProviderNames.Tmdb, ProviderNames.Tvdb, ProviderNames.Imdb })
                 {
@@ -535,33 +534,77 @@ namespace PersonCleaner.V2.Domain
 
         public static string PreferredProviderId(IdentityOutcome outcome, string provider) => outcome?.ProviderIds.Where(x => x.Provider == provider).OrderBy(x => x.Source == "native" ? 0 : 1).Select(x => x.ProviderId).FirstOrDefault();
 
-        private static bool HasProviderIdConflict(IdentityOutcome outcome) => outcome.ProviderIds.GroupBy(x => x.Provider, StringComparer.OrdinalIgnoreCase).Any(x => x.Select(y => y.ProviderId).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1);
+        private static bool HasNativeProviderIdConflict(IEnumerable<IdentityProviderId> ids) => ids.Where(x => x.Source == "native").GroupBy(x => x.Provider, StringComparer.OrdinalIgnoreCase).Any(x => x.Select(y => y.ProviderId).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1);
 
         private static bool CanRemainOneIdentity(List<ResolutionClusterSnapshot> clusters, ResolutionInput input, PlannerIndex index)
         {
             var keys = new HashSet<string>(clusters.SelectMany(x => x.ProviderKeys), StringComparer.Ordinal);
             var people = keys.Select(x => index.ProviderPeople.TryGetValue(x, out var person) ? person : null).Where(x => x != null).ToList();
             if (people.GroupBy(x => x.Provider).Any(x => x.Count() > 1)) return false;
-            var stable = people.SelectMany(x => x.ExternalIds.Where(y => y.Key == ProviderNames.Imdb || y.Key == ProviderNames.Wikidata).Select(y => y.Key + ":" + y.Value)).ToList();
+            var stable = people.SelectMany(x => x.ExternalIds.Where(y => string.Equals(y.Key, ProviderNames.Imdb, StringComparison.OrdinalIgnoreCase) || string.Equals(y.Key, ProviderNames.Wikidata, StringComparison.OrdinalIgnoreCase)).Select(y => y.Key.ToLowerInvariant() + ":" + y.Value)).ToList();
             if (stable.GroupBy(x => x.Substring(0, x.IndexOf(':'))).Any(x => x.Select(y => y.Substring(y.IndexOf(':') + 1)).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1)) return false;
             var birthdays = people.Select(x => x.Birthday).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.Ordinal).ToList();
             if (birthdays.Count > 1) return false;
             return !input.Bridges.Any(x => x.IsRejected && keys.Contains(x.ProviderA + ":" + x.ProviderIdA) && keys.Contains(x.ProviderB + ":" + x.ProviderIdB));
         }
 
-        private static List<IdentityProviderId> FinalProviderIds(IEnumerable<string> keys, IDictionary<string, ProviderPerson> people)
+        private static ProviderIdProjection FinalProviderIds(IEnumerable<string> keys, IDictionary<string, ProviderPerson> people, LocalPerson selected)
         {
             var result = new List<IdentityProviderId>();
-            foreach (var key in keys.OrderBy(x => x, StringComparer.Ordinal))
+            var keyList = keys.OrderBy(x => x, StringComparer.Ordinal).ToList();
+            foreach (var key in keyList)
             {
                 var split = key.Split(new[] { ':' }, 2);
                 if (split.Length == 2 && (split[0] == ProviderNames.Tmdb || split[0] == ProviderNames.Tvdb)) result.Add(new IdentityProviderId { Provider = split[0], ProviderId = split[1], Source = "native" });
-                ProviderPerson person;
-                if (!people.TryGetValue(key, out person)) continue;
-                foreach (var external in person.ExternalIds.Where(x => x.Key == ProviderNames.Tmdb || x.Key == ProviderNames.Tvdb || x.Key == ProviderNames.Imdb))
-                    result.Add(new IdentityProviderId { Provider = external.Key, ProviderId = external.Value, Source = "external" });
             }
-            return result.GroupBy(x => x.Provider + ":" + x.ProviderId, StringComparer.OrdinalIgnoreCase).Select(x => x.OrderBy(y => y.Source == "native" ? 0 : 1).First()).OrderBy(x => x.Provider, StringComparer.Ordinal).ThenBy(x => x.ProviderId, StringComparer.Ordinal).ToList();
+
+            var warnings = new List<string>();
+            var providerPeople = keyList.Select(x => people.TryGetValue(x, out var person) ? person : null).Where(x => x != null).ToList();
+            var nativeByProvider = result.Where(x => x.Source == "native").GroupBy(x => x.Provider, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(x => x.Key, x => x.Select(y => y.ProviderId).Distinct(StringComparer.OrdinalIgnoreCase).ToList(), StringComparer.OrdinalIgnoreCase);
+            var crosswalkClaims = providerPeople.SelectMany(person => person.ExternalIds.Where(x => string.Equals(x.Key, ProviderNames.Tmdb, StringComparison.OrdinalIgnoreCase) || string.Equals(x.Key, ProviderNames.Tvdb, StringComparison.OrdinalIgnoreCase))
+                .Select(x => new { Claimant = person, Provider = x.Key.ToLowerInvariant(), Id = x.Value })).Where(x => !string.IsNullOrWhiteSpace(x.Id)).ToList();
+            foreach (var group in crosswalkClaims.GroupBy(x => x.Provider, StringComparer.OrdinalIgnoreCase))
+            {
+                List<string> native;
+                var claims = group.Select(x => x.Id).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x => x, StringComparer.Ordinal).ToList();
+                if (!nativeByProvider.TryGetValue(group.Key, out native) || native.Count == 0)
+                {
+                    if (claims.Count == 1) result.Add(new IdentityProviderId { Provider = group.Key, ProviderId = claims[0], Source = "external" });
+                    else if (claims.Count > 1) warnings.Add("Provider crosswalk warning: the role-aligned records claim multiple " + group.Key.ToUpperInvariant() + " person IDs (" + string.Join(", ", claims) + "). No " + group.Key.ToUpperInvariant() + " ID will be inferred from the disagreement. Credit ownership remains unchanged.");
+                    continue;
+                }
+                if (native.Count != 1) continue;
+                foreach (var crosswalk in group.Where(x => !string.Equals(native[0], x.Id, StringComparison.OrdinalIgnoreCase)))
+                    warnings.Add("Provider crosswalk warning: " + crosswalk.Claimant.Provider.ToUpperInvariant() + " person " + crosswalk.Claimant.ProviderId + " claims " + group.Key.ToUpperInvariant() + " person " + crosswalk.Id + ", while the role-aligned native " + group.Key.ToUpperInvariant() + " person is " + native[0] + ". Credit ownership remains unchanged.");
+            }
+
+            var imdbClaims = providerPeople.Where(x => x.ExternalIds.ContainsKey(ProviderNames.Imdb)).Select(x => new { x.Provider, x.ProviderId, Id = x.ExternalIds[ProviderNames.Imdb] })
+                .Where(x => !string.IsNullOrWhiteSpace(x.Id)).ToList();
+            var imdbIds = imdbClaims.Select(x => x.Id).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x => x, StringComparer.Ordinal).ToList();
+            if (imdbIds.Count == 1) result.Add(new IdentityProviderId { Provider = ProviderNames.Imdb, ProviderId = imdbIds[0], Source = "external" });
+            else if (imdbIds.Count > 1)
+            {
+                var claims = string.Join("; ", imdbClaims.OrderBy(x => x.Provider, StringComparer.Ordinal).ThenBy(x => x.ProviderId, StringComparer.Ordinal).Select(x => x.Provider.ToUpperInvariant() + " " + x.ProviderId + " → " + x.Id));
+                var retained = selected == null || string.IsNullOrWhiteSpace(selected.ImdbId) ? "No IMDb ID will be inferred from the disagreement." : "The current Emby IMDb ID " + selected.ImdbId + " is retained.";
+                warnings.Add("Provider IMDb warning: the role-aligned person records claim different IMDb IDs (" + claims + "). " + retained + " Credit ownership remains unchanged.");
+            }
+
+            return new ProviderIdProjection
+            {
+                ProviderIds = result.GroupBy(x => x.Provider + ":" + x.ProviderId, StringComparer.OrdinalIgnoreCase).Select(x => x.OrderBy(y => y.Source == "native" ? 0 : 1).First()).OrderBy(x => x.Provider, StringComparer.Ordinal).ThenBy(x => x.ProviderId, StringComparer.Ordinal).ToList(),
+                Warnings = warnings.Distinct(StringComparer.Ordinal).ToList()
+            };
+        }
+
+        private static string AttributionRationale(IReadOnlyCollection<IdentityCreditAttribution> attributions, IdentityOutcome target)
+        {
+            if (attributions == null || attributions.Count == 0) return "No provider counter-attribution changes the current Emby assignment.";
+            var providers = attributions.Select(x => x.Provider).Distinct(StringComparer.Ordinal).Count();
+            var outcomes = attributions.Select(x => x.OutcomeId).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.Ordinal).ToList();
+            if (providers > 1 && outcomes.Count == 1 && target != null && outcomes[0] == target.OutcomeId) return "The providers agree on the title-credit owner; profile and crosswalk metadata are assessed separately.";
+            if (outcomes.Count == 1 && target != null && outcomes[0] == target.OutcomeId) return "One provider title credit identifies the resulting person; missing opposite-provider support is neutral.";
+            return "Provider title credits identify the resulting person.";
         }
 
         private static ProviderCorrection FindIdentityOverride(IEnumerable<ProviderCorrection> corrections, HashSet<string> keys) => (corrections ?? Enumerable.Empty<ProviderCorrection>()).LastOrDefault(x => x.Enabled && x.Kind == CorrectionKinds.IdentityTarget && keys.Contains(x.Provider + ":" + x.ProviderPersonId));
@@ -598,21 +641,24 @@ namespace PersonCleaner.V2.Domain
         {
             var values = decisions.Select(x => x.Status).Distinct(StringComparer.Ordinal).ToList();
             if (values.Count > 1) return "Mixed identity issues";
-            switch (values.FirstOrDefault()) { case "SPLIT": return "Possible combined identities"; case "CONFLATION": return "Provider attribution disagreement"; case "REALIGNMENT": return "Credits assigned to the wrong Emby person"; case "DRIFT": return "Emby provider-ID drift"; case "ORPHAN": return "Provider identity missing"; case "MATCH_WITH_CONFLICT": return "Identity match; metadata differs"; case "MATCH": return "Provider records agree"; default: return values.FirstOrDefault() ?? "Identity case"; }
+            switch (values.FirstOrDefault()) { case "SPLIT": return "Possible combined identities"; case "CONFLATION": return "Provider attribution disagreement"; case "REALIGNMENT": return "Credits assigned to the wrong Emby person"; case "DRIFT": return "Emby provider-ID drift"; case "ORPHAN": return "Provider identity missing"; case "MATCH_WITH_CONFLICT": return "Identity aligned; provider metadata warning"; case "MATCH": return "Provider records agree"; default: return values.FirstOrDefault() ?? "Identity case"; }
         }
         private static void AppendWarning(IdentityCasePlan plan, string warning)
         {
             if (string.IsNullOrWhiteSpace(warning)) return;
             plan.Warning = string.IsNullOrWhiteSpace(plan.Warning) ? warning : plan.Warning + Environment.NewLine + warning;
         }
-        private static string Canonical(IdentityCasePlan plan) => plan.CaseId + "|" + plan.State + "|" + string.Join(";", plan.Outcomes.OrderBy(x => x.OutcomeId).Select(x => x.OutcomeId + ":" + x.TargetKind + ":" + x.TargetEmbyId + ":" + string.Join(",", x.ProviderIds.Select(y => y.Provider + "=" + y.ProviderId)))) + "|" + string.Join(";", plan.Credits.OrderBy(x => x.AssignmentId).Select(x => x.AssignmentId + ":" + x.TargetOutcomeId + ":" + x.CorrectionRequired));
+        private static string Canonical(IdentityCasePlan plan) => plan.CaseId + "|" + plan.State + "|" + string.Join(";", plan.Outcomes.OrderBy(x => x.OutcomeId).Select(x => x.OutcomeId + ":" + x.TargetKind + ":" + x.TargetEmbyId + ":" + string.Join(",", x.ProviderIds.Select(y => y.Provider + "=" + y.ProviderId)))) + "|" + string.Join(";", plan.Credits.OrderBy(x => x.AssignmentId).Select(x => x.AssignmentId + ":" + x.TargetOutcomeId + ":" + x.CorrectionRequired + ":" + string.Join(",", x.Attributions.OrderBy(y => y.Provider, StringComparer.Ordinal).ThenBy(y => y.ProviderPersonId, StringComparer.Ordinal).Select(y => y.Provider + "=" + y.ProviderPersonId + "@" + y.OutcomeId + "#" + y.Role))));
         private static string StableHash(string value)
         {
             using (var sha = SHA256.Create()) return string.Concat(sha.ComputeHash(Encoding.UTF8.GetBytes(value ?? string.Empty)).Take(8).Select(x => x.ToString("x2", CultureInfo.InvariantCulture)));
         }
         private sealed class OutcomeBuilder { public List<ResolutionClusterSnapshot> Clusters { get; set; } public HashSet<string> Keys { get; set; } public LocalPerson Selected { get; set; } public ProviderCorrection Override { get; set; } }
+        private sealed class ProviderIdProjection { public List<IdentityProviderId> ProviderIds { get; set; } = new List<IdentityProviderId>(); public List<string> Warnings { get; set; } = new List<string>(); }
         private sealed class PlannerIndex
         {
+            private readonly IEnumerable<LocalPerson> globalPeople;
+            private Dictionary<long, LocalPerson> globalPeopleById;
             public Dictionary<long, LocalPerson> LocalPeopleById { get; }
             public Dictionary<string, List<LocalPerson>> LocalPeopleByProviderKey { get; } = new Dictionary<string, List<LocalPerson>>(StringComparer.Ordinal);
             public Dictionary<long, int> LocalCreditCounts { get; }
@@ -622,6 +668,7 @@ namespace PersonCleaner.V2.Domain
             public Dictionary<string, List<ObservedProviderCredit>> ProviderCreditsByMedia { get; }
             public PlannerIndex(ResolutionInput input)
             {
+                globalPeople = input.GlobalLocalPeople ?? Enumerable.Empty<LocalPerson>();
                 LocalPeopleById = input.LocalPeople.GroupBy(x => x.EmbyId).ToDictionary(x => x.Key, x => x.First());
                 foreach (var person in LocalPeopleById.Values)
                 foreach (var key in CurrentKeys(person))
@@ -634,6 +681,14 @@ namespace PersonCleaner.V2.Domain
                 MediaById = input.Media.GroupBy(x => x.EmbyId).ToDictionary(x => x.Key, x => x.First());
                 ProviderPeople = input.ProviderPeople.GroupBy(x => x.Key, StringComparer.Ordinal).ToDictionary(x => x.Key, x => x.First(), StringComparer.Ordinal);
                 ProviderCreditsByMedia = input.ProviderCredits.Where(x => !string.IsNullOrWhiteSpace(x.MediaType) && !string.IsNullOrWhiteSpace(x.ProviderMediaId)).GroupBy(x => x.Provider + ":" + x.MediaType + ":" + x.ProviderMediaId, StringComparer.Ordinal).ToDictionary(x => x.Key, x => x.ToList(), StringComparer.Ordinal);
+            }
+
+            public LocalPerson PersonById(long id)
+            {
+                LocalPerson person;
+                if (LocalPeopleById.TryGetValue(id, out person)) return person;
+                if (globalPeopleById == null) globalPeopleById = globalPeople.GroupBy(x => x.EmbyId).ToDictionary(x => x.Key, x => x.First());
+                return globalPeopleById.TryGetValue(id, out person) ? person : null;
             }
         }
     }

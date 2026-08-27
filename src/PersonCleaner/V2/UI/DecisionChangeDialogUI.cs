@@ -97,9 +97,8 @@ namespace PersonCleaner.V2.UI
                     using (var repository = Open())
                     {
                         repository.RecordCommittedEmbyChanges(fresh);
-                        CorrectionRuntime.Recalculate(repository, logger);
                     }
-                    logger.Info("PersonCleaner applied {0} validated Emby change(s) for decision {1}.", fresh.Changes.Count, fresh.DecisionId);
+                    logger.Info("PersonCleaner applied {0} validated Emby change(s) for decision {1}. The cached whole-run graph was not rebuilt interactively; the next PersonCleaner evidence task will refresh related decisions.", fresh.Changes.Count, fresh.DecisionId);
                     rebuildParent();
                     return Task.FromResult(parent);
                 }
@@ -148,9 +147,12 @@ namespace PersonCleaner.V2.UI
         private void Preflight(DecisionChangePlan plan)
         {
             var inScope = new HashSet<long>(plan.InScopePersonIds ?? new List<long>());
-            var globalPeople = plan.Changes.Any(x => x.Kind == EmbyChangeKinds.SetPersonProviderId)
-                ? library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { typeof(Person).Name }, Recursive = true }, CancellationToken.None).OfType<Person>().ToList()
+            var requestedIds = plan.Changes.Where(x => x.Kind == EmbyChangeKinds.SetPersonProviderId && !string.IsNullOrWhiteSpace(x.ProposedValue))
+                .Select(x => new KeyValuePair<string, string>(ProviderName(x.Provider), x.ProposedValue)).Distinct(ProviderIdPairComparer.Instance).ToList();
+            var globalPeople = requestedIds.Count > 0
+                ? library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { typeof(Person).Name }, Recursive = true, AnyProviderIdEquals = requestedIds }, CancellationToken.None).OfType<Person>().ToList()
                 : new List<Person>();
+            var mediaPeople = plan.Changes.Where(x => x.Kind == EmbyChangeKinds.MoveCredit && x.MediaId.HasValue).Select(x => x.MediaId.Value).Distinct().ToDictionary(x => x, ReadPeople);
             foreach (var change in plan.Changes)
             {
                 if (change.Kind == EmbyChangeKinds.SetPersonProviderId || change.Kind == EmbyChangeKinds.RemovePersonProviderId)
@@ -172,7 +174,7 @@ namespace PersonCleaner.V2.UI
                     var media = library.GetItemById(change.MediaId.Value) ?? throw new InvalidOperationException("Emby media " + change.MediaId.Value + " no longer exists.");
                     if (!(library.GetItemById(change.SourcePersonId) is Person)) throw new InvalidOperationException("Source Emby person " + change.SourcePersonId + " no longer exists.");
                     if (!(library.GetItemById(change.TargetPersonId.Value) is Person)) throw new InvalidOperationException("Target Emby person " + change.TargetPersonId.Value + " no longer exists.");
-                    var livePeople = ReadPeople(media.InternalId);
+                    var livePeople = mediaPeople[media.InternalId];
                     if (!livePeople.Any(x => x.Id == change.SourcePersonId && RoleText(x) == (change.Role ?? string.Empty)))
                     {
                         var liveRoles = livePeople.Where(x => x.Id == change.SourcePersonId).Select(RoleText).Distinct(StringComparer.Ordinal).OrderBy(x => x, StringComparer.Ordinal).ToList();
@@ -276,6 +278,13 @@ namespace PersonCleaner.V2.UI
         });
 
         private static string ProviderId(Person person, string provider) => provider == ProviderNames.Tmdb ? person.GetProviderId(MetadataProviders.Tmdb) : provider == ProviderNames.Tvdb ? person.GetProviderId(MetadataProviders.Tvdb) : provider == ProviderNames.Imdb ? person.GetProviderId(MetadataProviders.Imdb) : null;
+        private static string ProviderName(string provider) => provider == ProviderNames.Tmdb ? MetadataProviders.Tmdb.ToString() : provider == ProviderNames.Tvdb ? MetadataProviders.Tvdb.ToString() : MetadataProviders.Imdb.ToString();
         private static string RoleText(PersonInfo person) => person.Type + (string.IsNullOrWhiteSpace(person.Role) ? string.Empty : ": " + person.Role);
+        private sealed class ProviderIdPairComparer : IEqualityComparer<KeyValuePair<string, string>>
+        {
+            public static readonly ProviderIdPairComparer Instance = new ProviderIdPairComparer();
+            public bool Equals(KeyValuePair<string, string> x, KeyValuePair<string, string> y) => string.Equals(x.Key, y.Key, StringComparison.OrdinalIgnoreCase) && string.Equals(x.Value, y.Value, StringComparison.OrdinalIgnoreCase);
+            public int GetHashCode(KeyValuePair<string, string> value) => StringComparer.OrdinalIgnoreCase.GetHashCode(value.Key ?? string.Empty) ^ StringComparer.OrdinalIgnoreCase.GetHashCode(value.Value ?? string.Empty);
+        }
     }
 }
