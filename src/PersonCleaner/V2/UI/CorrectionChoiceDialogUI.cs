@@ -131,12 +131,13 @@ namespace PersonCleaner.V2.UI
         {
             var credit = plan.Credits.First(x => x.AssignmentId == assignmentId);
             var target = plan.Outcomes.First(x => x.OutcomeId == credit.TargetOutcomeId);
+            var persisted = plan.Questions.FirstOrDefault(x => x.AssignmentId == assignmentId);
             var context = new CorrectionContext
             {
                 AffectedRecord = credit.MediaName + " — Emby " + credit.MediaEmbyId + " — " + credit.Role,
-                Question = role ? "Which provider role attribution is correct?" : "Which Emby person should receive this media credit?",
+                Question = role ? "Which provider role attribution is correct?" : persisted?.Narrative ?? "Which person should receive this media credit, or which provider attribution is wrong?",
                 CurrentProposal = credit.CorrectionRequired ? "Correction required" : credit.Disposition + " to " + target.DisplayName,
-                Choices = role ? RoleChoices(host, plan, credit) : AssignmentChoices(plan, credit)
+                Choices = role ? RoleChoices(host, plan, credit) : persisted?.Choices ?? AssignmentChoices(plan, credit)
             };
             context.RunId = plan.RunId; context.CaseId = plan.CaseId; context.QuestionId = role ? "operator-role:" + credit.AssignmentId : plan.Questions.FirstOrDefault(x => x.AssignmentId == assignmentId)?.QuestionId ?? "operator-assignment:" + credit.AssignmentId;
             string serverId = null; try { serverId = host.GetPublicSystemInfo(CancellationToken.None).GetAwaiter().GetResult()?.Id; } catch { }
@@ -145,9 +146,7 @@ namespace PersonCleaner.V2.UI
             if (!string.IsNullOrWhiteSpace(credit.TvdbId)) context.RelevantRecords.Add(Link("TVDB " + credit.MediaType + " " + credit.TvdbId, MediaUrl(ProviderNames.Tvdb, credit.MediaType, credit.TvdbId, credit.TvdbSlug)));
             if (!string.IsNullOrWhiteSpace(credit.ImdbId)) context.RelevantRecords.Add(Link("IMDb title " + credit.ImdbId, MediaUrl(ProviderNames.Imdb, credit.MediaType, credit.ImdbId)));
             foreach (var id in target.ProviderIds.Where(x => x.Source == "native")) context.RelevantRecords.Add(Link(id.Provider.ToUpperInvariant() + " person " + id.ProviderId, PersonUrl(id.Provider, id.ProviderId)));
-            var persisted = plan.Questions.FirstOrDefault(x => x.AssignmentId == assignmentId);
-            if (!role && persisted != null) context.Choices = persisted.Choices;
-            if (context.Choices.Count == 0) throw new InvalidOperationException(role ? "No alternative provider role attribution is present in this case." : "No valid media destination is present in this case.");
+            if (context.Choices.Count == 0) throw new InvalidOperationException(role ? "No alternative provider role attribution is present in this case." : "No valid provider-attribution correction is present in this case.");
             return new CorrectionChoiceDialogView(plugin, host, logger, parent, rebuildParent, context);
         }
 
@@ -195,6 +194,19 @@ namespace PersonCleaner.V2.UI
         private static List<IdentityQuestionChoice> AssignmentChoices(IdentityCasePlan plan, IdentityCreditOutcome credit)
         {
             var result = new List<IdentityQuestionChoice>();
+            var currentTarget = plan.Outcomes.FirstOrDefault(x => x.OutcomeId == credit.TargetOutcomeId);
+            if (currentTarget?.TargetKind == IdentityTargetKinds.Unresolved)
+            {
+                foreach (var id in currentTarget.ProviderIds.Where(x => x.Source == "native").GroupBy(x => x.Provider + ":" + x.ProviderId, StringComparer.Ordinal).Select(x => x.First()))
+                {
+                    var providerMediaId = id.Provider == ProviderNames.Tmdb ? credit.TmdbId : id.Provider == ProviderNames.Tvdb ? credit.TvdbId : null;
+                    if (string.IsNullOrWhiteSpace(providerMediaId)) continue;
+                    var caption = id.Provider.ToUpperInvariant() + " credit does not belong — person " + id.ProviderId + " is not " + credit.Role + " on " + credit.MediaName;
+                    var effect = "Ignore only this exact provider title-credit assertion and recalculate. The current Emby credit is not moved; any unsupported person provider ID will be shown separately before Apply.";
+                    result.Add(Choice(caption, effect, new ProviderCorrection { Kind = CorrectionKinds.MediaCredit, Operation = CorrectionOperations.Unusable, Provider = id.Provider, MediaType = credit.MediaType, ProviderMediaId = providerMediaId, ProviderPersonId = id.ProviderId, CurrentValue = credit.Role, Reason = "OPERATOR_PROVIDER_ATTRIBUTION", Note = "Operator correction from case " + plan.CaseId, Enabled = true }));
+                }
+                return result;
+            }
             foreach (var outcome in plan.Outcomes.Where(x => x.TargetKind != IdentityTargetKinds.Unresolved && x.ProviderIds.Any()))
             {
                 var replacement = outcome.TargetKind == IdentityTargetKinds.Existing ? "existing:" + outcome.TargetEmbyId : "outcome:" + outcome.OutcomeId;

@@ -126,7 +126,7 @@ namespace PersonCleaner.V2.UI
                 if (c.dataField == nameof(ReviewMediaRow.Role)) c.width = 210;
                 if (c.dataField == nameof(ReviewMediaRow.Tmdb) || c.dataField == nameof(ReviewMediaRow.Tvdb) || c.dataField == nameof(ReviewMediaRow.Imdb)) { c.encodeHtml = false; c.width = 105; }
                 if (c.dataField == nameof(ReviewMediaRow.Action)) c.width = 330;
-                if (c.dataField == nameof(ReviewMediaRow.CorrectAssignment)) { c.caption = "Override person"; c.allowEditing = true; c.width = 115; }
+                if (c.dataField == nameof(ReviewMediaRow.CorrectAssignment)) { c.caption = "Correct attribution"; c.allowEditing = true; c.width = 125; }
                 if (c.dataField == nameof(ReviewMediaRow.CorrectRole)) { c.caption = "Override role"; c.allowEditing = true; c.width = 95; }
             }
         }
@@ -141,7 +141,7 @@ namespace PersonCleaner.V2.UI
                 RowId = outcome.OutcomeId, OutcomeId = outcome.OutcomeId,
                 CurrentName = current == null ? "—" : CaseLinks.Emby(current.EmbyId, serverId, current.Name), CurrentEmby = current == null ? "—" : CaseLinks.Emby(current.EmbyId, serverId, current.EmbyId.ToString(CultureInfo.InvariantCulture)),
                 CurrentTmdb = current == null ? "—" : CaseLinks.Person(ProviderNames.Tmdb, current.TmdbId), CurrentTvdb = current == null ? "—" : CaseLinks.Person(ProviderNames.Tvdb, current.TvdbId), CurrentImdb = current == null ? "—" : CaseLinks.Person(ProviderNames.Imdb, current.ImdbId),
-                ResultName = WebUtility.HtmlEncode(outcome.DisplayName), ResultEmby = outcome.TargetKind == IdentityTargetKinds.Existing ? CaseLinks.Emby(outcome.TargetEmbyId.Value, serverId, outcome.TargetEmbyId.Value.ToString(CultureInfo.InvariantCulture)) : outcome.TargetKind == IdentityTargetKinds.New ? "New" : "Not assigned",
+                ResultName = WebUtility.HtmlEncode(outcome.DisplayName), ResultEmby = outcome.TargetKind == IdentityTargetKinds.Existing ? CaseLinks.Emby(outcome.TargetEmbyId.Value, serverId, outcome.TargetEmbyId.Value.ToString(CultureInfo.InvariantCulture)) : outcome.TargetKind == IdentityTargetKinds.New ? "New" : current == null ? "Pending review" : CaseLinks.Emby(current.EmbyId, serverId, "Pending — retain " + current.EmbyId.ToString(CultureInfo.InvariantCulture)),
                 ResultTmdb = CaseLinks.Person(ProviderNames.Tmdb, Id(outcome, ProviderNames.Tmdb)), ResultTvdb = CaseLinks.Person(ProviderNames.Tvdb, Id(outcome, ProviderNames.Tvdb)), ResultImdb = CaseLinks.Person(ProviderNames.Imdb, Id(outcome, ProviderNames.Imdb)),
                 IdChanges = Changes(current, outcome), Outcome = outcome.Outcome
             };
@@ -163,7 +163,9 @@ namespace PersonCleaner.V2.UI
             var target = plan.Outcomes.First(x => x.OutcomeId == credit.TargetOutcomeId);
             var source = plan.Outcomes.FirstOrDefault(x => x.SourceEmbyIds.Contains(credit.SourcePersonEmbyId));
             string action;
-            if (credit.CorrectionRequired) action = "Required — choose the receiving person";
+            var question = plan.Questions.FirstOrDefault(x => x.AssignmentId == credit.AssignmentId);
+            if (credit.CorrectionRequired && question?.Kind == CorrectionKinds.MediaCredit) action = "Correction required — choose which provider title-credit assertion is wrong";
+            else if (credit.CorrectionRequired) action = "Correction required — choose the receiving person";
             else if (received) action = "Projected — receive from " + (source?.DisplayName ?? "Emby person") + " — Emby " + credit.SourcePersonEmbyId;
             else if (credit.Disposition == "KEEP") action = "Projected — keep";
             else action = "Projected — move to " + (target.TargetKind == IdentityTargetKinds.New ? "New person — " : string.Empty) + target.DisplayName + (target.TargetEmbyId.HasValue ? " — Emby " + target.TargetEmbyId : string.Empty);
@@ -175,9 +177,10 @@ namespace PersonCleaner.V2.UI
             };
         }
 
-        private static string Id(IdentityOutcome outcome, string provider) => outcome.ProviderIds.FirstOrDefault(x => x.Provider == provider)?.ProviderId;
+        private static string Id(IdentityOutcome outcome, string provider) => IdentityCasePlanner.PreferredProviderId(outcome, provider);
         private static string Changes(LocalPerson current, IdentityOutcome outcome)
         {
+            if (outcome.TargetKind == IdentityTargetKinds.Unresolved) return "No Emby change proposed until the provider assertion is corrected";
             var changes = new List<string>();
             foreach (var provider in new[] { ProviderNames.Tmdb, ProviderNames.Tvdb, ProviderNames.Imdb })
             {

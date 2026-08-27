@@ -74,6 +74,7 @@ internal static class Program
         Run("holistic provider agreement identifies pending Emby ID alignment", HolisticProviderAgreementShowsPendingEmbyAlignment);
         Run("holistic metadata conflict exposes the birthday warning", HolisticBirthdayConflictWarning);
         Run("holistic plan persists a genuine ambiguous media question", HolisticAmbiguousMediaQuestion);
+        Run("holistic provider conflict offers exact credit exclusion and retains the current Emby person", HolisticUnsupportedProviderCredit);
         Run("holistic planner keeps compatible current IDs together beside a conflicting alternative", HolisticCurrentIdentitySubsetRemainsTogether);
         Run("holistic planner remains bounded across 1600 cases", HolisticPlannerRemainsBounded);
         Run("large unrelated provider-credit sets remain bounded", LargeProviderCreditSetRemainsBounded);
@@ -1103,6 +1104,47 @@ internal static class Program
         Equal(IdentityPlanStates.CorrectionRequired, plan.State);
         True(plan.Questions.Any(x => x.Kind == CorrectionKinds.LocalCreditTarget && x.Choices.Count == 2));
         True(plan.Credits.Single().CorrectionRequired);
+    }
+
+    private static void HolisticUnsupportedProviderCredit()
+    {
+        var input = new ResolutionInput();
+        var tmdb = Person(ProviderNames.Tmdb, "216444", "Michael Rogers", ProviderNames.Imdb, "nm0737089");
+        var tvdb = Person(ProviderNames.Tvdb, "271293", "Michael Rogers", ProviderNames.Tmdb, "134708");
+        input.ProviderPeople.AddRange(new[] { tmdb, tvdb });
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 178672, Name = "Michael Rogers", TmdbId = "216444", TvdbId = "271293" });
+        AddPlanMedia(input, 299048, "The Mosquito Coast", "11120", "6697", "Actor: Francis Lungley", tmdb, tvdb);
+        var decision = new ResolutionDecision { DecisionId = "michael-conflict", Status = "MATCH_WITH_CONFLICT", Action = "CROSS_PROVIDER_IDENTITY_WITH_METADATA_CONFLICT", DisplayName = "Michael Rogers", AnchorEmbyPersonId = 178672, ProviderKeys = "tmdb:216444,tvdb:271293" };
+        var clusters = new[] { Cluster("michael", 178672, "tmdb:216444", "tvdb:271293") };
+
+        var plan = IdentityCasePlanner.Build(12, input, new[] { decision }, clusters).Single();
+
+        Equal(1, plan.Outcomes.Count);
+        Equal(IdentityTargetKinds.Unresolved, plan.Outcomes.Single().TargetKind);
+        True(plan.Outcomes.Single().SourceEmbyIds.Contains(178672));
+        Equal("216444", IdentityCasePlanner.PreferredProviderId(plan.Outcomes.Single(), ProviderNames.Tmdb));
+        True(plan.Summary.Contains("remains on the current Emby person") && !plan.Summary.Contains("0 provider-identified"));
+        Equal(1, plan.Questions.Count);
+        Equal(CorrectionKinds.MediaCredit, plan.Questions.Single().Kind);
+        Equal(2, plan.Questions.Single().Choices.Count);
+        var exclusion = plan.Questions.Single().Choices.Single(x => x.Correction.Provider == ProviderNames.Tvdb).Correction;
+        Equal(CorrectionOperations.Unusable, exclusion.Operation);
+        Equal("6697", exclusion.ProviderMediaId);
+        Equal("271293", exclusion.ProviderPersonId);
+
+        input.ActiveCorrections.Add(exclusion);
+        ProviderCorrectionOverlay.Apply(input, new CorrectionApplicationTracker(new[] { exclusion }));
+        var correctedDecision = new ResolutionDecision { DecisionId = "michael-corrected", Status = "MATCH", Action = "CROSS_PROVIDER_IDENTITY", DisplayName = "Michael Rogers", AnchorEmbyPersonId = 178672, ProviderKeys = "tmdb:216444" };
+        var corrected = IdentityCasePlanner.Build(13, input, new[] { correctedDecision }, new[] { Cluster("michael-corrected", 178672, "tmdb:216444") }).Single();
+
+        Equal(IdentityPlanStates.Complete, corrected.State);
+        var result = corrected.Outcomes.Single();
+        Equal(IdentityTargetKinds.Existing, result.TargetKind);
+        Equal(178672L, result.TargetEmbyId.Value);
+        Equal("216444", IdentityCasePlanner.PreferredProviderId(result, ProviderNames.Tmdb));
+        True(string.IsNullOrWhiteSpace(IdentityCasePlanner.PreferredProviderId(result, ProviderNames.Tvdb)));
+        Equal("KEEP", corrected.Credits.Single().Disposition);
+        True(corrected.ApplyCaption.Contains("change 2 IDs") && !corrected.ApplyCaption.Contains("move") && !corrected.ApplyCaption.Contains("create"));
     }
 
     private static void HolisticCurrentIdentitySubsetRemainsTogether()

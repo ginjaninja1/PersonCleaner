@@ -61,7 +61,7 @@ namespace PersonCleaner.V2.UI
             foreach (var snapshot in plan.CurrentPeople)
             {
                 var outcome = plan.Outcomes.FirstOrDefault(x => x.TargetEmbyId == snapshot.EmbyId);
-                if (!Same(snapshot.TmdbId, outcome?.ProviderIds.FirstOrDefault(x => x.Provider == ProviderNames.Tmdb)?.ProviderId) || !Same(snapshot.TvdbId, outcome?.ProviderIds.FirstOrDefault(x => x.Provider == ProviderNames.Tvdb)?.ProviderId) || !Same(snapshot.ImdbId, outcome?.ProviderIds.FirstOrDefault(x => x.Provider == ProviderNames.Imdb)?.ProviderId)) return true;
+                if (!Same(snapshot.TmdbId, DesiredProviderId(outcome, ProviderNames.Tmdb)) || !Same(snapshot.TvdbId, DesiredProviderId(outcome, ProviderNames.Tvdb)) || !Same(snapshot.ImdbId, DesiredProviderId(outcome, ProviderNames.Imdb))) return true;
             }
             return false;
         }
@@ -71,15 +71,10 @@ namespace PersonCleaner.V2.UI
             if (plan.State != IdentityPlanStates.Complete) throw new InvalidOperationException("The reviewed case is not complete.");
             if (plan.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.New && (!x.ProviderIds.Any(y => y.Source == "native") || !plan.Credits.Any(c => c.TargetOutcomeId == x.OutcomeId))))
                 throw new InvalidOperationException("A proposed new person lacks a provider-native ID or assigned media credit.");
-            if (plan.Outcomes.SelectMany(x => x.ProviderIds.Select(y => new { Outcome = x, Id = y })).GroupBy(x => x.Id.Provider + ":" + x.Id.ProviderId, StringComparer.OrdinalIgnoreCase).Any(x => x.Select(y => y.Outcome.OutcomeId).Distinct().Count() > 1))
+            if (plan.Outcomes.SelectMany(x => DesiredProviderIds(x).Select(y => new { Outcome = x, Id = y })).GroupBy(x => x.Id.Key + ":" + x.Id.Value, StringComparer.OrdinalIgnoreCase).Any(x => x.Select(y => y.Outcome.OutcomeId).Distinct().Count() > 1))
                 throw new InvalidOperationException("The plan assigns one provider person ID to more than one final identity.");
             foreach (var snapshot in plan.CurrentPeople)
             {
-                var retained = plan.Outcomes.FirstOrDefault(x => x.TargetEmbyId == snapshot.EmbyId && plan.Credits.Any(c => c.TargetOutcomeId == x.OutcomeId));
-                if (retained != null)
-                foreach (var provider in new[] { ProviderNames.Tmdb, ProviderNames.Tvdb, ProviderNames.Imdb })
-                    if (!string.IsNullOrWhiteSpace(LocalProviderId(snapshot, provider)) && !retained.ProviderIds.Any(x => x.Provider == provider))
-                        throw new InvalidOperationException("The reviewed plan omits the current " + provider.ToUpperInvariant() + " ID from retained Emby person " + snapshot.EmbyId + ". Rebuild the evidence before applying.");
                 var live = library.GetItemById(snapshot.EmbyId) as Person ?? throw new InvalidOperationException("Emby person " + snapshot.EmbyId + " no longer exists.");
                 if (!string.Equals(live.Name ?? string.Empty, snapshot.Name ?? string.Empty, StringComparison.Ordinal) || !Same(ProviderId(live, ProviderNames.Tmdb), snapshot.TmdbId) || !Same(ProviderId(live, ProviderNames.Tvdb), snapshot.TvdbId) || !Same(ProviderId(live, ProviderNames.Imdb), snapshot.ImdbId))
                     throw new InvalidOperationException("Emby person " + snapshot.EmbyId + " changed after this plan was calculated. Rebuild the evidence before applying.");
@@ -95,19 +90,19 @@ namespace PersonCleaner.V2.UI
                         throw new InvalidOperationException("The reviewed credit '" + credit.Role + "' on Emby media " + credit.MediaEmbyId + " changed after calculation.");
             }
             var currentIds = new HashSet<long>(plan.CurrentPeople.Select(x => x.EmbyId));
-            var requestedProviderIds = plan.Outcomes.SelectMany(x => x.ProviderIds)
-                .Where(x => !string.IsNullOrWhiteSpace(x.ProviderId))
-                .Select(x => new KeyValuePair<string, string>(ProviderName(x.Provider), x.ProviderId))
+            var requestedProviderIds = plan.Outcomes.SelectMany(DesiredProviderIds)
+                .Where(x => !string.IsNullOrWhiteSpace(x.Value))
+                .Select(x => new KeyValuePair<string, string>(ProviderName(x.Key), x.Value))
                 .Distinct(ProviderIdPairComparer.Instance).ToList();
             var global = requestedProviderIds.Count == 0
                 ? new List<Person>()
                 : library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { typeof(Person).Name }, Recursive = true, AnyProviderIdEquals = requestedProviderIds }, CancellationToken.None).OfType<Person>().ToList();
             foreach (var outcome in plan.Outcomes)
-            foreach (var id in outcome.ProviderIds)
+            foreach (var id in DesiredProviderIds(outcome))
             {
-                var owner = global.FirstOrDefault(x => !currentIds.Contains(x.InternalId) && Same(ProviderId(x, id.Provider), id.ProviderId));
+                var owner = global.FirstOrDefault(x => !currentIds.Contains(x.InternalId) && Same(ProviderId(x, id.Key), id.Value));
                 if (owner != null && (!outcome.TargetEmbyId.HasValue || owner.InternalId != outcome.TargetEmbyId.Value))
-                    throw new InvalidOperationException(id.Provider.ToUpperInvariant() + " person ID " + id.ProviderId + " is now owned by out-of-scope Emby person " + owner.InternalId + ".");
+                    throw new InvalidOperationException(id.Key.ToUpperInvariant() + " person ID " + id.Value + " is now owned by out-of-scope Emby person " + owner.InternalId + ".");
             }
         }
 
@@ -123,7 +118,7 @@ namespace PersonCleaner.V2.UI
                 foreach (var provider in new[] { ProviderNames.Tmdb, ProviderNames.Tvdb, ProviderNames.Imdb })
                 {
                     var before = ProviderId(person, provider);
-                    var after = outcome?.ProviderIds.FirstOrDefault(x => x.Provider == provider)?.ProviderId;
+                    var after = DesiredProviderId(outcome, provider);
                     if (Same(before, after)) continue;
                     if (!string.IsNullOrWhiteSpace(before)) { SetProviderId(person, provider, null); personChanged = true; changed = true; }
                     receipt.Changes.Add(new IdentityCaseAppliedChange { Kind = "person-provider-id", SourceEmbyId = person.InternalId, TargetEmbyId = person.InternalId, OutcomeId = outcome?.OutcomeId, Provider = provider, OldValue = before, NewValue = after, Summary = (string.IsNullOrWhiteSpace(after) ? "Remove " : string.IsNullOrWhiteSpace(before) ? "Add " : "Replace ") + provider.ToUpperInvariant() + " ID on Emby person " + person.InternalId + "." });
@@ -136,7 +131,7 @@ namespace PersonCleaner.V2.UI
                 var person = (Person)library.GetItemById(snapshot.EmbyId); var personChanged = false;
                 foreach (var provider in new[] { ProviderNames.Tmdb, ProviderNames.Tvdb, ProviderNames.Imdb })
                 {
-                    var after = outcome?.ProviderIds.FirstOrDefault(x => x.Provider == provider)?.ProviderId;
+                    var after = DesiredProviderId(outcome, provider);
                     if (string.IsNullOrWhiteSpace(after) || Same(ProviderId(person, provider), after)) continue;
                     SetProviderId(person, provider, after); personChanged = true; changed = true;
                 }
@@ -207,7 +202,7 @@ namespace PersonCleaner.V2.UI
             foreach (var outcome in plan.Outcomes.Where(x => x.TargetKind == IdentityTargetKinds.New))
             {
                 var person = library.GetItemById(receipt.OutcomeEmbyIds[outcome.OutcomeId]) as Person ?? throw new InvalidOperationException("The new Emby person for " + outcome.DisplayName + " could not be reloaded.");
-                foreach (var provider in new[] { ProviderNames.Tmdb, ProviderNames.Tvdb, ProviderNames.Imdb }) SetProviderId(person, provider, outcome.ProviderIds.FirstOrDefault(x => x.Provider == provider)?.ProviderId);
+                foreach (var provider in new[] { ProviderNames.Tmdb, ProviderNames.Tvdb, ProviderNames.Imdb }) SetProviderId(person, provider, DesiredProviderId(outcome, provider));
                 library.UpdateItem(person, null, ItemUpdateType.MetadataEdit);
             }
         }
@@ -218,7 +213,7 @@ namespace PersonCleaner.V2.UI
             {
                 var person = library.GetItemById(receipt.OutcomeEmbyIds[outcome.OutcomeId]) as Person ?? throw new InvalidOperationException("Postflight could not load result person " + receipt.OutcomeEmbyIds[outcome.OutcomeId] + ".");
                 foreach (var provider in new[] { ProviderNames.Tmdb, ProviderNames.Tvdb, ProviderNames.Imdb })
-                    if (!Same(ProviderId(person, provider), outcome.ProviderIds.FirstOrDefault(x => x.Provider == provider)?.ProviderId)) throw new InvalidOperationException("Postflight found an unexpected " + provider.ToUpperInvariant() + " ID on Emby person " + person.InternalId + ".");
+                    if (!Same(ProviderId(person, provider), DesiredProviderId(outcome, provider))) throw new InvalidOperationException("Postflight found an unexpected " + provider.ToUpperInvariant() + " ID on Emby person " + person.InternalId + ".");
             }
             foreach (var credit in plan.Credits)
             {
@@ -246,11 +241,20 @@ namespace PersonCleaner.V2.UI
         private List<PersonInfo> ReadPeople(long mediaId) => library.GetItemPeople(new InternalPeopleQuery { ItemIds = new[] { mediaId }, EnableIds = true, EnableProviderIds = true, EnableGroupByName = false });
         private static PersonInfo Clone(PersonInfo x) => new PersonInfo { Id = x.Id, Guid = x.Guid, Name = x.Name, Type = x.Type, Role = x.Role, ProviderIds = Copy(x.ProviderIds) };
         private static ProviderIdDictionary Copy(ProviderIdDictionary source) { var result = new ProviderIdDictionary(); if (source != null) foreach (var x in source) result[x.Key] = x.Value; return result; }
-        private static ProviderIdDictionary ProviderDictionary(IdentityOutcome outcome) { var result = new ProviderIdDictionary(); foreach (var x in outcome.ProviderIds) result[ProviderName(x.Provider)] = x.ProviderId; return result; }
+        private static ProviderIdDictionary ProviderDictionary(IdentityOutcome outcome) { var result = new ProviderIdDictionary(); foreach (var x in DesiredProviderIds(outcome)) result[ProviderName(x.Key)] = x.Value; return result; }
         private static void SetResolver(PersonInfo row, Person person, string token) { row.Id = person.InternalId; row.Guid = person.Id; row.Name = person.Name; row.ProviderIds = new ProviderIdDictionary { [ResolverTokenProvider] = token }; }
         private static void SetProviderId(Person person, string provider, string value) { var key = ProviderName(provider); foreach (var existing in person.ProviderIds.Keys.Where(x => string.Equals(x, key, StringComparison.OrdinalIgnoreCase)).ToList()) person.ProviderIds.Remove(existing); if (!string.IsNullOrWhiteSpace(value)) person.ProviderIds[key] = value; }
         private static string ProviderId(Person person, string provider) => person?.ProviderIds?.FirstOrDefault(x => string.Equals(x.Key, ProviderName(provider), StringComparison.OrdinalIgnoreCase)).Value;
         private static string PersonInfoProviderId(PersonInfo person, string provider) => person?.ProviderIds?.FirstOrDefault(x => string.Equals(x.Key, ProviderName(provider), StringComparison.OrdinalIgnoreCase)).Value;
+        private static string DesiredProviderId(IdentityOutcome outcome, string provider) => IdentityCasePlanner.PreferredProviderId(outcome, provider);
+        private static IEnumerable<KeyValuePair<string, string>> DesiredProviderIds(IdentityOutcome outcome)
+        {
+            foreach (var provider in new[] { ProviderNames.Tmdb, ProviderNames.Tvdb, ProviderNames.Imdb })
+            {
+                var id = DesiredProviderId(outcome, provider);
+                if (!string.IsNullOrWhiteSpace(id)) yield return new KeyValuePair<string, string>(provider, id);
+            }
+        }
         private static string LocalProviderId(LocalPerson person, string provider) => provider == ProviderNames.Tmdb ? person.TmdbId : provider == ProviderNames.Tvdb ? person.TvdbId : person.ImdbId;
         private static string ProviderName(string provider) => provider == ProviderNames.Tmdb ? MetadataProviders.Tmdb.ToString() : provider == ProviderNames.Tvdb ? MetadataProviders.Tvdb.ToString() : MetadataProviders.Imdb.ToString();
         private static string RoleText(PersonInfo person) => person.Type + (string.IsNullOrWhiteSpace(person.Role) ? string.Empty : ": " + person.Role);
