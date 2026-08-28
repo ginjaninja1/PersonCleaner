@@ -51,7 +51,8 @@ namespace PersonCleaner.V2.UI
         public IEnumerable<EditorRadioOption> MediaTypeChoices { get; set; } = new[]
         {
             new EditorRadioOption(MediaTypes.Movie, "Movie", "A movie provider record"),
-            new EditorRadioOption(MediaTypes.Series, "Series", "A television series provider record")
+            new EditorRadioOption(MediaTypes.Series, "Series", "A television series provider record"),
+            new EditorRadioOption(MediaTypes.Episode, "Episode", "A television episode provider record")
         };
         public ButtonItem SaveCorrection { get; set; } = new ButtonItem("Save correction") { CommandId = CorrectionCommands.Save };
         public CaptionItem ValidationStatus { get; set; } = new CaptionItem(string.Empty);

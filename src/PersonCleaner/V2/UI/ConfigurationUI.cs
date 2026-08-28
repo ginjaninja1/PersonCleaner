@@ -34,19 +34,19 @@ namespace PersonCleaner.V2.UI
         [Description("Recommended while developing: select a stable, deterministic sample from each media pool instead of scanning the whole library.")]
         public bool SandboxMode { get; set; } = true;
         [DisplayName("Samples per media pool")]
-        [Description("Sandbox selects this many movies and this many series. The default is 50 + 50.")]
+        [Description("Sandbox selects this many movies, series and episodes. The default is 50 from each media pool.")]
         public int SandboxSampleSizePerMediaType { get; set; } = 50;
         [DisplayName("Stable sample seed")]
         [Description("Keep this unchanged for repeatable test runs; change it to evaluate a different cohort.")]
         public int SandboxSeed { get; set; }
         [DisplayName("Always include Emby media IDs")]
-        [Description("Optional comma- or space-separated Emby movie/series IDs. These titles are added to the sandbox without reducing the normal sample.")]
+        [Description("Optional comma- or space-separated Emby movie, series or episode IDs. These media items are added to the sandbox without reducing the normal sample.")]
         public string SandboxIncludedMediaIds { get; set; }
         [DisplayName("Always include Emby person IDs")]
-        [Description("Optional comma- or space-separated Emby person IDs. Movies/series directly associated with these people are added explicitly; this never expands transitively to further titles.")]
+        [Description("Optional comma- or space-separated Emby person IDs. Movies, series and episodes directly associated with these people are added explicitly; this never expands transitively to further media.")]
         public string SandboxIncludedPersonIds { get; set; }
         [DisplayName("Auto-expand affected-person media")]
-        [Description("Recommended. After selecting the sandbox subset, add every provider-addressable movie and series credited to its affected people. Recommendations remain limited to those people; co-credited people encountered only during expansion do not enter the decision scope.")]
+        [Description("Recommended. After selecting the sandbox subset, add every provider-addressable movie, series and episode credited to its affected people. Recommendations remain limited to those people; co-credited people encountered only during expansion do not enter the decision scope.")]
         public bool SandboxAutoExpandPersonMedia { get; set; } = true;
         [DisplayName("Populate Case Review with out of scope media items")]
         [Description("When a case review opens, query Emby for media relationships belonging to its existing people and add relationships missing from the gathered evidence. This does not expand or slow evidence gathering.")]

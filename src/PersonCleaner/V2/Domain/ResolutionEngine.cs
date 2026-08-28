@@ -10,7 +10,7 @@ namespace PersonCleaner.V2.Domain
 {
     public sealed class ResolutionEngine
     {
-        private const string EvidenceModelVersion = "person-evidence-v5";
+        private const string EvidenceModelVersion = "person-evidence-v6";
         private const double ExactNameContribution = 0.35;
         private const double AliasContribution = 0.20;
         private const double ContainmentContribution = 0.25;
@@ -361,6 +361,7 @@ namespace PersonCleaner.V2.Domain
                 SharedMediaCount = intersection,
                 ExactRoleMatches = roles.Exact,
                 CompatibleRoleMatches = roles.Compatible,
+                EpisodeCreditMatches = roles.Episode,
                 RoleAgreement = roles.Agreement,
                 CompetingAttributionCount = competing.Count,
                 CompetingAttributions = competing,
@@ -563,7 +564,8 @@ namespace PersonCleaner.V2.Domain
             {
                 if (!index.MediaKeysById.TryGetValue(credit.MediaEmbyId, out var mediaKeys) || !mediaKeys.Overlaps(regionMediaKeys)) continue;
                 var possible = mediaKeys.Where(componentsByMedia.ContainsKey).SelectMany(x => componentsByMedia[x]).Distinct().ToList();
-                var matching = possible.Where(x => CreditMatchesComponent(local, credit, x, mediaKeys)).ToList();
+                var mediaType = index.MediaById.TryGetValue(credit.MediaEmbyId, out var media) ? media.MediaType : null;
+                var matching = possible.Where(x => CreditMatchesComponent(local, credit, x, mediaKeys, mediaType)).ToList();
                 if (matching.Count != 1 || !ownerByComponent.TryGetValue(matching.FirstOrDefault()?.Index ?? -1, out var owner))
                 {
                     ambiguousCredits++;
@@ -613,7 +615,7 @@ namespace PersonCleaner.V2.Domain
             return decision;
         }
 
-        private static bool CreditMatchesComponent(LocalPerson local, LocalCredit credit, ComponentState state, HashSet<string> mediaKeys)
+        private static bool CreditMatchesComponent(LocalPerson local, LocalCredit credit, ComponentState state, HashSet<string> mediaKeys, string mediaType)
         {
             if (!state.MediaKeys.Overlaps(mediaKeys)) return false;
             var cleanName = TextNormalizer.PersonName(local.Name);
@@ -622,7 +624,7 @@ namespace PersonCleaner.V2.Domain
             if (!nameCompatible && !direct) return false;
             var providerCredits = state.People.SelectMany(x => x.Credits).Where(x => mediaKeys.Contains(x.CanonicalMediaKey)).ToList();
             if (providerCredits.Count == 0) return nameCompatible || direct;
-            var localCredit = new ObservedProviderCredit { Role = credit.Role, RoleCategory = NormalizeRoleCategory(null, credit.Role), RoleName = RoleNameFromDisplay(credit.Role) };
+            var localCredit = new ObservedProviderCredit { MediaType = mediaType, Role = credit.Role, RoleCategory = NormalizeRoleCategory(null, credit.Role), RoleName = RoleNameFromDisplay(credit.Role) };
             return providerCredits.Any(x => RoleCompatibility(localCredit, x) > 0);
         }
 
@@ -633,7 +635,9 @@ namespace PersonCleaner.V2.Domain
             foreach (var anchor in anchors)
             foreach (var credit in index.CreditsByPerson.TryGetValue(anchor.Person.EmbyId, out var localCredits) ? localCredits : EmptyCredits)
             {
-                if (!index.MediaKeysById.TryGetValue(credit.MediaEmbyId, out var mediaKeys) || !CreditMatchesComponent(anchor.Person, credit, state, mediaKeys)) continue;
+                if (!index.MediaKeysById.TryGetValue(credit.MediaEmbyId, out var mediaKeys)) continue;
+                var mediaType = index.MediaById.TryGetValue(credit.MediaEmbyId, out var media) ? media.MediaType : null;
+                if (!CreditMatchesComponent(anchor.Person, credit, state, mediaKeys, mediaType)) continue;
                 result.Add(new ResolutionCreditAssignment { SourcePersonEmbyId = anchor.Person.EmbyId, TargetPersonEmbyId = owner.EmbyId, MediaEmbyId = credit.MediaEmbyId, Role = credit.Role, Disposition = anchor.Person.EmbyId == owner.EmbyId ? "KEEP" : "MOVE", ComponentKey = string.Join(", ", state.ProviderKeys.OrderBy(x => x, StringComparer.Ordinal)), Rationale = "This credit is attributable to the resolved provider component and its selected Emby owner." });
             }
             return result.GroupBy(x => x.SourcePersonEmbyId + "|" + x.TargetPersonEmbyId + "|" + x.MediaEmbyId + "|" + x.Role, StringComparer.Ordinal).Select(x => x.First()).ToList();
@@ -861,13 +865,13 @@ namespace PersonCleaner.V2.Domain
         {
             var mediaRows = input.Media ?? new List<MediaSeed>();
             var direct = mediaRows.FirstOrDefault(x => x.MediaType == mediaType &&
-                (provider == ProviderNames.Tmdb && x.TmdbId == providerMediaId || provider == ProviderNames.Tvdb && x.TvdbId == providerMediaId));
+                (provider == ProviderNames.Tmdb && x.ProviderAcquisitionId(ProviderNames.Tmdb) == providerMediaId || provider == ProviderNames.Tvdb && x.ProviderAcquisitionId(ProviderNames.Tvdb) == providerMediaId));
             if (direct != null) return direct.Name + (direct.Year.HasValue ? " (" + direct.Year.Value + ")" : string.Empty);
             var related = (input.ProviderCredits ?? new List<ObservedProviderCredit>()).Where(x => x.CanonicalMediaKey == canonicalKey).ToList();
             foreach (var credit in related)
             {
                 var media = mediaRows.FirstOrDefault(x => x.MediaType == credit.MediaType &&
-                    (credit.Provider == ProviderNames.Tmdb && x.TmdbId == credit.ProviderMediaId || credit.Provider == ProviderNames.Tvdb && x.TvdbId == credit.ProviderMediaId));
+                    (credit.Provider == ProviderNames.Tmdb && x.ProviderAcquisitionId(ProviderNames.Tmdb) == credit.ProviderMediaId || credit.Provider == ProviderNames.Tvdb && x.ProviderAcquisitionId(ProviderNames.Tvdb) == credit.ProviderMediaId));
                 if (media != null) return media.Name + (media.Year.HasValue ? " (" + media.Year.Value + ")" : string.Empty);
             }
             return (string.IsNullOrWhiteSpace(mediaType) ? "media" : mediaType) + " " + provider.ToUpperInvariant() + ":" + providerMediaId;
@@ -988,7 +992,7 @@ namespace PersonCleaner.V2.Domain
         {
             if (score == null) return;
             decision.Evidence.Add(new EvidenceLine { SortOrder = 10, SignalType = "FILMOGRAPHY", Verdict = score.SharedMediaCount > 0 ? "supports" : "neutral", Narrative = score.SharedMediaCount + " shared canonical title(s); containment " + score.FilmographyContainment.ToString("0.000", CultureInfo.InvariantCulture) + "; Jaccard " + score.FilmographyJaccard.ToString("0.000", CultureInfo.InvariantCulture) + ". Unmatched titles are not negative evidence.", Metric = "shared=" + score.SharedMediaCount + ";left=" + score.LeftMediaCount + ";right=" + score.RightMediaCount + ";containment=" + score.FilmographyContainment.ToString("0.000000", CultureInfo.InvariantCulture) + ";jaccard=" + score.FilmographyJaccard.ToString("0.000000", CultureInfo.InvariantCulture) });
-            decision.Evidence.Add(new EvidenceLine { SortOrder = 15, SignalType = "ROLE_AGREEMENT", Verdict = score.RoleAgreement > 0 ? "supports" : "unknown", Narrative = score.ExactRoleMatches + " exact and " + score.CompatibleRoleMatches + " compatible shared-title role match(es).", Metric = "exact=" + score.ExactRoleMatches + ";compatible=" + score.CompatibleRoleMatches + ";agreement=" + score.RoleAgreement.ToString("0.000000", CultureInfo.InvariantCulture) });
+            decision.Evidence.Add(new EvidenceLine { SortOrder = 15, SignalType = "ATTRIBUTION_AGREEMENT", Verdict = score.RoleAgreement > 0 ? "supports" : "unknown", Narrative = score.EpisodeCreditMatches + " shared episode credit match(es), plus " + score.ExactRoleMatches + " exact and " + score.CompatibleRoleMatches + " compatible non-episode role match(es). Episode roles are intentionally ignored.", Metric = "episode=" + score.EpisodeCreditMatches + ";exact=" + score.ExactRoleMatches + ";compatible=" + score.CompatibleRoleMatches + ";agreement=" + score.RoleAgreement.ToString("0.000000", CultureInfo.InvariantCulture) });
             decision.Evidence.Add(new EvidenceLine
             {
                 SortOrder = 20,
@@ -1097,16 +1101,16 @@ namespace PersonCleaner.V2.Domain
 
         private static RoleResult RoleEvidence(ProviderPerson left, ProviderPerson right, HashSet<string> sharedKeys)
         {
-            var exact = 0; var compatible = 0;
+            var exact = 0; var compatible = 0; var episode = 0;
             foreach (var key in sharedKeys)
             {
                 var leftCredits = left.Credits.Where(x => x.CanonicalMediaKey == key).ToList();
                 var rightCredits = right.Credits.Where(x => x.CanonicalMediaKey == key).ToList();
                 var best = 0;
                 foreach (var a in leftCredits) foreach (var b in rightCredits) best = Math.Max(best, RoleCompatibility(a, b));
-                if (best == 2) exact++; else if (best == 1) compatible++;
+                if (best == 3) episode++; else if (best == 2) exact++; else if (best == 1) compatible++;
             }
-            return new RoleResult { Exact = exact, Compatible = compatible, Agreement = sharedKeys.Count == 0 ? 0 : (exact + compatible * 0.67) / sharedKeys.Count };
+            return new RoleResult { Exact = exact, Compatible = compatible, Episode = episode, Agreement = sharedKeys.Count == 0 ? 0 : (exact + episode + compatible * 0.67) / sharedKeys.Count };
         }
 
         private static List<CompetingAttribution> CompetingAttributions(ProviderPerson left, ProviderPerson right, ProviderCreditIndex creditIndex, IEnumerable<string> compatibleNames)
@@ -1143,6 +1147,7 @@ namespace PersonCleaner.V2.Domain
 
         private static int RoleCompatibility(ObservedProviderCredit left, ObservedProviderCredit right)
         {
+            if (left.MediaType == MediaTypes.Episode && right.MediaType == MediaTypes.Episode) return 3;
             var leftName = TextNormalizer.PersonName(left.RoleName);
             var rightName = TextNormalizer.PersonName(right.RoleName);
             var categoryMatch = !string.IsNullOrWhiteSpace(left.RoleCategory) && left.RoleCategory != "Unknown" && string.Equals(left.RoleCategory, right.RoleCategory, StringComparison.OrdinalIgnoreCase);
@@ -1209,6 +1214,9 @@ namespace PersonCleaner.V2.Domain
             if (!string.IsNullOrWhiteSpace(media.ImdbId)) keys.Add("imdb:" + media.ImdbId);
             if (!string.IsNullOrWhiteSpace(media.TmdbId)) keys.Add("tmdb:" + media.MediaType + ":" + media.TmdbId);
             if (!string.IsNullOrWhiteSpace(media.TvdbId)) keys.Add("tvdb:" + media.MediaType + ":" + media.TvdbId);
+            if (!string.IsNullOrWhiteSpace(media.TmdbAcquisitionId)) keys.Add("tmdb:" + media.MediaType + ":" + media.TmdbAcquisitionId);
+            if (!string.IsNullOrWhiteSpace(media.TvdbAcquisitionId)) keys.Add("tvdb:" + media.MediaType + ":" + media.TvdbAcquisitionId);
+            keys.UnionWith(media.CanonicalMediaKeys ?? new HashSet<string>());
             return keys;
         }
 
@@ -1252,8 +1260,13 @@ namespace PersonCleaner.V2.Domain
             var keys = new HashSet<string>(StringComparer.Ordinal);
             if (!index.CreditsByPerson.TryGetValue(person.EmbyId, out var credits)) return keys.ToList();
             foreach (var credit in credits)
-                if (index.MediaKeysById.TryGetValue(credit.MediaEmbyId, out var mediaKeys))
-                    foreach (var key in mediaKeys.Where(x => x.StartsWith(ProviderNames.Tmdb + ":", StringComparison.Ordinal) || x.StartsWith(ProviderNames.Tvdb + ":", StringComparison.Ordinal))) keys.Add(key);
+                if (index.MediaById.TryGetValue(credit.MediaEmbyId, out var media))
+                {
+                    var tmdb = media.ProviderAcquisitionId(ProviderNames.Tmdb);
+                    var tvdb = media.ProviderAcquisitionId(ProviderNames.Tvdb);
+                    if (!string.IsNullOrWhiteSpace(tmdb)) keys.Add(ProviderNames.Tmdb + ":" + media.MediaType + ":" + tmdb);
+                    if (!string.IsNullOrWhiteSpace(tvdb)) keys.Add(ProviderNames.Tvdb + ":" + media.MediaType + ":" + tvdb);
+                }
             return keys.OrderBy(x => x, StringComparer.Ordinal).ToList();
         }
 
@@ -1348,7 +1361,7 @@ namespace PersonCleaner.V2.Domain
             public List<LocalPerson> LocalPeople { get; set; } = new List<LocalPerson>();
         }
         private sealed class IdentifierResult { public bool Match { get; set; } public bool StableMatch { get; set; } public bool NativeCrosswalkMatch { get; set; } public bool Conflict { get; set; } public bool Any { get; set; } public List<string> Matches { get; } = new List<string>(); public List<string> Conflicts { get; } = new List<string>(); }
-        private sealed class RoleResult { public int Exact { get; set; } public int Compatible { get; set; } public double Agreement { get; set; } }
+        private sealed class RoleResult { public int Exact { get; set; } public int Compatible { get; set; } public int Episode { get; set; } public double Agreement { get; set; } }
         private static readonly string[] StableIdProviders = { ProviderNames.Imdb, ProviderNames.Wikidata };
         private static readonly string[] NativePersonIdProviders = { ProviderNames.Tmdb, ProviderNames.Tvdb };
         private static readonly List<LocalCredit> EmptyCredits = new List<LocalCredit>();
@@ -1385,6 +1398,7 @@ namespace PersonCleaner.V2.Domain
             public Dictionary<string, List<LocalPerson>> ByImdb { get; } = new Dictionary<string, List<LocalPerson>>(StringComparer.OrdinalIgnoreCase);
             public Dictionary<string, List<LocalPerson>> ByCleanName { get; } = new Dictionary<string, List<LocalPerson>>(StringComparer.Ordinal);
             public Dictionary<long, List<LocalCredit>> CreditsByPerson { get; }
+            public Dictionary<long, MediaSeed> MediaById { get; }
             public Dictionary<long, HashSet<string>> MediaKeysById { get; }
             public Dictionary<string, PersonAcquisition> PersonAcquisitionsByKey { get; }
             public Dictionary<string, MediaAcquisition> MediaAcquisitionsByKey { get; }
@@ -1392,6 +1406,7 @@ namespace PersonCleaner.V2.Domain
             public LocalIndex(ResolutionInput input)
             {
                 CreditsByPerson = input.LocalCredits.GroupBy(x => x.PersonEmbyId).ToDictionary(x => x.Key, x => x.ToList());
+                MediaById = input.Media.ToDictionary(x => x.EmbyId);
                 MediaKeysById = input.Media.ToDictionary(x => x.EmbyId, MediaKeys);
                 PersonAcquisitionsByKey = input.PersonAcquisitions.GroupBy(x => x.Key, StringComparer.Ordinal).ToDictionary(x => x.Key, x => x.Last(), StringComparer.Ordinal);
                 MediaAcquisitionsByKey = input.MediaAcquisitions.GroupBy(x => x.Key, StringComparer.Ordinal).ToDictionary(x => x.Key, x => x.Last(), StringComparer.Ordinal);

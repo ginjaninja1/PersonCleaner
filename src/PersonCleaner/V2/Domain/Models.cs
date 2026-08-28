@@ -15,6 +15,7 @@ namespace PersonCleaner.V2.Domain
     {
         public const string Movie = "movie";
         public const string Series = "series";
+        public const string Episode = "episode";
     }
 
     public static class AcquisitionStates
@@ -34,6 +35,21 @@ namespace PersonCleaner.V2.Domain
         public string TvdbId { get; set; }
         public string TvdbSlug { get; set; }
         public string ImdbId { get; set; }
+        public string TmdbAcquisitionId { get; set; }
+        public string TvdbAcquisitionId { get; set; }
+        public long? ParentEmbyId { get; set; }
+        public string ParentTmdbId { get; set; }
+        public string ParentTvdbId { get; set; }
+        public int? SeasonNumber { get; set; }
+        public int? EpisodeNumber { get; set; }
+        public HashSet<string> CanonicalMediaKeys { get; set; } = new HashSet<string>(StringComparer.Ordinal);
+
+        public string ProviderAcquisitionId(string provider)
+        {
+            if (provider == ProviderNames.Tmdb) return string.IsNullOrWhiteSpace(TmdbAcquisitionId) ? TmdbId : TmdbAcquisitionId;
+            if (provider == ProviderNames.Tvdb) return string.IsNullOrWhiteSpace(TvdbAcquisitionId) ? TvdbId : TvdbAcquisitionId;
+            return null;
+        }
     }
 
     public sealed class MediaExternalIdentity
@@ -150,7 +166,7 @@ namespace PersonCleaner.V2.Domain
 
     public sealed class ScoreBreakdown
     {
-        public string ModelVersion { get; set; } = "person-evidence-v5";
+        public string ModelVersion { get; set; } = "person-evidence-v6";
         public double PositiveEvidenceScore { get; set; }
         public double MetadataConflictPenalty { get; set; }
         public double FilmographyJaccard { get; set; }
@@ -160,6 +176,7 @@ namespace PersonCleaner.V2.Domain
         public int SharedMediaCount { get; set; }
         public int ExactRoleMatches { get; set; }
         public int CompatibleRoleMatches { get; set; }
+        public int EpisodeCreditMatches { get; set; }
         public double RoleAgreement { get; set; }
         public int CompetingAttributionCount { get; set; }
         public List<CompetingAttribution> CompetingAttributions { get; set; } = new List<CompetingAttribution>();

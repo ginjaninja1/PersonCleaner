@@ -266,8 +266,8 @@ namespace PersonCleaner.V2.UI
 
         private static long? ParseLong(string value) => long.TryParse(value, out var result) ? result : (long?)null;
         private static string EmbyUrl(long id, string serverId) => string.IsNullOrWhiteSpace(serverId) ? null : "#!/item?id=" + id + "&serverId=" + Uri.EscapeDataString(serverId);
-        private static string TmdbMediaUrl(string type, string id) => string.IsNullOrWhiteSpace(id) ? null : "https://www.themoviedb.org/" + (type == MediaTypes.Series ? "tv/" : "movie/") + Uri.EscapeDataString(id);
-        private static string TvdbMediaUrl(string type, string slug) => string.IsNullOrWhiteSpace(slug) ? null : "https://thetvdb.com/" + (type == MediaTypes.Series ? "series/" : "movies/") + Uri.EscapeDataString(slug);
+        private static string TmdbMediaUrl(string type, string id) => string.IsNullOrWhiteSpace(id) ? null : type == MediaTypes.Episode ? "https://www.themoviedb.org/search?query=" + Uri.EscapeDataString(id) : "https://www.themoviedb.org/" + (type == MediaTypes.Series ? "tv/" : "movie/") + Uri.EscapeDataString(id);
+        private static string TvdbMediaUrl(string type, string slug) => string.IsNullOrWhiteSpace(slug) ? null : type == MediaTypes.Episode ? "https://thetvdb.com/search?query=" + Uri.EscapeDataString(slug) : "https://thetvdb.com/" + (type == MediaTypes.Series ? "series/" : "movies/") + Uri.EscapeDataString(slug);
         private static string ImdbTitleUrl(string id) => string.IsNullOrWhiteSpace(id) ? null : "https://www.imdb.com/title/" + Uri.EscapeDataString(id) + "/";
         private static void Add(List<string> links, string url, string label, string rawId) { if (!string.IsNullOrWhiteSpace(rawId)) links.Add(Anchor(url, label)); }
         private static string Anchor(string url, string label)

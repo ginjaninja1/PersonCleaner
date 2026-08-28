@@ -9,7 +9,7 @@ namespace PersonCleaner.V2.Providers
 {
     internal sealed class PayloadFlattener
     {
-        public const int MaterializerVersion = 2;
+        public const int MaterializerVersion = 3;
         private static readonly HashSet<string> TvdbRoles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         { "Actor", "Guest Star", "Director", "Writer", "Screenplay", "Producer", "Executive Producer", "Creator", "Showrunner" };
         private readonly IJsonSerializer json;
@@ -29,17 +29,25 @@ namespace PersonCleaner.V2.Providers
         {
             var source = json.DeserializeFromString<TmdbMedia>(payload) ?? new TmdbMedia();
             var result = new FlattenedMedia { Provider = ProviderNames.Tmdb, MediaType = item.MediaType, ProviderMediaId = item.ProviderId, Name = source.title ?? source.name };
+            if (source.id > 0) AddMediaId(result.ExternalIds, ProviderNames.Tmdb, source.id.ToString());
             AddMediaId(result.ExternalIds, ProviderNames.Imdb, source.external_ids?.imdb_id);
             AddMediaId(result.ExternalIds, ProviderNames.Tvdb, source.external_ids?.tvdb_id);
             AddMediaId(result.ExternalIds, ProviderNames.Wikidata, source.external_ids?.wikidata_id);
             var credits = item.MediaType == MediaTypes.Series ? source.aggregate_credits : source.credits;
-            foreach (var cast in credits?.cast ?? new List<TmdbCredit>())
+            var castCredits = (credits?.cast ?? new List<TmdbCredit>())
+                .Concat(credits?.guest_stars ?? new List<TmdbCredit>())
+                .Concat(item.MediaType == MediaTypes.Episode ? source.guest_stars ?? new List<TmdbCredit>() : new List<TmdbCredit>())
+                .GroupBy(x => x.id + "|" + (x.character ?? string.Join("/", (x.roles ?? new List<TmdbRole>()).Select(y => y.character))), StringComparer.Ordinal)
+                .Select(x => x.First());
+            foreach (var cast in castCredits)
             {
                 var role = string.Join(" / ", (cast.roles ?? new List<TmdbRole>()).Select(x => x.character).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().Take(3));
                 var roleName = string.IsNullOrWhiteSpace(role) ? cast.character : role;
                 result.Credits.Add(new ProviderCredit { ProviderPersonId = cast.id.ToString(), PersonName = cast.name, Role = string.IsNullOrWhiteSpace(roleName) ? "Actor" : "Actor: " + roleName, RoleCategory = "Actor", RoleName = roleName });
             }
-            foreach (var crew in credits?.crew ?? new List<TmdbCredit>())
+            var crewCredits = (credits?.crew ?? new List<TmdbCredit>())
+                .Concat(item.MediaType == MediaTypes.Episode ? source.crew ?? new List<TmdbCredit>() : new List<TmdbCredit>());
+            foreach (var crew in crewCredits)
             {
                 var jobs = (crew.jobs ?? new List<TmdbJob>()).Select(x => x.job).Concat(new[] { crew.job }).Where(IsScreenCrewRole).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
                 foreach (var job in jobs) result.Credits.Add(new ProviderCredit { ProviderPersonId = crew.id.ToString(), PersonName = crew.name, Role = job, RoleCategory = RoleCategory(job), RoleName = job });
@@ -61,6 +69,7 @@ namespace PersonCleaner.V2.Providers
         {
             var source = json.DeserializeFromString<TvdbResponse<TvdbEntity>>(payload)?.data ?? new TvdbEntity();
             var result = new FlattenedMedia { Provider = ProviderNames.Tvdb, MediaType = item.MediaType, ProviderMediaId = item.ProviderId, Name = source.name, Slug = source.slug };
+            if (source.id > 0) AddMediaId(result.ExternalIds, ProviderNames.Tvdb, source.id.ToString());
             AddRemoteIds(result.ExternalIds, source.remoteIds, false);
             foreach (var credit in (source.characters ?? new List<TvdbCharacter>()).Where(x => x.peopleId > 0 && TvdbRoles.Contains((x.peopleType ?? string.Empty).Trim())))
                 result.Credits.Add(new ProviderCredit { ProviderPersonId = credit.peopleId.ToString(), PersonName = credit.personName, Role = credit.peopleType + (string.IsNullOrWhiteSpace(credit.name) ? string.Empty : ": " + credit.name), RoleCategory = RoleCategory(credit.peopleType), RoleName = credit.name });

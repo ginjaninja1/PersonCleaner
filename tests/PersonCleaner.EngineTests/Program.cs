@@ -22,6 +22,8 @@ internal static class Program
         Run("Neil subset with matching role joins without penalizing missing TVDB credit", NeilSubsetRoleEvidenceMatches);
         Run("two shared credits accumulate enough evidence without birthdays", TwoSharedCreditsAccumulateEvidence);
         Run("asymmetric media IDs resolve through the full crosswalk graph", AsymmetricMediaIdsResolveTransitively);
+        Run("episode attributions use the movie and series truth pipeline", EpisodeAttributionsUseCorePipeline);
+        Run("episode credits preserve Andy-like provider disagreement without role gating", EpisodeCreditsPreserveProviderDisagreement);
         Run("missing external ids are neutral", MissingExternalIdsAreNeutral);
         Run("role-aware media dominance outweighs an external id conflict", RoleAwareMediaDominanceOutweighsExternalIdConflict);
         Run("Derek Luh native crosswalk outweighs a secondary IMDb conflict", DerekLuhCrosswalkOutweighsImdbConflict);
@@ -991,6 +993,83 @@ internal static class Program
         };
 
         Equal(2, DashboardCaseBuilder.Build(rows).Length);
+    }
+
+    private static void EpisodeAttributionsUseCorePipeline()
+    {
+        var identities = new[]
+        {
+            new ProviderMediaIdentity { Provider = ProviderNames.Tmdb, MediaType = MediaTypes.Episode, ProviderMediaId = "coordinate:100:1:1", ExternalIds = new List<MediaExternalIdentity> { External(ProviderNames.Tmdb, "7001"), External(ProviderNames.Tvdb, "9001") } },
+            new ProviderMediaIdentity { Provider = ProviderNames.Tvdb, MediaType = MediaTypes.Episode, ProviderMediaId = "9001", ExternalIds = new List<MediaExternalIdentity> { External(ProviderNames.Tmdb, "7001") } },
+            new ProviderMediaIdentity { Provider = ProviderNames.Tmdb, MediaType = MediaTypes.Episode, ProviderMediaId = "coordinate:100:1:2", ExternalIds = new List<MediaExternalIdentity> { External(ProviderNames.Tmdb, "7002"), External(ProviderNames.Tvdb, "9002") } },
+            new ProviderMediaIdentity { Provider = ProviderNames.Tvdb, MediaType = MediaTypes.Episode, ProviderMediaId = "9002", ExternalIds = new List<MediaExternalIdentity> { External(ProviderNames.Tmdb, "7002") } }
+        };
+        var canonical = MediaIdentityResolver.Resolve(identities);
+        var first = canonical[MediaIdentityResolver.RecordKey(ProviderNames.Tmdb, MediaTypes.Episode, "coordinate:100:1:1")];
+        var second = canonical[MediaIdentityResolver.RecordKey(ProviderNames.Tmdb, MediaTypes.Episode, "coordinate:100:1:2")];
+        Equal(first, canonical[MediaIdentityResolver.RecordKey(ProviderNames.Tvdb, MediaTypes.Episode, "9001")]);
+        Equal(second, canonical[MediaIdentityResolver.RecordKey(ProviderNames.Tvdb, MediaTypes.Episode, "9002")]);
+
+        var tmdb = Person(ProviderNames.Tmdb, "person-1", "Episode Truth", null, null, first, second);
+        var tvdb = Person(ProviderNames.Tvdb, "person-2", "Episode Truth", null, null, first, second);
+        AddObservedCredit(tmdb, first, "Actor", "Lead", MediaTypes.Episode, "coordinate:100:1:1");
+        AddObservedCredit(tmdb, second, "Director", "Director", MediaTypes.Episode, "coordinate:100:1:2");
+        AddObservedCredit(tvdb, first, "Writer", "Teleplay", MediaTypes.Episode, "9001");
+        AddObservedCredit(tvdb, second, "Actor", "Guest", MediaTypes.Episode, "9002");
+        var input = BaseInput(tmdb, tvdb);
+        input.AcquisitionTrackingEnabled = true;
+        input.ProviderCredits.AddRange(tmdb.Credits.Concat(tvdb.Credits));
+        input.Media.Add(new MediaSeed { EmbyId = 1, MediaType = MediaTypes.Episode, Name = "Episode One", TmdbAcquisitionId = "coordinate:100:1:1", TvdbId = "9001", TvdbAcquisitionId = "9001", ParentTmdbId = "100", SeasonNumber = 1, EpisodeNumber = 1, CanonicalMediaKeys = new HashSet<string> { first } });
+        input.Media.Add(new MediaSeed { EmbyId = 2, MediaType = MediaTypes.Episode, Name = "Episode Two", TmdbAcquisitionId = "coordinate:100:1:2", TvdbId = "9002", TvdbAcquisitionId = "9002", ParentTmdbId = "100", SeasonNumber = 1, EpisodeNumber = 2, CanonicalMediaKeys = new HashSet<string> { second } });
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 42, Name = "Episode Truth", TmdbId = "person-1" });
+        input.LocalCredits.Add(new LocalCredit { PersonEmbyId = 42, MediaEmbyId = 1, Role = "GuestStar" });
+        input.LocalCredits.Add(new LocalCredit { PersonEmbyId = 42, MediaEmbyId = 2, Role = "GuestStar: Lead" });
+        input.PersonAcquisitions.Add(Acquisition(ProviderNames.Tmdb, "person-1", AcquisitionStates.Present));
+        input.MediaAcquisitions.Add(new MediaAcquisition { Provider = ProviderNames.Tmdb, MediaType = MediaTypes.Episode, ProviderId = "coordinate:100:1:1", State = AcquisitionStates.Present });
+        input.MediaAcquisitions.Add(new MediaAcquisition { Provider = ProviderNames.Tvdb, MediaType = MediaTypes.Episode, ProviderId = "9001", State = AcquisitionStates.Present });
+        input.MediaAcquisitions.Add(new MediaAcquisition { Provider = ProviderNames.Tmdb, MediaType = MediaTypes.Episode, ProviderId = "coordinate:100:1:2", State = AcquisitionStates.Present });
+        input.MediaAcquisitions.Add(new MediaAcquisition { Provider = ProviderNames.Tvdb, MediaType = MediaTypes.Episode, ProviderId = "9002", State = AcquisitionStates.Present });
+
+        var engine = new ResolutionEngine();
+        var decisions = engine.Resolve(input, new ResolutionSettings());
+        Equal(2, engine.PairEvaluations.Single().Score.SharedMediaCount);
+        Equal(2, engine.PairEvaluations.Single().Score.EpisodeCreditMatches);
+        Equal(0, engine.PairEvaluations.Single().Score.ExactRoleMatches);
+        Equal(0, engine.PairEvaluations.Single().Score.CompatibleRoleMatches);
+        True(decisions.Any(x => x.Status == "MATCH"));
+        True(decisions.SelectMany(x => x.ImpactedMedia).Any(x => x.MediaType == MediaTypes.Episode));
+        var episodeAttributions = IdentityCasePlanner.Build(1, input, decisions, engine.Clusters).SelectMany(x => x.Credits).Where(x => x.MediaType == MediaTypes.Episode).ToList();
+        Equal(2, episodeAttributions.Count);
+        True(episodeAttributions.All(x => x.Attributions.Select(y => y.Provider).Distinct(StringComparer.Ordinal).Count() == 2));
+
+        new ProviderCorrection { Kind = CorrectionKinds.MediaCredit, Operation = CorrectionOperations.Unusable, Provider = ProviderNames.Tmdb, MediaType = MediaTypes.Episode, ProviderMediaId = "7001", ProviderPersonId = "person-1", Reason = "test" }.NormalizeAndValidate();
+    }
+
+    private static void EpisodeCreditsPreserveProviderDisagreement()
+    {
+        var input = new ResolutionInput();
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 12333, Name = "Andy Devine", TmdbId = "1159934", TvdbId = "259158", ImdbId = "nm0222597" });
+        input.Media.Add(new MediaSeed { EmbyId = 1028, MediaType = MediaTypes.Episode, Name = "The Duo is Slumming", TmdbAcquisitionId = "coordinate:2287:2:32", TvdbId = "261927", TvdbAcquisitionId = "261927" });
+        input.LocalCredits.Add(new LocalCredit { PersonEmbyId = 12333, MediaEmbyId = 1028, Role = "GuestStar" });
+        input.ProviderPeople.Add(new ProviderPerson { Provider = ProviderNames.Tmdb, ProviderId = "14966", Name = "Andy Devine" });
+        input.ProviderPeople.Add(new ProviderPerson { Provider = ProviderNames.Tmdb, ProviderId = "1159934", Name = "Andy Devine" });
+        input.ProviderPeople.Add(new ProviderPerson { Provider = ProviderNames.Tvdb, ProviderId = "259158", Name = "Andy Devine" });
+        input.ProviderCredits.Add(new ObservedProviderCredit { Provider = ProviderNames.Tmdb, ProviderPersonId = "14966", PersonName = "Andy Devine", MediaType = MediaTypes.Episode, ProviderMediaId = "coordinate:2287:2:32", CanonicalMediaKey = "tmdb:episode:424703", Role = "Actor: Santa", RoleCategory = "Actor", RoleName = "Santa" });
+        input.ProviderCredits.Add(new ObservedProviderCredit { Provider = ProviderNames.Tvdb, ProviderPersonId = "259158", PersonName = "Andy Devine", MediaType = MediaTypes.Episode, ProviderMediaId = "261927", CanonicalMediaKey = "tmdb:episode:424703", Role = "Guest Star", RoleCategory = "Actor" });
+
+        var clusters = new[]
+        {
+            new ResolutionClusterSnapshot { ClusterId = "older-andy", ProviderKeys = new List<string> { "tmdb:14966" }, IdentityConfidence = 0.8 },
+            new ResolutionClusterSnapshot { ClusterId = "current-andy", AnchorEmbyPersonId = 12333, ProviderKeys = new List<string> { "tmdb:1159934", "tvdb:259158" }, IdentityConfidence = 0.8, LocalAnchorConfidence = 1 }
+        };
+        var decisions = new[]
+        {
+            new ResolutionDecision { DecisionId = "andy-review", Status = "CONFLATION", Action = "HUMAN_REVIEW", DisplayName = "Andy Devine / Andy Devine", AnchorEmbyPersonId = 12333, ProviderKeys = "tmdb:14966, tvdb:259158", Confidence = 0.55 }
+        };
+        var credit = IdentityCasePlanner.Build(32, input, decisions, clusters).Single().Credits.Single();
+        Equal(2, credit.Attributions.Count);
+        Equal(2, credit.Attributions.Select(x => x.OutcomeId).Distinct(StringComparer.Ordinal).Count());
+        True(credit.CorrectionRequired);
     }
 
     private static void HolisticLilyPlan()

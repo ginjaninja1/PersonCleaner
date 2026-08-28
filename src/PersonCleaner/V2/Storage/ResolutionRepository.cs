@@ -12,7 +12,7 @@ namespace PersonCleaner.V2.Storage
 {
     internal sealed class ResolutionRepository : IDisposable
     {
-        private const int SchemaVersion = 11;
+        private const int SchemaVersion = 12;
         private readonly object sync = new object();
         [ThreadStatic] private static StatementBatch activeStatementBatch;
         private IDatabaseConnection db;
@@ -51,10 +51,10 @@ namespace PersonCleaner.V2.Storage
                 }
                 foreach (var sql in Schema) db.Execute(sql);
                 if (!version.HasValue) db.Execute("INSERT INTO schema_info(singleton,version) VALUES(1," + SchemaVersion.ToString(CultureInfo.InvariantCulture) + ")");
-                if (!ColumnExists("provider_media", "slug") || !ColumnExists("provider_media_credit", "role_category") || !ColumnExists("resolution_decision", "local_anchor_confidence") || !ColumnExists("cache_manifest", "materializer_version") || !ColumnExists("provider_media_observation", "materializer_version") || !ColumnExists("work_queue", "graph_eligible") || !ColumnExists("resolution_case", "presentation_purpose") || !TableExists("resolution_pair") || !TableExists("resolution_cluster") || !TableExists("provider_correction") || !TableExists("correction_application") || !TableExists("provider_correction_selection") || !TableExists("provider_absence_cache") || !TableExists("acquisition_observation") || !TableExists("global_local_person") || !TableExists("resolution_credit_assignment") || !TableExists("resolution_case") || !TableExists("resolution_case_person_snapshot") || !TableExists("resolution_identity_outcome") || !TableExists("resolution_case_credit") || !TableExists("resolution_case_credit_attribution") || !TableExists("resolution_question") || !TableExists("identity_case_apply"))
+                if (!ColumnExists("provider_media", "slug") || !ColumnExists("provider_media_credit", "role_category") || !ColumnExists("resolution_decision", "local_anchor_confidence") || !ColumnExists("cache_manifest", "materializer_version") || !ColumnExists("provider_media_observation", "materializer_version") || !ColumnExists("work_queue", "graph_eligible") || !ColumnExists("work_queue", "route_series_id") || !ColumnExists("current_media", "tmdb_acquisition_id") || !ColumnExists("resolution_run", "selected_episodes") || !ColumnExists("resolution_case", "presentation_purpose") || !TableExists("resolution_pair") || !TableExists("resolution_cluster") || !TableExists("provider_correction") || !TableExists("correction_application") || !TableExists("provider_correction_selection") || !TableExists("provider_absence_cache") || !TableExists("acquisition_observation") || !TableExists("global_local_person") || !TableExists("resolution_credit_assignment") || !TableExists("resolution_case") || !TableExists("resolution_case_person_snapshot") || !TableExists("resolution_identity_outcome") || !TableExists("resolution_case_credit") || !TableExists("resolution_case_credit_attribution") || !TableExists("resolution_question") || !TableExists("identity_case_apply"))
                 {
                     db.Dispose(); db = null;
-                    throw new InvalidOperationException("PersonCleaner schema 11 is incomplete. Stop Emby and restore the most recent pre-migration backup before applying the numbered migrations again.");
+                    throw new InvalidOperationException("PersonCleaner schema 12 is incomplete. Stop Emby and restore the most recent pre-migration backup before applying the numbered migrations again.");
                 }
                 // v2 originally represented the non-media dimension of person
                 // work as an empty string. Emby's SQLite binder can coerce an
@@ -116,9 +116,10 @@ namespace PersonCleaner.V2.Storage
                 x.Execute("DELETE FROM current_media"); x.Execute("DELETE FROM current_local_person"); x.Execute("DELETE FROM current_local_credit"); x.Execute("DELETE FROM global_local_person"); x.Execute("DELETE FROM current_provider_media"); x.Execute("DELETE FROM work_queue");
                 foreach (var item in media)
                 {
-                    Statement(x, "INSERT INTO current_media VALUES(@id,@type,@name,@year,@tmdb,@tvdb,@imdb)", s => { s.Bind("@id", item.EmbyId); s.Bind("@type", item.MediaType); s.Bind("@name", item.Name); s.Bind("@year", item.Year); s.Bind("@tmdb", item.TmdbId); s.Bind("@tvdb", item.TvdbId); s.Bind("@imdb", item.ImdbId); });
-                    SeedMedia(x, runId, ProviderNames.Tmdb, item.MediaType, item.TmdbId);
-                    SeedMedia(x, runId, ProviderNames.Tvdb, item.MediaType, item.TvdbId);
+                    Statement(x, @"INSERT INTO current_media(emby_id,media_type,name,production_year,tmdb_id,tvdb_id,imdb_id,tmdb_acquisition_id,tvdb_acquisition_id,parent_emby_id,parent_tmdb_id,parent_tvdb_id,season_number,episode_number)
+VALUES(@id,@type,@name,@year,@tmdb,@tvdb,@imdb,@tmdbAcquisition,@tvdbAcquisition,@parent,@parentTmdb,@parentTvdb,@season,@episode)", s => { s.Bind("@id", item.EmbyId); s.Bind("@type", item.MediaType); s.Bind("@name", item.Name); s.Bind("@year", item.Year); s.Bind("@tmdb", item.TmdbId); s.Bind("@tvdb", item.TvdbId); s.Bind("@imdb", item.ImdbId); s.Bind("@tmdbAcquisition", item.ProviderAcquisitionId(ProviderNames.Tmdb)); s.Bind("@tvdbAcquisition", item.ProviderAcquisitionId(ProviderNames.Tvdb)); s.Bind("@parent", item.ParentEmbyId); s.Bind("@parentTmdb", item.ParentTmdbId); s.Bind("@parentTvdb", item.ParentTvdbId); s.Bind("@season", item.SeasonNumber); s.Bind("@episode", item.EpisodeNumber); });
+                    SeedMedia(x, runId, ProviderNames.Tmdb, item.MediaType, item.ProviderAcquisitionId(ProviderNames.Tmdb), item.ParentTmdbId, item.SeasonNumber, item.EpisodeNumber);
+                    SeedMedia(x, runId, ProviderNames.Tvdb, item.MediaType, item.ProviderAcquisitionId(ProviderNames.Tvdb), item.ParentTvdbId, item.SeasonNumber, item.EpisodeNumber);
                 }
                 ApplyLocalMediaQueueCorrections(x, runId, media, LoadCorrections());
                 foreach (var person in people)
@@ -127,15 +128,15 @@ namespace PersonCleaner.V2.Storage
                     Statement(x, "INSERT INTO global_local_person VALUES(@id,@name,@tmdb,@tvdb,@imdb)", s => { s.Bind("@id", person.EmbyId); s.Bind("@name", person.Name); s.Bind("@tmdb", person.TmdbId); s.Bind("@tvdb", person.TvdbId); s.Bind("@imdb", person.ImdbId); });
                 foreach (var credit in credits.Distinct(new LocalCreditComparer()))
                     Statement(x, "INSERT INTO current_local_credit VALUES(@person,@media,@role)", s => { s.Bind("@person", credit.PersonEmbyId); s.Bind("@media", credit.MediaEmbyId); s.Bind("@role", credit.Role); });
-                var movies = media.Count(x => x.MediaType == MediaTypes.Movie); var series = media.Count(x => x.MediaType == MediaTypes.Series);
-                Statement(x, "UPDATE resolution_run SET selected_movies=@movies,selected_series=@series,updated_utc=@now WHERE run_id=@run", s => { s.Bind("@movies", movies); s.Bind("@series", series); s.Bind("@now", Now()); s.Bind("@run", runId); });
+                var movies = media.Count(x => x.MediaType == MediaTypes.Movie); var series = media.Count(x => x.MediaType == MediaTypes.Series); var episodes = media.Count(x => x.MediaType == MediaTypes.Episode);
+                Statement(x, "UPDATE resolution_run SET selected_movies=@movies,selected_series=@series,selected_episodes=@episodes,updated_utc=@now WHERE run_id=@run", s => { s.Bind("@movies", movies); s.Bind("@series", series); s.Bind("@episodes", episodes); s.Bind("@now", Now()); s.Bind("@run", runId); });
             }, TransactionMode.Immediate);
         }
 
         public List<QueueItem> PendingMedia()
         {
             var result = new List<QueueItem>();
-            lock (sync) using (var s = db.PrepareStatement("SELECT provider,entity_type,provider_id,media_type,priority,graph_eligible FROM work_queue WHERE status='pending' AND entity_type='media' ORDER BY priority DESC,provider,media_type,provider_id"))
+            lock (sync) using (var s = db.PrepareStatement("SELECT provider,entity_type,provider_id,media_type,priority,graph_eligible,route_series_id,route_season_number,route_episode_number FROM work_queue WHERE status='pending' AND entity_type='media' ORDER BY priority DESC,provider,media_type,provider_id"))
                 foreach (var r in s.Rows()) result.Add(ReadQueue(r));
             return result;
         }
@@ -143,7 +144,7 @@ namespace PersonCleaner.V2.Storage
         public List<QueueItem> PendingPeople()
         {
             var result = new List<QueueItem>();
-            lock (sync) using (var s = db.PrepareStatement("SELECT provider,entity_type,provider_id,media_type,priority,graph_eligible FROM work_queue WHERE status='pending' AND entity_type='person' ORDER BY graph_eligible DESC,priority DESC,provider,provider_id"))
+            lock (sync) using (var s = db.PrepareStatement("SELECT provider,entity_type,provider_id,media_type,priority,graph_eligible,route_series_id,route_season_number,route_episode_number FROM work_queue WHERE status='pending' AND entity_type='person' ORDER BY graph_eligible DESC,priority DESC,provider,provider_id"))
                 foreach (var r in s.Rows()) result.Add(ReadQueue(r));
             return result;
         }
@@ -174,14 +175,14 @@ FROM current_local_credit c JOIN current_local_person p ON p.emby_id=c.person_em
                 using (var s = db.PrepareStatement(@"SELECT c.provider,c.provider_person_id,c.person_name,m.emby_id
 FROM current_media m
 CROSS JOIN provider_media_credit c
-  ON c.provider='tmdb' AND c.media_type=m.media_type AND c.provider_media_id=m.tmdb_id
-WHERE m.tmdb_id IS NOT NULL
+  ON c.provider='tmdb' AND c.media_type=m.media_type AND c.provider_media_id=coalesce(m.tmdb_acquisition_id,m.tmdb_id)
+WHERE coalesce(m.tmdb_acquisition_id,m.tmdb_id) IS NOT NULL
 UNION
 SELECT c.provider,c.provider_person_id,c.person_name,m.emby_id
 FROM current_media m
 CROSS JOIN provider_media_credit c
-  ON c.provider='tvdb' AND c.media_type=m.media_type AND c.provider_media_id=m.tvdb_id
-WHERE m.tvdb_id IS NOT NULL"))
+  ON c.provider='tvdb' AND c.media_type=m.media_type AND c.provider_media_id=coalesce(m.tvdb_acquisition_id,m.tvdb_id)
+WHERE coalesce(m.tvdb_acquisition_id,m.tvdb_id) IS NOT NULL"))
                     foreach (var r in s.Rows())
                     {
                         var provider = r.GetString(0); var providerId = r.GetString(1); var key = provider + ":" + providerId;
@@ -345,7 +346,10 @@ WHERE m.tvdb_id IS NOT NULL"))
             {
                 var acquisitionRunId = runId ?? LatestCompletedRunId();
                 var tracker = new CorrectionApplicationTracker(LoadCorrections());
-                using (var s = db.PrepareStatement("SELECT m.emby_id,m.media_type,m.name,m.production_year,m.tmdb_id,m.tvdb_id,m.imdb_id,(SELECT p.slug FROM provider_media p WHERE p.provider='tvdb' AND p.media_type=m.media_type AND p.provider_media_id=m.tvdb_id) FROM current_media m")) foreach (var r in s.Rows()) input.Media.Add(new MediaSeed { EmbyId = r.GetInt64(0), MediaType = r.GetString(1), Name = r.GetString(2), Year = r.IsDBNull(3) ? (int?)null : r.GetInt(3), TmdbId = Null(r, 4), TvdbId = Null(r, 5), ImdbId = Null(r, 6), TvdbSlug = Null(r, 7) });
+                using (var s = db.PrepareStatement(@"SELECT m.emby_id,m.media_type,m.name,m.production_year,m.tmdb_id,m.tvdb_id,m.imdb_id,
+(SELECT p.slug FROM provider_media p WHERE p.provider='tvdb' AND p.media_type=m.media_type AND p.provider_media_id=coalesce(m.tvdb_acquisition_id,m.tvdb_id)),
+m.tmdb_acquisition_id,m.tvdb_acquisition_id,m.parent_emby_id,m.parent_tmdb_id,m.parent_tvdb_id,m.season_number,m.episode_number FROM current_media m"))
+                    foreach (var r in s.Rows()) input.Media.Add(new MediaSeed { EmbyId = r.GetInt64(0), MediaType = r.GetString(1), Name = r.GetString(2), Year = r.IsDBNull(3) ? (int?)null : r.GetInt(3), TmdbId = Null(r, 4), TvdbId = Null(r, 5), ImdbId = Null(r, 6), TvdbSlug = Null(r, 7), TmdbAcquisitionId = Null(r, 8), TvdbAcquisitionId = Null(r, 9), ParentEmbyId = r.IsDBNull(10) ? (long?)null : r.GetInt64(10), ParentTmdbId = Null(r, 11), ParentTvdbId = Null(r, 12), SeasonNumber = r.IsDBNull(13) ? (int?)null : r.GetInt(13), EpisodeNumber = r.IsDBNull(14) ? (int?)null : r.GetInt(14) });
                 using (var s = db.PrepareStatement("SELECT emby_id,name,tmdb_id,tvdb_id,imdb_id FROM current_local_person")) foreach (var r in s.Rows()) input.LocalPeople.Add(new LocalPerson { EmbyId = r.GetInt64(0), Name = r.GetString(1), TmdbId = Null(r, 2), TvdbId = Null(r, 3), ImdbId = Null(r, 4) });
                 using (var s = db.PrepareStatement("SELECT person_emby_id,media_emby_id,role FROM current_local_credit")) foreach (var r in s.Rows()) input.LocalCredits.Add(new LocalCredit { PersonEmbyId = r.GetInt64(0), MediaEmbyId = r.GetInt64(1), Role = r.GetString(2) });
                 const string personSql = @"SELECT p.provider,p.provider_person_id,p.name,p.clean_name,p.birthday
@@ -404,6 +408,12 @@ WHERE a.run_id=@run AND a.outcome='PRESENT'";
                     foreach (var r in s.Rows()) input.MediaAcquisitions.Add(new MediaAcquisition { Provider = r.GetString(0), MediaType = r.GetString(1), ProviderId = r.GetString(2), State = r.GetString(3) });
                 }
                 ProviderCorrectionOverlay.Apply(input, tracker);
+                foreach (var media in input.Media)
+                {
+                    media.CanonicalMediaKeys.Clear();
+                    AddCanonicalMediaKey(media, canonicalMedia, ProviderNames.Tmdb, media.ProviderAcquisitionId(ProviderNames.Tmdb));
+                    AddCanonicalMediaKey(media, canonicalMedia, ProviderNames.Tvdb, media.ProviderAcquisitionId(ProviderNames.Tvdb));
+                }
                 LoadRelevantGlobalPeople(input, tracker.Rules);
                 input.ActiveCorrections.AddRange(tracker.Rules);
                 input.CorrectionApplications.AddRange(tracker.Results);
@@ -502,6 +512,7 @@ WHERE a.run_id=@run AND a.outcome='PRESENT'";
                     PairFeature(x, runId, pair.PairId, "role_agreement", score.RoleAgreement, null);
                     PairFeature(x, runId, pair.PairId, "exact_role_matches", score.ExactRoleMatches, null);
                     PairFeature(x, runId, pair.PairId, "compatible_role_matches", score.CompatibleRoleMatches, null);
+                    PairFeature(x, runId, pair.PairId, "episode_credit_matches", score.EpisodeCreditMatches, null);
                     PairFeature(x, runId, pair.PairId, "name_frequency", score.NameFrequency, score.ExactNameMatch ? "exact" : score.AliasMatch ? "alias" : "none");
                     PairFeature(x, runId, pair.PairId, "birthday", null, score.BirthdayState);
                     PairFeature(x, runId, pair.PairId, "birthday_detail", null, score.BirthdayDetail);
@@ -740,7 +751,7 @@ ORDER BY c.case_id"))
                 const string sql = @"SELECT c.provider,c.media_type,c.provider_media_id,c.provider_person_id,c.role,c.role_category,c.role_name
 FROM provider_media_credit c JOIN current_media m ON m.emby_id=@media
 WHERE c.media_type=m.media_type AND
- ((c.provider='tmdb' AND c.provider_media_id=m.tmdb_id) OR (c.provider='tvdb' AND c.provider_media_id=m.tvdb_id))
+ ((c.provider='tmdb' AND c.provider_media_id=coalesce(m.tmdb_acquisition_id,m.tmdb_id)) OR (c.provider='tvdb' AND c.provider_media_id=coalesce(m.tvdb_acquisition_id,m.tvdb_id)))
 ORDER BY c.provider,c.provider_person_id,c.role";
                 using (var s = db.PrepareStatement(sql))
                 {
@@ -841,8 +852,8 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
             lock (sync)
             {
                 RunStatus run = null;
-                using (var s = db.PrepareStatement("SELECT run_id,status,mode,phase,message,selected_movies,selected_series,media_fetched,people_fetched,cache_hits,failures,decisions FROM resolution_run ORDER BY run_id DESC LIMIT 1"))
-                    foreach (var r in s.Rows()) run = new RunStatus { RunId = r.GetInt64(0), Status = r.GetString(1), Mode = r.GetString(2), Phase = r.GetString(3), Message = r.GetString(4), SelectedMovies = r.GetInt(5), SelectedSeries = r.GetInt(6), MediaFetched = r.GetInt(7), PeopleFetched = r.GetInt(8), CacheHits = r.GetInt(9), Failures = r.GetInt(10), Decisions = r.GetInt(11) };
+                using (var s = db.PrepareStatement("SELECT run_id,status,mode,phase,message,selected_movies,selected_series,selected_episodes,media_fetched,people_fetched,cache_hits,failures,decisions FROM resolution_run ORDER BY run_id DESC LIMIT 1"))
+                    foreach (var r in s.Rows()) run = new RunStatus { RunId = r.GetInt64(0), Status = r.GetString(1), Mode = r.GetString(2), Phase = r.GetString(3), Message = r.GetString(4), SelectedMovies = r.GetInt(5), SelectedSeries = r.GetInt(6), SelectedEpisodes = r.GetInt(7), MediaFetched = r.GetInt(8), PeopleFetched = r.GetInt(9), CacheHits = r.GetInt(10), Failures = r.GetInt(11), Decisions = r.GetInt(12) };
                 if (run == null) return null;
 
                 using (var s = db.PrepareStatement(@"SELECT count(*),
@@ -959,7 +970,7 @@ media_rows AS (
  FROM selected_cases c JOIN resolution_case_decision cd ON cd.run_id=c.run_id AND cd.case_id=c.case_id
  JOIN resolution_media m ON m.run_id=cd.run_id AND m.decision_id=cd.decision_id
  LEFT JOIN current_media cm ON cm.emby_id=m.emby_media_id
- LEFT JOIN provider_media pm ON pm.provider='tvdb' AND pm.media_type=m.media_type AND pm.provider_media_id=cm.tvdb_id
+ LEFT JOIN provider_media pm ON pm.provider='tvdb' AND pm.media_type=m.media_type AND pm.provider_media_id=coalesce(cm.tvdb_acquisition_id,cm.tvdb_id)
 ), ranked AS (
  SELECT media_rows.*,ROW_NUMBER() OVER(PARTITION BY case_id ORDER BY media_type,display_name,emby_media_id,role) row_number FROM media_rows
 )
@@ -1062,7 +1073,7 @@ ORDER BY p.case_id,p.emby_id"))
                     foreach (var r in s.Rows()) if (byDecision.TryGetValue(r.GetString(0), out var decision))
                         decision.Details = decision.Details.Concat(new[] { new DashboardDetail { DetailId = r.GetString(0) + ":e:" + r.GetInt(1).ToString(CultureInfo.InvariantCulture) + ":" + r.GetString(2), Section = "Evidence", Order = r.GetInt(1), Signal = r.GetString(2), Verdict = r.GetString(3), Explanation = r.GetString(4), RawMetric = r.GetString(5) } }).ToArray();
                 }
-                const string mediaSql = "WITH visible AS (" + visible + "), ranked AS (SELECT m.*,ROW_NUMBER() OVER(PARTITION BY m.decision_id ORDER BY m.media_type,m.display_name,m.emby_media_id) AS row_number FROM resolution_media m JOIN visible v ON v.decision_id=m.decision_id WHERE m.run_id=@run) SELECT r.decision_id,r.row_number,r.media_type,r.display_name,r.role,r.emby_media_id,c.tmdb_id,c.tvdb_id,c.imdb_id,t.slug FROM ranked r LEFT JOIN current_media c ON c.emby_id=r.emby_media_id LEFT JOIN provider_media t ON t.provider='tvdb' AND t.media_type=r.media_type AND t.provider_media_id=c.tvdb_id WHERE r.row_number<=@mediaLimit ORDER BY r.decision_id,r.row_number";
+                const string mediaSql = "WITH visible AS (" + visible + "), ranked AS (SELECT m.*,ROW_NUMBER() OVER(PARTITION BY m.decision_id ORDER BY m.media_type,m.display_name,m.emby_media_id) AS row_number FROM resolution_media m JOIN visible v ON v.decision_id=m.decision_id WHERE m.run_id=@run) SELECT r.decision_id,r.row_number,r.media_type,r.display_name,r.role,r.emby_media_id,c.tmdb_id,c.tvdb_id,c.imdb_id,t.slug FROM ranked r LEFT JOIN current_media c ON c.emby_id=r.emby_media_id LEFT JOIN provider_media t ON t.provider='tvdb' AND t.media_type=r.media_type AND t.provider_media_id=coalesce(c.tvdb_acquisition_id,c.tvdb_id) WHERE r.row_number<=@mediaLimit ORDER BY r.decision_id,r.row_number";
                 using (var s = db.PrepareStatement(mediaSql))
                 {
                     s.Bind("@run", latest); s.Bind("@mediaLimit", Math.Max(0, mediaExamples));
@@ -1366,11 +1377,11 @@ WHERE correction_id IN (SELECT correction_id FROM provider_correction_selection 
             return false;
         }
 
-        private static void SeedMedia(IDatabaseConnection x, long runId, string provider, string type, string id)
+        private static void SeedMedia(IDatabaseConnection x, long runId, string provider, string type, string id, string routeSeriesId = null, int? routeSeasonNumber = null, int? routeEpisodeNumber = null)
         {
             if (string.IsNullOrWhiteSpace(id)) return;
             Statement(x, "INSERT OR IGNORE INTO current_provider_media VALUES(@provider,@type,@id)", s => { s.Bind("@provider", provider); s.Bind("@type", type); s.Bind("@id", id); });
-            Statement(x, "INSERT OR REPLACE INTO work_queue(provider,entity_type,media_type,provider_id,priority,status,attempts,error,updated_utc,graph_eligible) VALUES(@provider,'media',@type,@id,2,'pending',0,NULL,@now,0)", s => { s.Bind("@provider", provider); s.Bind("@type", type); s.Bind("@id", id); s.Bind("@now", Now()); });
+            Statement(x, "INSERT OR REPLACE INTO work_queue(provider,entity_type,media_type,provider_id,priority,status,attempts,error,updated_utc,graph_eligible,route_series_id,route_season_number,route_episode_number) VALUES(@provider,'media',@type,@id,2,'pending',0,NULL,@now,0,@series,@season,@episode)", s => { s.Bind("@provider", provider); s.Bind("@type", type); s.Bind("@id", id); s.Bind("@now", Now()); s.Bind("@series", routeSeriesId); s.Bind("@season", routeSeasonNumber); s.Bind("@episode", routeEpisodeNumber); });
         }
         private static void ApplyLocalMediaQueueCorrections(IDatabaseConnection x, long runId, IEnumerable<MediaSeed> media, IEnumerable<ProviderCorrection> corrections)
         {
@@ -1378,14 +1389,15 @@ WHERE correction_id IN (SELECT correction_id FROM provider_correction_selection 
             foreach (var rule in corrections.Where(y => y.Kind == CorrectionKinds.LocalMediaBinding).OrderBy(y => y.CorrectionId))
             {
                 if (!rule.EmbyId.HasValue || !byId.TryGetValue(rule.EmbyId.Value, out var item)) continue;
-                var current = rule.Provider == ProviderNames.Tmdb ? item.TmdbId : item.TvdbId;
-                if (!string.IsNullOrWhiteSpace(rule.CurrentValue) && !string.Equals(rule.CurrentValue, current, StringComparison.OrdinalIgnoreCase)) continue;
-                if (!string.IsNullOrWhiteSpace(current))
+                var currentStable = rule.Provider == ProviderNames.Tmdb ? item.TmdbId : item.TvdbId;
+                var currentAcquisition = item.ProviderAcquisitionId(rule.Provider);
+                if (!string.IsNullOrWhiteSpace(rule.CurrentValue) && !string.Equals(rule.CurrentValue, currentStable, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!string.IsNullOrWhiteSpace(currentAcquisition))
                 {
-                    Statement(x, "DELETE FROM current_provider_media WHERE provider=@provider AND media_type=@type AND provider_media_id=@id", s => { s.Bind("@provider", rule.Provider); s.Bind("@type", item.MediaType); s.Bind("@id", current); });
-                    Statement(x, "DELETE FROM work_queue WHERE provider=@provider AND entity_type='media' AND media_type=@type AND provider_id=@id", s => { s.Bind("@provider", rule.Provider); s.Bind("@type", item.MediaType); s.Bind("@id", current); });
+                    Statement(x, "DELETE FROM current_provider_media WHERE provider=@provider AND media_type=@type AND provider_media_id=@id", s => { s.Bind("@provider", rule.Provider); s.Bind("@type", item.MediaType); s.Bind("@id", currentAcquisition); });
+                    Statement(x, "DELETE FROM work_queue WHERE provider=@provider AND entity_type='media' AND media_type=@type AND provider_id=@id", s => { s.Bind("@provider", rule.Provider); s.Bind("@type", item.MediaType); s.Bind("@id", currentAcquisition); });
                 }
-                if (rule.Operation == CorrectionOperations.Replace) SeedMedia(x, runId, rule.Provider, item.MediaType, rule.ReplacementValue);
+                if (rule.Operation == CorrectionOperations.Replace) SeedMedia(x, runId, rule.Provider, item.MediaType, rule.ReplacementValue, rule.Provider == ProviderNames.Tmdb ? item.ParentTmdbId : item.ParentTvdbId, item.SeasonNumber, item.EpisodeNumber);
             }
         }
         private static void AddCorrectionPerson(ISet<string> target, string provider, string id)
@@ -1398,7 +1410,14 @@ WHERE correction_id IN (SELECT correction_id FROM provider_correction_selection 
             if (!string.IsNullOrWhiteSpace(id)) target.Add(provider + ":" + id.Trim());
         }
 
-        private static QueueItem ReadQueue(IResultSet r) => new QueueItem { Provider = r.GetString(0), EntityType = r.GetString(1), ProviderId = r.GetString(2), MediaType = r.GetString(3), Priority = r.GetInt(4), GraphEligible = r.GetInt(5) != 0 };
+        private static void AddCanonicalMediaKey(MediaSeed media, IReadOnlyDictionary<string, string> canonical, string provider, string providerMediaId)
+        {
+            if (string.IsNullOrWhiteSpace(providerMediaId)) return;
+            var recordKey = MediaIdentityResolver.RecordKey(provider, media.MediaType, providerMediaId);
+            if (canonical.TryGetValue(recordKey, out var canonicalKey)) media.CanonicalMediaKeys.Add(canonicalKey);
+        }
+
+        private static QueueItem ReadQueue(IResultSet r) => new QueueItem { Provider = r.GetString(0), EntityType = r.GetString(1), ProviderId = r.GetString(2), MediaType = r.GetString(3), Priority = r.GetInt(4), GraphEligible = r.GetInt(5) != 0, RouteSeriesId = Null(r, 6), RouteSeasonNumber = r.IsDBNull(7) ? (int?)null : r.GetInt(7), RouteEpisodeNumber = r.IsDBNull(8) ? (int?)null : r.GetInt(8) };
         private static string Dimension(string entityType, string mediaType) => string.Equals(entityType, "person", StringComparison.Ordinal) ? "person" : string.IsNullOrWhiteSpace(mediaType) ? "unknown" : mediaType;
         private static string Required(string value, string fallback) => string.IsNullOrWhiteSpace(value) ? fallback : value;
         private static string Null(IResultSet r, int index) => r.IsDBNull(index) ? null : r.GetString(index);
@@ -1552,8 +1571,8 @@ WHERE correction_id IN (SELECT correction_id FROM provider_correction_selection 
         private static readonly string[] Schema =
         {
             "CREATE TABLE IF NOT EXISTS schema_info(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL)",
-            "CREATE TABLE IF NOT EXISTS resolution_run(run_id INTEGER PRIMARY KEY AUTOINCREMENT,status TEXT NOT NULL,mode TEXT NOT NULL,phase TEXT NOT NULL,started_utc INTEGER NOT NULL,updated_utc INTEGER NOT NULL,finished_utc INTEGER,message TEXT NOT NULL,selected_movies INTEGER NOT NULL DEFAULT 0,selected_series INTEGER NOT NULL DEFAULT 0,media_fetched INTEGER NOT NULL DEFAULT 0,people_fetched INTEGER NOT NULL DEFAULT 0,cache_hits INTEGER NOT NULL DEFAULT 0,failures INTEGER NOT NULL DEFAULT 0,decisions INTEGER NOT NULL DEFAULT 0)",
-            "CREATE TABLE IF NOT EXISTS current_media(emby_id INTEGER PRIMARY KEY,media_type TEXT NOT NULL,name TEXT NOT NULL,production_year INTEGER,tmdb_id TEXT,tvdb_id TEXT,imdb_id TEXT)",
+            "CREATE TABLE IF NOT EXISTS resolution_run(run_id INTEGER PRIMARY KEY AUTOINCREMENT,status TEXT NOT NULL,mode TEXT NOT NULL,phase TEXT NOT NULL,started_utc INTEGER NOT NULL,updated_utc INTEGER NOT NULL,finished_utc INTEGER,message TEXT NOT NULL,selected_movies INTEGER NOT NULL DEFAULT 0,selected_series INTEGER NOT NULL DEFAULT 0,selected_episodes INTEGER NOT NULL DEFAULT 0,media_fetched INTEGER NOT NULL DEFAULT 0,people_fetched INTEGER NOT NULL DEFAULT 0,cache_hits INTEGER NOT NULL DEFAULT 0,failures INTEGER NOT NULL DEFAULT 0,decisions INTEGER NOT NULL DEFAULT 0)",
+            "CREATE TABLE IF NOT EXISTS current_media(emby_id INTEGER PRIMARY KEY,media_type TEXT NOT NULL,name TEXT NOT NULL,production_year INTEGER,tmdb_id TEXT,tvdb_id TEXT,imdb_id TEXT,tmdb_acquisition_id TEXT,tvdb_acquisition_id TEXT,parent_emby_id INTEGER,parent_tmdb_id TEXT,parent_tvdb_id TEXT,season_number INTEGER,episode_number INTEGER)",
             "CREATE TABLE IF NOT EXISTS current_local_person(emby_id INTEGER PRIMARY KEY,name TEXT NOT NULL,tmdb_id TEXT,tvdb_id TEXT,imdb_id TEXT)",
             "CREATE TABLE IF NOT EXISTS global_local_person(emby_id INTEGER PRIMARY KEY,name TEXT NOT NULL,tmdb_id TEXT,tvdb_id TEXT,imdb_id TEXT)",
             "CREATE INDEX IF NOT EXISTS idx_current_local_tmdb ON current_local_person(tmdb_id) WHERE tmdb_id IS NOT NULL",
@@ -1564,7 +1583,7 @@ WHERE correction_id IN (SELECT correction_id FROM provider_correction_selection 
             "CREATE INDEX IF NOT EXISTS idx_global_local_imdb ON global_local_person(imdb_id) WHERE imdb_id IS NOT NULL",
             "CREATE TABLE IF NOT EXISTS current_local_credit(person_emby_id INTEGER NOT NULL,media_emby_id INTEGER NOT NULL,role TEXT NOT NULL,PRIMARY KEY(person_emby_id,media_emby_id,role)) WITHOUT ROWID",
             "CREATE TABLE IF NOT EXISTS current_provider_media(provider TEXT NOT NULL,media_type TEXT NOT NULL,provider_media_id TEXT NOT NULL,PRIMARY KEY(provider,media_type,provider_media_id)) WITHOUT ROWID",
-            "CREATE TABLE IF NOT EXISTS work_queue(provider TEXT NOT NULL,entity_type TEXT NOT NULL,media_type TEXT NOT NULL,provider_id TEXT NOT NULL,priority INTEGER NOT NULL,status TEXT NOT NULL,attempts INTEGER NOT NULL,error TEXT,updated_utc INTEGER NOT NULL,graph_eligible INTEGER NOT NULL CHECK(graph_eligible IN(0,1)),PRIMARY KEY(provider,entity_type,media_type,provider_id)) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS work_queue(provider TEXT NOT NULL,entity_type TEXT NOT NULL,media_type TEXT NOT NULL,provider_id TEXT NOT NULL,priority INTEGER NOT NULL,status TEXT NOT NULL,attempts INTEGER NOT NULL,error TEXT,updated_utc INTEGER NOT NULL,graph_eligible INTEGER NOT NULL CHECK(graph_eligible IN(0,1)),route_series_id TEXT,route_season_number INTEGER,route_episode_number INTEGER,PRIMARY KEY(provider,entity_type,media_type,provider_id)) WITHOUT ROWID",
             "CREATE INDEX IF NOT EXISTS idx_work_queue_status ON work_queue(status,entity_type,priority DESC)",
             "CREATE TABLE IF NOT EXISTS cache_manifest(provider TEXT NOT NULL,entity_type TEXT NOT NULL,media_type TEXT NOT NULL,provider_id TEXT NOT NULL,payload_hash TEXT NOT NULL,relative_path TEXT NOT NULL,last_fetched_utc INTEGER NOT NULL,materializer_version INTEGER NOT NULL,PRIMARY KEY(provider,entity_type,media_type,provider_id)) WITHOUT ROWID",
             "CREATE TABLE IF NOT EXISTS fetch_failure(provider TEXT NOT NULL,entity_type TEXT NOT NULL,media_type TEXT NOT NULL,provider_id TEXT NOT NULL,last_failed_utc INTEGER NOT NULL,error TEXT NOT NULL,PRIMARY KEY(provider,entity_type,media_type,provider_id)) WITHOUT ROWID",

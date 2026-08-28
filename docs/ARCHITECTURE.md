@@ -14,7 +14,7 @@
 
 ```mermaid
 flowchart LR
-    E["Read-only Emby library"] --> S["Stable 50 movie + 50 series sandbox plus explicit IDs"]
+    E["Read-only Emby library"] --> S["Stable 50 movie + 50 series + 50 episode sandbox plus explicit IDs"]
     S --> MQ["Provider media queue"]
     MQ --> C{"Fresh raw cache?"}
     C -->|yes| F["Existing flattened media evidence"]
@@ -44,9 +44,9 @@ personcleaner-v2/
 ├── entity-resolution.db-wal
 ├── entity-resolution.db-shm
 └── payload-cache/
-    ├── tmdb/media/{movie|series}/<id>.json
+    ├── tmdb/media/{movie|series|episode}/<id>.json
     ├── tmdb/person/person/<id>.json
-    ├── tvdb/media/{movie|series}/<id>.json
+    ├── tvdb/media/{movie|series|episode}/<id>.json
     └── tvdb/person/person/<id>.json
 ```
 
@@ -84,7 +84,7 @@ For `(provider, entity type, media type, provider ID)`:
 
 Selected media remains the sole cohort boundary. Provider people discovered from its credits may be marked graph-eligible when their current ID or normalized same-title name connects them to a locally credited Emby person. The current TMDB/TVDB bindings of those same local people are also queued as validation probes.
 
-Explicit sandbox media IDs are unioned with the deterministic sample. Explicit Emby person IDs add media directly credited to those people. When **Auto-expand affected-person media** is enabled, the initial subset's affected people are identified first and every provider-addressable movie or series credited to them is added before hydration. Local people and credits remain restricted to that initial affected-person set, so co-credited people encountered only on completion titles provide evidence but do not receive incomplete recommendations of their own. The completion pass is bounded and does not traverse onward through those co-credited people. Independently, every live Emby person's TMDB/TVDB/IMDb bindings are copied into `global_local_person`. This table is a collision veto only and is never loaded into the local anchor index. If a proposed identity has an out-of-scope owner, the decision action becomes `INCOMPLETE_SCOPE`; the operator must expand the test scope explicitly or use Full mode.
+Explicit sandbox Emby movie, series and episode IDs are unioned with the deterministic sample. Explicit Emby person IDs add media directly credited to those people. When **Auto-expand affected-person media** is enabled, the initial subset's affected people are identified first and every provider-addressable movie, series or episode credited to them is added before hydration. Local people and credits remain restricted to that initial affected-person set, so co-credited people encountered only on completion titles provide evidence but do not receive incomplete recommendations of their own. The completion pass is bounded and does not traverse onward through those co-credited people. Independently, every live Emby person's TMDB/TVDB/IMDb bindings are copied into `global_local_person`. This table is a collision veto only and is never loaded into the local anchor index. If a proposed identity has an out-of-scope owner, the decision action becomes `INCOMPLETE_SCOPE`; the operator must expand the test scope explicitly or use Full mode.
 
 The enabled-by-default **Populate Case Review with out of scope media items** option is deliberately separate from calculation scope. When a case-review dialog opens, it reads live Emby media relationships for the case's existing people, deduplicates them against calculated assignments by person, media and role, and labels additions as outside evidence scope. Unchanged additions remain review-only; an operator reassignment is promoted into the normal preflight, full-list `UpdatePeople`, postflight and rollback path. This performs no provider hydration and does not alter the evidence run or its reviewed plan hash.
 
@@ -99,6 +99,8 @@ External IDs are source-typed before storage. Wikipedia page slugs are not Wikid
 ### Parallel acquisition
 
 TMDB and TVDB execute in separate bounded pipelines. Each pipeline uses a fixed number of long-lived workers instead of allocating one task per queue row. Provider-specific interval gates serialize only request start times, not the network wait, allowing bounded requests in flight. Default limits are four TMDB requests and two TVDB requests. TVDB bearer-token refresh is guarded by a separate single-flight semaphore.
+
+Episodes use one provider request per selected episode and the normal payload cache. TVDB is addressed directly by its episode ID. TMDB is addressed without an episode-discovery request: the queue stores the parent TMDB series ID and Emby season/episode coordinates, then calls the exact episode-details route with external IDs and credits appended. Root episode `guest_stars`/`crew` and appended credit collections are merged and deduplicated. The routing coordinate is deliberately separate from the provider's returned episode ID; both become aliases of the same canonical episode, so acquisition mechanics do not alter scoring or case semantics.
 
 Repository operations remain protected by a narrow lock and each queue/cache key is unique, so completion order cannot change the flattened result. The phase barriers are preserved: all media workers finish before locally relevant people are seeded, and all person workers finish before offline resolution begins.
 
@@ -126,6 +128,8 @@ Each provider-media record maps to exactly one canonical asset key, preferring:
 3. TVDB native ID; then
 4. the native provider ID.
 
+Movies, series and episodes all enter this same equivalence graph. A local episode retains its Emby ID, provider IDs, parent-series IDs and season/episode coordinates. Canonical keys discovered from fetched episode crosswalks are attached to that local row, including when Emby did not already contain a TMDB episode ID, so local credit mass and provider attributions meet on the same canonical truth key.
+
 Candidate generation uses inverted indexes of canonical media keys and hard person external IDs. It does not calculate a TMDB-person × TVDB-person Cartesian product. A candidate exists when the profiles share a stable IMDb/Wikidata person ID, or when shared canonical media is corroborated by a compatible normalized name/provider alias. Sharing a production alone is cast proximity, not person-identity evidence.
 
 This makes candidate construction proportional to observed cross-provider edges rather than the product of provider populations.
@@ -139,7 +143,7 @@ Every media/name or external-ID blocked pair is scored and persisted before clus
 
 Operator-confirmed bridges are explicit identity evidence, but still cannot cross an operator rejection. A same-name, role-compatible attribution to a different provider person prevents automatic matching. Provider metadata disagreements remain negative evidence, but are not logical component constraints.
 
-Evidence model `person-evidence-v5` first resolves provider media records through the transitive equivalence graph of every observed native and external media ID. This avoids false filmography gaps when providers expose different subsets of the same crosswalk. It recognizes explicit TMDB-to-TVDB or TVDB-to-TMDB person cross-references as direct candidate evidence, but a native crosswalk cannot establish identity automatically without compatible role-aware shared-media attribution or an independently matching stable identifier. It then uses fixed contributions so scores remain comparable between runs:
+Evidence model `person-evidence-v6` first resolves provider media records through the transitive equivalence graph of every observed native and external media ID. This avoids false filmography gaps when providers expose different subsets of the same crosswalk. It recognizes explicit TMDB-to-TVDB or TVDB-to-TMDB person cross-references as direct candidate evidence, but a native crosswalk cannot establish identity automatically without compatible shared-media attribution or an independently matching stable identifier. It then uses fixed contributions so scores remain comparable between runs:
 
 ```text
 score = 0.35 × exact normalized name / sqrt(name frequency)
@@ -156,6 +160,8 @@ dominant role-aware media attribution caps the combined metadata penalty at 0.15
 ```
 
 Containment is `shared / min(left credit count, right credit count)`. Jaccard is retained as a diagnostic but does not penalize a provider for returning a smaller credit set. Exact role names score fully; a compatible role category scores partially. Missing birthdays, external IDs, roles and unmatched titles add neither support nor a penalty.
+
+Episode attribution is intentionally media-specific: once two records are tied to the same canonical episode, the episode credit itself is the attribution signal and role text does not gate the link. Provider and Emby role values remain persisted and displayed for audit, but differences such as `GuestStar`, `Guest Star`, character names, or department labels cannot suppress an episode assertion. Movie and series attribution retains role-aware matching.
 
 A shared stable person external ID or explicit provider-native person cross-reference starts from direct identity support. Conflicting birthdays and external IDs subtract deterministic penalties rather than erasing otherwise independent evidence. Role-aware media attribution is dominant when normalized primary/alias naming is compatible, at least one canonical title and role category agree, and no other same-envelope provider person has a compatible role attribution on any observed title. In that state, correlated metadata disagreements share a capped penalty and a positive evidence score above the automatic threshold may retain the link as `MATCH_WITH_CONFLICT`, even when the reduced displayed evidence strength falls below the ordinary threshold. A competing attribution caps the score at `0.55` and prevents automatic matching. Scores are clamped to `[0, 1]`. Default interpretation:
 

@@ -102,7 +102,7 @@ namespace PersonCleaner.V2.Domain
                 RequireUnusableOrReplacement();
                 return;
             }
-            if (MediaType != MediaTypes.Movie && MediaType != MediaTypes.Series) throw new ArgumentException("Media type must be movie or series.");
+            if (MediaType != MediaTypes.Movie && MediaType != MediaTypes.Series && MediaType != MediaTypes.Episode) throw new ArgumentException("Media type must be movie, series or episode.");
             if (ProviderMediaId.Length == 0) throw new ArgumentException("Enter a provider media ID.");
             if (Kind == CorrectionKinds.MediaExternalId)
             {
@@ -197,9 +197,9 @@ namespace PersonCleaner.V2.Domain
                 var exclusions = (input.ActiveCorrections ?? new List<ProviderCorrection>()).Where(x => x.Enabled && x.Kind == CorrectionKinds.MediaCredit && x.Operation == CorrectionOperations.Unusable && x.Provider == provider && x.ProviderPersonId == providerPersonId).ToList();
                 if (exclusions.Count == 0) continue;
                 var localMedia = new HashSet<long>((input.LocalCredits ?? new List<LocalCredit>()).Where(x => x.PersonEmbyId == person.EmbyId).Select(x => x.MediaEmbyId));
-                var providerMediaIds = new HashSet<string>((input.Media ?? new List<MediaSeed>()).Where(x => localMedia.Contains(x.EmbyId)).Select(x => provider == ProviderNames.Tmdb ? x.TmdbId : x.TvdbId).Where(x => !string.IsNullOrWhiteSpace(x)), StringComparer.Ordinal);
+                var providerMediaIds = new HashSet<string>((input.Media ?? new List<MediaSeed>()).Where(x => localMedia.Contains(x.EmbyId)).Select(x => x.ProviderAcquisitionId(provider)).Where(x => !string.IsNullOrWhiteSpace(x)), StringComparer.Ordinal);
                 if ((input.ProviderCredits ?? new List<ObservedProviderCredit>()).Any(x => x.Provider == provider && x.ProviderPersonId == providerPersonId && providerMediaIds.Contains(x.ProviderMediaId))) continue;
-                if (exclusions.Any(x => (input.Media ?? new List<MediaSeed>()).Any(m => localMedia.Contains(m.EmbyId) && m.MediaType == x.MediaType && (provider == ProviderNames.Tmdb ? m.TmdbId : m.TvdbId) == x.ProviderMediaId)))
+                if (exclusions.Any(x => (input.Media ?? new List<MediaSeed>()).Any(m => localMedia.Contains(m.EmbyId) && m.MediaType == x.MediaType && m.ProviderAcquisitionId(provider) == x.ProviderMediaId)))
                     result.Add(provider + ":" + providerPersonId);
             }
             return result;
@@ -324,7 +324,11 @@ namespace PersonCleaner.V2.Domain
         private static string GetPersonBinding(LocalPerson x, string provider) => provider == ProviderNames.Tmdb ? x.TmdbId : provider == ProviderNames.Tvdb ? x.TvdbId : x.ImdbId;
         private static void SetPersonBinding(LocalPerson x, string provider, string value) { if (provider == ProviderNames.Tmdb) x.TmdbId = value; else if (provider == ProviderNames.Tvdb) x.TvdbId = value; else x.ImdbId = value; }
         private static string GetMediaBinding(MediaSeed x, string provider) => provider == ProviderNames.Tmdb ? x.TmdbId : x.TvdbId;
-        private static void SetMediaBinding(MediaSeed x, string provider, string value) { if (provider == ProviderNames.Tmdb) x.TmdbId = value; else x.TvdbId = value; }
+        private static void SetMediaBinding(MediaSeed x, string provider, string value)
+        {
+            if (provider == ProviderNames.Tmdb) { x.TmdbId = value; x.TmdbAcquisitionId = value; }
+            else { x.TvdbId = value; x.TvdbAcquisitionId = value; }
+        }
         private static string RoleName(string role) { var i = (role ?? string.Empty).IndexOf(':'); return i < 0 ? role : role.Substring(i + 1).Trim(); }
         private static string RoleCategory(string role)
         {

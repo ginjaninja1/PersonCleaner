@@ -17,6 +17,9 @@ namespace PersonCleaner.V2.Storage
         public string MediaType { get; set; }
         public int Priority { get; set; }
         public bool GraphEligible { get; set; }
+        public string RouteSeriesId { get; set; }
+        public int? RouteSeasonNumber { get; set; }
+        public int? RouteEpisodeNumber { get; set; }
     }
 
     internal sealed class CacheEntry
@@ -117,6 +120,7 @@ namespace PersonCleaner.V2.Storage
         public string Message { get; set; }
         public int SelectedMovies { get; set; }
         public int SelectedSeries { get; set; }
+        public int SelectedEpisodes { get; set; }
         public int MediaFetched { get; set; }
         public int PeopleFetched { get; set; }
         public int CacheHits { get; set; }

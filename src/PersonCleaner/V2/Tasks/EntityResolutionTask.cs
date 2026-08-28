@@ -51,12 +51,12 @@ namespace PersonCleaner.V2.Tasks
                 var runId = repository.BeginRun(mode);
                 try
                 {
-                    logger.Info("PersonCleaner run {0} starting: mode={1}; sample target={2} movie(s) + {2} series; explicit media IDs={3}; explicit person IDs={4}; complete affected people={5}; cache TTL={6} day(s); failure retry={7} minute(s); TMDB configured={8}, workers={9}; TVDB configured={10}, workers={11}.", runId, mode, configuration.SandboxSampleSizePerMediaType, ParseEmbyIds(configuration.SandboxIncludedMediaIds).Count, ParseEmbyIds(configuration.SandboxIncludedPersonIds).Count, configuration.SandboxAutoExpandPersonMedia, configuration.CacheTtlDays, configuration.FailureRetryMinutes, !string.IsNullOrWhiteSpace(configuration.TmdbApiKey), configuration.TmdbMaximumConcurrentRequests, !string.IsNullOrWhiteSpace(configuration.TvdbApiKey), configuration.TvdbMaximumConcurrentRequests);
+                    logger.Info("PersonCleaner run {0} starting: mode={1}; sample target={2} movie(s) + {2} series + {2} episodes; explicit media IDs={3}; explicit person IDs={4}; complete affected people={5}; cache TTL={6} day(s); failure retry={7} minute(s); TMDB configured={8}, workers={9}; TVDB configured={10}, workers={11}.", runId, mode, configuration.SandboxSampleSizePerMediaType, ParseEmbyIds(configuration.SandboxIncludedMediaIds).Count, ParseEmbyIds(configuration.SandboxIncludedPersonIds).Count, configuration.SandboxAutoExpandPersonMedia, configuration.CacheTtlDays, configuration.FailureRetryMinutes, !string.IsNullOrWhiteSpace(configuration.TmdbApiKey), configuration.TmdbMaximumConcurrentRequests, !string.IsNullOrWhiteSpace(configuration.TvdbApiKey), configuration.TvdbMaximumConcurrentRequests);
                     logger.Info("PersonCleaner run {0} workspace: database={1}; raw payload cache={2}.", runId, repository.DatabasePath, repository.PayloadPath);
                     progress.Report(1);
                     var snapshot = CaptureSnapshot(mode, configuration.SandboxSampleSizePerMediaType, configuration.SandboxSeed, configuration.SandboxIncludedMediaIds, configuration.SandboxIncludedPersonIds, configuration.SandboxAutoExpandPersonMedia, cancellationToken);
                     repository.ReplaceSnapshot(runId, snapshot.Media, snapshot.People, snapshot.Credits, snapshot.GlobalPeople);
-                    logger.Info("PersonCleaner run {0} snapshot: {1} provider-addressable movie(s) and {2} series were eligible; selected {3} movie(s), {4} series, including {5} explicit title(s) ({6} requested directly, {7} found from requested people) and {8} affected-person expansion title(s); captured {9} in-scope affected people, {10} local credit relationships and {11} global Emby person binding rows. Live Emby remains read-only.", runId, snapshot.EligibleMovies, snapshot.EligibleSeries, snapshot.Media.Count(x => x.MediaType == MediaTypes.Movie), snapshot.Media.Count(x => x.MediaType == MediaTypes.Series), snapshot.ExplicitMediaCount, snapshot.DirectExplicitMediaCount, snapshot.PersonExplicitMediaCount, snapshot.AutoExpandedMediaCount, snapshot.People.Count, snapshot.Credits.Count, snapshot.GlobalPeople.Count);
+                    logger.Info("PersonCleaner run {0} snapshot: {1} provider-addressable movie(s), {2} series and {3} episodes were eligible; selected {4} movie(s), {5} series and {6} episodes, including {7} explicit media item(s) ({8} requested directly, {9} found from requested people) and {10} affected-person expansion item(s); captured {11} in-scope affected people, {12} local credit relationships and {13} global Emby person binding rows. Live Emby remains read-only.", runId, snapshot.EligibleMovies, snapshot.EligibleSeries, snapshot.EligibleEpisodes, snapshot.Media.Count(x => x.MediaType == MediaTypes.Movie), snapshot.Media.Count(x => x.MediaType == MediaTypes.Series), snapshot.Media.Count(x => x.MediaType == MediaTypes.Episode), snapshot.ExplicitMediaCount, snapshot.DirectExplicitMediaCount, snapshot.PersonExplicitMediaCount, snapshot.AutoExpandedMediaCount, snapshot.People.Count, snapshot.Credits.Count, snapshot.GlobalPeople.Count);
                     progress.Report(10);
 
                     var api = new ProviderApiClient(http, json, logger);
@@ -220,10 +220,13 @@ namespace PersonCleaner.V2.Tasks
 
         private SnapshotData CaptureSnapshot(string mode, int sampleSize, int seed, string includedMediaIds, string includedPersonIds, bool autoExpandPersonMedia, CancellationToken cancellationToken)
         {
-            var allItems = library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { typeof(Movie).Name, typeof(Series).Name }, Recursive = true }, cancellationToken)
-                .Where(x => x is Movie || x is Series).Select(ToMedia).Where(x => !string.IsNullOrWhiteSpace(x.TmdbId) || !string.IsNullOrWhiteSpace(x.TvdbId)).ToList();
+            var libraryMedia = library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { typeof(Movie).Name, typeof(Series).Name, typeof(Episode).Name }, Recursive = true }, cancellationToken)
+                .Where(x => x is Movie || x is Series || x is Episode).ToList();
+            var seriesById = libraryMedia.OfType<Series>().ToDictionary(x => x.InternalId);
+            var allItems = libraryMedia.Select(x => ToMedia(x, seriesById)).Where(ProviderAddressable).ToList();
             var eligibleMovies = allItems.Count(x => x.MediaType == MediaTypes.Movie);
             var eligibleSeries = allItems.Count(x => x.MediaType == MediaTypes.Series);
+            var eligibleEpisodes = allItems.Count(x => x.MediaType == MediaTypes.Episode);
             var globalPeople = library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { typeof(Person).Name }, Recursive = true }, cancellationToken)
                 .OfType<Person>().Select(ToLocalPerson).ToList();
             var sandbox = string.Equals(mode, "Sandbox", StringComparison.OrdinalIgnoreCase);
@@ -273,7 +276,7 @@ namespace PersonCleaner.V2.Tasks
             return new SnapshotData
             {
                 Media = items, People = people.Values.ToList(), Credits = credits, GlobalPeople = globalPeople,
-                EligibleMovies = eligibleMovies, EligibleSeries = eligibleSeries,
+                EligibleMovies = eligibleMovies, EligibleSeries = eligibleSeries, EligibleEpisodes = eligibleEpisodes,
                 DirectExplicitMediaCount = directExplicit.Count, PersonExplicitMediaCount = personExplicit.Count,
                 ExplicitMediaCount = explicitMedia.Count, AutoExpandedMediaCount = autoExpandedMediaCount
             };
@@ -301,26 +304,50 @@ namespace PersonCleaner.V2.Tasks
                 cancellationToken.ThrowIfCancellationRequested();
                 var rows = library.GetItemList(new InternalItemsQuery
                 {
-                    IncludeItemTypes = new[] { typeof(Movie).Name, typeof(Series).Name },
+                    IncludeItemTypes = new[] { typeof(Movie).Name, typeof(Series).Name, typeof(Episode).Name },
                     Recursive = true,
                     PersonIds = ids.Skip(offset).Take(250).ToArray()
                 }, cancellationToken);
-                foreach (var row in rows.Where(x => x is Movie || x is Series))
+                foreach (var row in rows.Where(x => x is Movie || x is Series || x is Episode))
                     if (eligibleById.TryGetValue(row.InternalId, out var media)) result[media.EmbyId] = media;
             }
             return result.Values.ToList();
         }
 
-        private static MediaSeed ToMedia(BaseItem item) => new MediaSeed
+        private static MediaSeed ToMedia(BaseItem item, IReadOnlyDictionary<long, Series> seriesById)
         {
-            EmbyId = item.InternalId,
-            MediaType = item is Movie ? MediaTypes.Movie : MediaTypes.Series,
-            Name = item.Name,
-            Year = item.ProductionYear,
-            TmdbId = ProviderId(item, MetadataProviders.Tmdb),
-            TvdbId = ProviderId(item, MetadataProviders.Tvdb),
-            ImdbId = ProviderId(item, MetadataProviders.Imdb)
-        };
+            var episode = item as Episode;
+            var series = episode?.Series;
+            if (series == null && episode != null && episode.SeriesId > 0) seriesById.TryGetValue(episode.SeriesId, out series);
+            var tmdbId = ProviderId(item, MetadataProviders.Tmdb);
+            var tvdbId = ProviderId(item, MetadataProviders.Tvdb);
+            var parentTmdb = ProviderId(series, MetadataProviders.Tmdb);
+            var parentTvdb = ProviderId(series, MetadataProviders.Tvdb);
+            var tmdbAcquisition = tmdbId;
+            if (episode != null)
+                tmdbAcquisition = !string.IsNullOrWhiteSpace(parentTmdb) && episode.ParentIndexNumber.HasValue && episode.IndexNumber.HasValue
+                    ? !string.IsNullOrWhiteSpace(tmdbId) ? tmdbId : "coordinate:" + parentTmdb + ":" + episode.ParentIndexNumber.Value.ToString(CultureInfo.InvariantCulture) + ":" + episode.IndexNumber.Value.ToString(CultureInfo.InvariantCulture)
+                    : null;
+            return new MediaSeed
+            {
+                EmbyId = item.InternalId,
+                MediaType = item is Movie ? MediaTypes.Movie : item is Episode ? MediaTypes.Episode : MediaTypes.Series,
+                Name = item.Name,
+                Year = item.ProductionYear,
+                TmdbId = tmdbId,
+                TvdbId = tvdbId,
+                ImdbId = ProviderId(item, MetadataProviders.Imdb),
+                TmdbAcquisitionId = tmdbAcquisition,
+                TvdbAcquisitionId = tvdbId,
+                ParentEmbyId = series?.InternalId,
+                ParentTmdbId = parentTmdb,
+                ParentTvdbId = parentTvdb,
+                SeasonNumber = episode?.ParentIndexNumber,
+                EpisodeNumber = episode?.IndexNumber
+            };
+        }
+
+        private static bool ProviderAddressable(MediaSeed item) => !string.IsNullOrWhiteSpace(item?.TmdbAcquisitionId) || !string.IsNullOrWhiteSpace(item?.TvdbAcquisitionId);
 
         private static LocalPerson ToLocalPerson(Person person) => new LocalPerson
         {
@@ -367,6 +394,7 @@ namespace PersonCleaner.V2.Tasks
             public List<LocalCredit> Credits { get; set; }
             public int EligibleMovies { get; set; }
             public int EligibleSeries { get; set; }
+            public int EligibleEpisodes { get; set; }
             public int DirectExplicitMediaCount { get; set; }
             public int PersonExplicitMediaCount { get; set; }
             public int ExplicitMediaCount { get; set; }

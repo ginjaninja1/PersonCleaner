@@ -62,12 +62,18 @@ namespace PersonCleaner.V2.Providers
             if (item.Provider == ProviderNames.Tmdb)
             {
                 if (item.EntityType == "person") return "/person/" + Uri.EscapeDataString(item.ProviderId) + "?append_to_response=external_ids";
+                if (item.MediaType == MediaTypes.Episode)
+                {
+                    if (string.IsNullOrWhiteSpace(item.RouteSeriesId) || !item.RouteSeasonNumber.HasValue || !item.RouteEpisodeNumber.HasValue)
+                        throw new InvalidOperationException("A TMDB episode request requires the parent series ID and season/episode numbers.");
+                    return "/tv/" + Uri.EscapeDataString(item.RouteSeriesId) + "/season/" + item.RouteSeasonNumber.Value + "/episode/" + item.RouteEpisodeNumber.Value + "?append_to_response=external_ids,credits";
+                }
                 var type = item.MediaType == MediaTypes.Movie ? "movie" : "tv";
                 var credits = item.MediaType == MediaTypes.Movie ? "credits" : "aggregate_credits";
                 return "/" + type + "/" + Uri.EscapeDataString(item.ProviderId) + "?append_to_response=external_ids," + credits;
             }
             if (item.EntityType == "person") return "/people/" + Uri.EscapeDataString(item.ProviderId) + "/extended";
-            var collection = item.MediaType == MediaTypes.Movie ? "movies" : "series";
+            var collection = item.MediaType == MediaTypes.Movie ? "movies" : item.MediaType == MediaTypes.Episode ? "episodes" : "series";
             return "/" + collection + "/" + Uri.EscapeDataString(item.ProviderId) + "/extended";
         }
 

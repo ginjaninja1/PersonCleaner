@@ -343,10 +343,10 @@ namespace PersonCleaner.V2.Domain
             {
                 var media = mediaById[credit.MediaEmbyId];
                 var observed = new List<ObservedProviderCredit>();
-                AddProviderCredits(observed, providerCreditIndex, ProviderNames.Tmdb, media.MediaType, media.TmdbId);
-                AddProviderCredits(observed, providerCreditIndex, ProviderNames.Tvdb, media.MediaType, media.TvdbId);
+                AddProviderCredits(observed, providerCreditIndex, ProviderNames.Tmdb, media.MediaType, media.ProviderAcquisitionId(ProviderNames.Tmdb));
+                AddProviderCredits(observed, providerCreditIndex, ProviderNames.Tvdb, media.MediaType, media.ProviderAcquisitionId(ProviderNames.Tvdb));
                 var roleCategory = RoleCategory(credit.Role);
-                var matches = outcomeByBuilder.Where(x => observed.Any(c => x.Builder.Keys.Contains(c.PersonKey) && CompatibleRole(roleCategory, c.RoleCategory))).Select(x => x.Outcome).Distinct().ToList();
+                var matches = outcomeByBuilder.Where(x => observed.Any(c => x.Builder.Keys.Contains(c.PersonKey) && CompatibleAttribution(media.MediaType, roleCategory, c.RoleCategory))).Select(x => x.Outcome).Distinct().ToList();
                 var correction = FindCreditOverride(input.ActiveCorrections, credit);
                 IdentityOutcome target = null;
                 if (correction != null) target = ResolveOverrideTarget(plan, correction.ReplacementValue);
@@ -357,7 +357,7 @@ namespace PersonCleaner.V2.Domain
                 if (target == null) target = plan.Outcomes.FirstOrDefault(x => x.SourceEmbyIds.Contains(credit.PersonEmbyId)) ?? plan.Outcomes.First();
                 var assignmentId = "credit-" + StableHash(credit.PersonEmbyId + "|" + credit.MediaEmbyId + "|" + credit.Role);
                 var disposition = target.TargetKind == IdentityTargetKinds.Unresolved && target.SourceEmbyIds.Contains(credit.PersonEmbyId) || target.TargetKind == IdentityTargetKinds.Existing && target.TargetEmbyId == credit.PersonEmbyId ? "KEEP" : "MOVE";
-                var attributions = observed.Where(x => CompatibleRole(roleCategory, x.RoleCategory) && outcomeByProviderKey.ContainsKey(x.PersonKey))
+                var attributions = observed.Where(x => CompatibleAttribution(media.MediaType, roleCategory, x.RoleCategory) && outcomeByProviderKey.ContainsKey(x.PersonKey))
                     .GroupBy(x => x.Provider + "|" + x.ProviderMediaId + "|" + x.ProviderPersonId + "|" + x.Role, StringComparer.Ordinal).Select(x => x.First())
                     .OrderBy(x => x.Provider, StringComparer.Ordinal).ThenBy(x => x.ProviderPersonId, StringComparer.Ordinal).ThenBy(x => x.Role, StringComparer.Ordinal)
                     .Select(x => new IdentityCreditAttribution
@@ -401,7 +401,7 @@ namespace PersonCleaner.V2.Domain
         private static ProviderCorrection ProviderAttributionCorrection(IdentityCasePlan plan, LocalCredit credit, MediaSeed media, IdentityOutcome selected, IEnumerable<ObservedProviderCredit> observed, IReadOnlyDictionary<string, IdentityOutcome> outcomeByProviderKey)
         {
             var roleCategory = RoleCategory(credit.Role);
-            var conflicts = observed.Where(x => CompatibleRole(roleCategory, x.RoleCategory) && outcomeByProviderKey.TryGetValue(x.PersonKey, out var owner) && owner.OutcomeId != selected.OutcomeId)
+            var conflicts = observed.Where(x => CompatibleAttribution(media.MediaType, roleCategory, x.RoleCategory) && outcomeByProviderKey.TryGetValue(x.PersonKey, out var owner) && owner.OutcomeId != selected.OutcomeId)
                 .GroupBy(x => x.Provider + "|" + x.MediaType + "|" + x.ProviderMediaId + "|" + x.ProviderPersonId + "|" + x.Role, StringComparer.Ordinal).Select(x => x.First()).ToList();
             if (conflicts.Count != 1) return null;
             var conflict = conflicts[0];
@@ -681,6 +681,7 @@ namespace PersonCleaner.V2.Domain
             if (index.TryGetValue(provider + ":" + type + ":" + id, out rows)) target.AddRange(rows);
         }
         private static bool CompatibleRole(string a, string b) => string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b) || a == "Unknown" || b == "Unknown" || string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        private static bool CompatibleAttribution(string mediaType, string localRole, string providerRole) => mediaType == MediaTypes.Episode || CompatibleRole(localRole, providerRole);
         private static string RoleCategory(string role)
         {
             var value = role ?? string.Empty;

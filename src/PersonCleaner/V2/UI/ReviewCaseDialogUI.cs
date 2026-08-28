@@ -647,7 +647,7 @@ namespace PersonCleaner.V2.UI
         public static string Media(string provider, string type, string id, string slug = null)
         {
             if (string.IsNullOrWhiteSpace(id)) return "—";
-            var url = provider == ProviderNames.Tmdb ? "https://www.themoviedb.org/" + (type == MediaTypes.Series ? "tv/" : "movie/") + Uri.EscapeDataString(id) : provider == ProviderNames.Tvdb ? string.IsNullOrWhiteSpace(slug) ? "https://thetvdb.com/search?query=" + Uri.EscapeDataString(id) : "https://thetvdb.com/" + (type == MediaTypes.Series ? "series/" : "movies/") + Uri.EscapeDataString(slug) : "https://www.imdb.com/title/" + Uri.EscapeDataString(id) + "/";
+            var url = provider == ProviderNames.Tmdb ? type == MediaTypes.Episode ? "https://www.themoviedb.org/search?query=" + Uri.EscapeDataString(id) : "https://www.themoviedb.org/" + (type == MediaTypes.Series ? "tv/" : "movie/") + Uri.EscapeDataString(id) : provider == ProviderNames.Tvdb ? string.IsNullOrWhiteSpace(slug) || type == MediaTypes.Episode ? "https://thetvdb.com/search?query=" + Uri.EscapeDataString(string.IsNullOrWhiteSpace(slug) ? id : slug) : "https://thetvdb.com/" + (type == MediaTypes.Series ? "series/" : "movies/") + Uri.EscapeDataString(slug) : "https://www.imdb.com/title/" + Uri.EscapeDataString(id) + "/";
             return Anchor(url, id);
         }
         private static string Anchor(string url, string label) { var safe = WebUtility.HtmlEncode(label ?? string.Empty); return string.IsNullOrWhiteSpace(url) ? safe : "<a href=\"" + WebUtility.HtmlEncode(url) + "\" target=\"_blank\" rel=\"noopener noreferrer\">" + safe + "</a>"; }
