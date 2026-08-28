@@ -27,6 +27,9 @@ namespace PersonCleaner.V2.UI
         [DisplayName("Enabled Mass Corrections Task")]
         [Description("Off by default. When enabled, the Mass Corrections scheduled task applies only complete, persisted changes from the latest evidence run. Problem cases are never applied automatically.")]
         public bool EnableMassCorrectionsTask { get; set; }
+        [DisplayName("Run Metadata Folder Cleaner task in TestMode")]
+        [Description("On by default. The task audits and logs orphan person metadata folders without deleting them. Turn this off only when you want the manually-run task to delete confirmed orphan folders.")]
+        public bool MetadataFolderCleanerTestMode { get; set; } = true;
         [DisplayName("Sandbox mode")]
         [Description("Recommended while developing: select a stable, deterministic sample from each media pool instead of scanning the whole library.")]
         public bool SandboxMode { get; set; } = true;
@@ -115,6 +118,7 @@ namespace PersonCleaner.V2.UI
             var target = Plugin.Instance.Configuration;
             target.EnablePlugin = source.EnablePlugin;
             target.EnableMassCorrectionsTask = source.EnableMassCorrectionsTask;
+            target.MetadataFolderCleanerTestMode = source.MetadataFolderCleanerTestMode;
             target.ExecutionMode = source.SandboxMode ? "Sandbox" : "Full";
             target.SandboxSampleSizePerMediaType = Clamp(source.SandboxSampleSizePerMediaType, 1, 500);
             target.SandboxSeed = source.SandboxSeed;
@@ -134,7 +138,7 @@ namespace PersonCleaner.V2.UI
             target.AutomaticMatchThreshold = Unit(source.AutomaticMatchThreshold);
             target.HumanReviewThreshold = Math.Min(Unit(source.HumanReviewThreshold), target.AutomaticMatchThreshold);
             Plugin.Instance.SaveConfiguration();
-            logger.Info("PersonCleaner configuration saved: mode={0}, mass corrections enabled={1}, sample={2}+{2}, explicit media={3}, explicit people={4}, complete affected people={5}, populate case review media={6}, TMDB key={7}, TVDB key={8}, TMDB concurrency={9}, TVDB concurrency={10}", target.ExecutionMode, target.EnableMassCorrectionsTask, target.SandboxSampleSizePerMediaType, CountIds(target.SandboxIncludedMediaIds), CountIds(target.SandboxIncludedPersonIds), target.SandboxAutoExpandPersonMedia, target.PopulateCaseReviewWithOutOfScopeMediaItems, !string.IsNullOrWhiteSpace(target.TmdbApiKey), !string.IsNullOrWhiteSpace(target.TvdbApiKey), target.TmdbMaximumConcurrentRequests, target.TvdbMaximumConcurrentRequests);
+            logger.Info("PersonCleaner configuration saved: mode={0}, mass corrections enabled={1}, metadata folder cleaner TestMode={2}, sample={3}+{3}, explicit media={4}, explicit people={5}, complete affected people={6}, populate case review media={7}, TMDB key={8}, TVDB key={9}, TMDB concurrency={10}, TVDB concurrency={11}", target.ExecutionMode, target.EnableMassCorrectionsTask, target.MetadataFolderCleanerTestMode, target.SandboxSampleSizePerMediaType, CountIds(target.SandboxIncludedMediaIds), CountIds(target.SandboxIncludedPersonIds), target.SandboxAutoExpandPersonMedia, target.PopulateCaseReviewWithOutOfScopeMediaItems, !string.IsNullOrWhiteSpace(target.TmdbApiKey), !string.IsNullOrWhiteSpace(target.TvdbApiKey), target.TmdbMaximumConcurrentRequests, target.TvdbMaximumConcurrentRequests);
         }
 
         private void Rebuild()
@@ -144,9 +148,11 @@ namespace PersonCleaner.V2.UI
             var link = worker == null ? "/scheduledtasks" : "/scheduledtask?id=" + worker.Id;
             var massWorker = tasks.ScheduledTasks.FirstOrDefault(x => string.Equals(x.ScheduledTask.Key, "PersonCleanerMassCorrectionsV2", StringComparison.Ordinal));
             var massLink = massWorker == null ? "/scheduledtasks" : "/scheduledtask?id=" + massWorker.Id;
+            var cleanerWorker = tasks.ScheduledTasks.FirstOrDefault(x => string.Equals(x.ScheduledTask.Key, "PersonCleanerMetadataFolderCleaner", StringComparison.Ordinal));
+            var cleanerLink = cleanerWorker == null ? "/scheduledtasks" : "/scheduledtask?id=" + cleanerWorker.Id;
             ContentData = new ConfigurationUI
             {
-                EnablePlugin = c.EnablePlugin, EnableMassCorrectionsTask = c.EnableMassCorrectionsTask, SandboxMode = !string.Equals(c.ExecutionMode, "Full", StringComparison.OrdinalIgnoreCase), SandboxSampleSizePerMediaType = c.SandboxSampleSizePerMediaType, SandboxSeed = c.SandboxSeed,
+                EnablePlugin = c.EnablePlugin, EnableMassCorrectionsTask = c.EnableMassCorrectionsTask, MetadataFolderCleanerTestMode = c.MetadataFolderCleanerTestMode, SandboxMode = !string.Equals(c.ExecutionMode, "Full", StringComparison.OrdinalIgnoreCase), SandboxSampleSizePerMediaType = c.SandboxSampleSizePerMediaType, SandboxSeed = c.SandboxSeed,
                 SandboxIncludedMediaIds = c.SandboxIncludedMediaIds, SandboxIncludedPersonIds = c.SandboxIncludedPersonIds, SandboxAutoExpandPersonMedia = c.SandboxAutoExpandPersonMedia,
                 PopulateCaseReviewWithOutOfScopeMediaItems = c.PopulateCaseReviewWithOutOfScopeMediaItems,
                 TmdbApiKey = c.TmdbApiKey, TvdbApiKey = c.TvdbApiKey, TvdbSubscriberPin = c.TvdbSubscriberPin, CacheTtlDays = c.CacheTtlDays, FailureRetryMinutes = c.FailureRetryMinutes,
@@ -156,7 +162,8 @@ namespace PersonCleaner.V2.UI
                 ScheduledTaskLink = new GenericItemList
                 {
                     new GenericListItem { PrimaryText = "Run or schedule evidence calculation", SecondaryText = "Hydration and calculation are background work; the dashboard stays query-only.", Icon = IconNames.schedule, Status = ItemStatus.Succeeded, HyperLink = link, HyperLinkTargetExternal = false },
-                    new GenericListItem { PrimaryText = "Run or schedule Mass Corrections", SecondaryText = c.EnableMassCorrectionsTask ? "Enabled: applies only persisted satisfied changes from the latest completed run." : "Disabled by configuration (default): running the task makes no changes.", Icon = IconNames.schedule, Status = ItemStatus.Succeeded, HyperLink = massLink, HyperLinkTargetExternal = false }
+                    new GenericListItem { PrimaryText = "Run or schedule Mass Corrections", SecondaryText = c.EnableMassCorrectionsTask ? "Enabled: applies only persisted satisfied changes from the latest completed run." : "Disabled by configuration (default): running the task makes no changes.", Icon = IconNames.schedule, Status = ItemStatus.Succeeded, HyperLink = massLink, HyperLinkTargetExternal = false },
+                    new GenericListItem { PrimaryText = "Run Metadata Folder Cleaner", SecondaryText = c.MetadataFolderCleanerTestMode ? "TestMode is on: audits and logs only." : "LIVE MODE: confirmed orphan person folders will be deleted.", Icon = IconNames.schedule, Status = ItemStatus.Succeeded, HyperLink = cleanerLink, HyperLinkTargetExternal = false }
                 }
             };
         }

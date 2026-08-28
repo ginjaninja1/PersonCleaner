@@ -1509,6 +1509,7 @@ internal static class Program
     private static void MassCorrectionsDisabledByDefault()
     {
         True(!new PersonCleaner.Configuration.PluginConfiguration().EnableMassCorrectionsTask);
+        True(new PersonCleaner.Configuration.PluginConfiguration().MetadataFolderCleanerTestMode);
     }
 
     private static void CasePresentationPurposeSeparatesCases()

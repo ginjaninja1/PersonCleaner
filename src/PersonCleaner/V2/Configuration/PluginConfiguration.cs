@@ -6,6 +6,7 @@ namespace PersonCleaner.Configuration
     {
         public bool EnablePlugin { get; set; } = true;
         public bool EnableMassCorrectionsTask { get; set; } = false;
+        public bool MetadataFolderCleanerTestMode { get; set; } = true;
         public string ExecutionMode { get; set; } = "Sandbox";
         public int SandboxSampleSizePerMediaType { get; set; } = 50;
         public int SandboxSeed { get; set; } = 20260823;
