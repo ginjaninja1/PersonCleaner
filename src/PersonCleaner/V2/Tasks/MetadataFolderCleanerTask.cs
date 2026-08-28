@@ -31,9 +31,9 @@ namespace PersonCleaner.V2.Tasks
             peopleMetadataRoot = Path.Combine(paths.ProgramDataPath, "metadata", "people");
         }
 
-        public string Name => "Person cleaner - Metadata folder cleaner";
+        public string Name => "Person Cleaner - Metadata folder cleaner";
         public string Key => "PersonCleanerMetadataFolderCleaner";
-        public string Description => "Manual-only: audits Emby person IDs, NFOs, images and folder naming, and optionally removes unowned person metadata folders.";
+        public string Description => "Backup database and \\programdata\\metadata\\people folder until tested or use a test server first.";
         public string Category => "GinjaNinja Tools";
         public IEnumerable<TaskTriggerInfo> GetDefaultTriggers() => Array.Empty<TaskTriggerInfo>();
 

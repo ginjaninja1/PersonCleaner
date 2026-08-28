@@ -30,9 +30,9 @@ namespace PersonCleaner.V2.Tasks
         private readonly IApplicationPaths paths;
         private readonly ILogger logger;
 
-        public string Name => "PersonCleaner - Build person evidence";
+        public string Name => "Person Cleaner - Build person evidence";
         public string Key => "PersonCleanerEntityResolutionV2";
-        public string Description => "Reads a bounded Emby media sample, hydrates cached TMDB/TVDB evidence, and rebuilds the read-only person resolution dashboard.";
+        public string Description => "Reads Emby and providers via apikeys and build cases.";
         public string Category => "GinjaNinja Tools";
 
         public EntityResolutionTask(ILibraryManager library, IHttpClient http, IJsonSerializer json, IApplicationPaths paths, ILogManager logs)

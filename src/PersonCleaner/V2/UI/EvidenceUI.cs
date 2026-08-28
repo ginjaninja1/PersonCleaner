@@ -17,9 +17,9 @@ namespace PersonCleaner.V2.UI
         public override string EditorTitle => "Person resolution decisions";
         public override string EditorDescription => description ?? "No calculation run is available.";
         public CaptionItem RunSummary { get; set; }
-        public ButtonItem OpenProblemEvidence { get; set; } = new ButtonItem("Open decision evidence Full Screen (Problem cases)") { CommandId = "open-problem-evidence" };
-        public ButtonItem OpenSatisfiedEvidence { get; set; } = new ButtonItem("Open satisfied decision evidence full screen") { CommandId = "open-satisfied-evidence" };
-        public ButtonItem OpenEvidence { get; set; } = new ButtonItem("Open decision evidence Full Screen (All cases)") { CommandId = "open-evidence" };
+        public ButtonItem OpenProblemEvidence { get; set; } = new ButtonItem("Open Problem Cases") { CommandId = "open-problem-evidence" };
+        public ButtonItem OpenSatisfiedEvidence { get; set; } = new ButtonItem("Open Cases Resolved By Task") { CommandId = "open-satisfied-evidence" };
+        public ButtonItem OpenEvidence { get; set; } = new ButtonItem("Open All cases (Dev)") { CommandId = "open-evidence" };
 
         public static EvidenceUI Build(RunStatus run)
         {

@@ -20,7 +20,7 @@ namespace PersonCleaner.V2.UI
         public MainPageController(PluginInfo plugin, IServerApplicationHost host, ILogger logger) : base(plugin.Id)
         {
             this.plugin = plugin; this.host = host; this.logger = logger;
-            PageInfo = new PluginPageInfo { Name = "personcleaner", DisplayName = "PersonCleaner", EnableInMainMenu = true, MenuIcon = "people", IsMainConfigPage = true };
+            PageInfo = new PluginPageInfo { Name = "personcleaner", DisplayName = "Person Cleaner", EnableInMainMenu = true, MenuIcon = "people", IsMainConfigPage = true };
             tabs = new List<IPluginUIPageController>
             {
                 //new TabController(plugin, "personcleaner-config-v2", "Configuration", x => new ConfigurationPageView(x, host, logger)),

@@ -27,6 +27,9 @@
 	  <Compile Include="Plugin.cs" />
 	  <Compile Include="V2\**\*.cs" />
 	</ItemGroup>
+	<ItemGroup>
+	  <Compile Remove="V2\Tasks\EmbyMutationProbeTask.cs" />
+	</ItemGroup>
 	
   <ItemGroup>
 	  <PackageReference Include="MediaBrowser.Server.Core" Version="4.9.1.90" />

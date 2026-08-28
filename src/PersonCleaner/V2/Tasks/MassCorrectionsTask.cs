@@ -19,9 +19,9 @@ namespace PersonCleaner.V2.Tasks
         private readonly IApplicationPaths paths;
         private readonly ILogger logger;
 
-        public string Name => "PersonCleaner - Apply safe mass corrections";
+        public string Name => "Person Cleaner - Apply high confidence corrections en masse";
         public string Key => "PersonCleanerMassCorrectionsV2";
-        public string Description => "Applies only persisted, complete changes from the latest person-evidence run. Problem cases are excluded in SQL and remain for manual oversight.";
+        public string Description => "Backup database and \\programdata\\metadata\\people folder until tested or use a test server first.";
         public string Category => "GinjaNinja Tools";
 
         public MassCorrectionsTask(ILibraryManager library, IApplicationPaths paths, ILogManager logs)
