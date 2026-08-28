@@ -478,7 +478,7 @@ internal static class Program
         var engine = new ResolutionEngine();
         var decisions = engine.Resolve(BaseInput(left, right), new ResolutionSettings());
         True(!decisions.Any(x => x.Status == "CONFLATION" || x.Action == "AUTO_MERGE_SHADOW"));
-        Equal(1, engine.Diagnostics.BlockedCrossProviderPairs);
+        Equal(0, engine.Diagnostics.BlockedCrossProviderPairs);
         Equal(0, engine.Diagnostics.AdmittedCandidates);
     }
 
@@ -1605,7 +1605,7 @@ internal static class Program
 
     private static void LargeProviderCreditSetRemainsBounded()
     {
-        const int peoplePerProvider = 80;
+        const int peoplePerProvider = 2000;
         const string sharedMedia = "canonical:shared";
         var input = new ResolutionInput();
         for (var i = 0; i < peoplePerProvider; i++)
@@ -1635,8 +1635,8 @@ internal static class Program
         var clock = Stopwatch.StartNew();
         engine.Resolve(input, new ResolutionSettings());
         clock.Stop();
-        Equal(peoplePerProvider * peoplePerProvider, engine.Diagnostics.BlockedCrossProviderPairs);
-        True(clock.Elapsed < TimeSpan.FromSeconds(10));
+        Equal(0, engine.Diagnostics.BlockedCrossProviderPairs);
+        True(clock.Elapsed < TimeSpan.FromSeconds(5));
     }
 
     private static void CasePlanningIgnoresLargeGlobalPopulation()

@@ -401,11 +401,11 @@ namespace PersonCleaner.V2.Domain
             var allPeople = people.ToList();
             var tmdb = allPeople.Where(x => x.Provider == ProviderNames.Tmdb).ToList();
             var tvdb = allPeople.Where(x => x.Provider == ProviderNames.Tvdb).ToList();
-            var byMedia = new Dictionary<string, List<ProviderPerson>>(StringComparer.Ordinal);
+            var byName = new Dictionary<string, List<ProviderPerson>>(StringComparer.Ordinal);
             var byExternal = new Dictionary<string, List<ProviderPerson>>(StringComparer.OrdinalIgnoreCase);
             foreach (var person in tvdb)
             {
-                foreach (var media in person.CanonicalMediaKeys) AddIndex(byMedia, media, person);
+                foreach (var name in PersonNames(person)) AddIndex(byName, name, person);
                 AddIndex(byExternal, person.Provider + ":" + person.ProviderId, person);
                 foreach (var provider in NativePersonIdProviders)
                     if (person.ExternalIds.TryGetValue(provider, out var id) && !string.IsNullOrWhiteSpace(id)) AddIndex(byExternal, provider + ":" + id, person);
@@ -422,7 +422,18 @@ namespace PersonCleaner.V2.Domain
                 cancellationToken.ThrowIfCancellationRequested();
                 var left = tmdb[leftIndex];
                 var possible = new HashSet<ProviderPerson>();
-                foreach (var media in left.CanonicalMediaKeys) if (byMedia.TryGetValue(media, out var matches)) possible.UnionWith(matches);
+
+                // A media-only blocker creates the Cartesian product of both casts for every
+                // shared title, although the candidate gate later rejects pairs without a
+                // compatible name or alias. Block by the cheaper and usually selective name
+                // cohort first, then retain only people whose filmographies actually overlap.
+                var nameCompatible = new HashSet<ProviderPerson>();
+                foreach (var name in PersonNames(left))
+                    if (byName.TryGetValue(name, out var matches)) nameCompatible.UnionWith(matches);
+                foreach (var right in nameCompatible)
+                    if (left.CanonicalMediaKeys.Overlaps(right.CanonicalMediaKeys)) possible.Add(right);
+
+                // Identifier-backed candidates do not require a shared title or name.
                 if (byExternal.TryGetValue(left.Provider + ":" + left.ProviderId, out var nativeMatches)) possible.UnionWith(nativeMatches);
                 foreach (var provider in NativePersonIdProviders)
                     if (left.ExternalIds.TryGetValue(provider, out var id) && !string.IsNullOrWhiteSpace(id) && byExternal.TryGetValue(provider + ":" + id, out var matches)) possible.UnionWith(matches);
@@ -441,7 +452,8 @@ namespace PersonCleaner.V2.Domain
                         result.Add(candidate);
                     }
                 }
-                Report(progress, cancellationToken, "Building cross-provider candidates", leftIndex + 1, Math.Max(1, tmdb.Count), 0.05 + 0.50 * (leftIndex + 1) / Math.Max(1, tmdb.Count));
+                if ((leftIndex & 255) == 0 || leftIndex + 1 == tmdb.Count)
+                    Report(progress, cancellationToken, "Building cross-provider candidates", leftIndex + 1, Math.Max(1, tmdb.Count), 0.05 + 0.50 * (leftIndex + 1) / Math.Max(1, tmdb.Count));
             }
             return result;
         }
