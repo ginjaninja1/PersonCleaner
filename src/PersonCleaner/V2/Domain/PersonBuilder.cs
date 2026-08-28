@@ -194,13 +194,22 @@ namespace PersonCleaner.V2.Domain
 
         private static IEnumerable<ProviderCorrection> BuildIdentityCorrections(IdentityCasePlan source, IdentityCasePlan plan)
         {
-            var note = "Person builder case " + plan.CaseId;
+            var note = plan.DisplayName;
             foreach (var outcome in plan.Outcomes)
             {
                 var native = outcome.ProviderIds.Where(x => x.Source == "native" && (x.Provider == ProviderNames.Tmdb || x.Provider == ProviderNames.Tvdb)).ToList();
                 var target = outcome.TargetKind == IdentityTargetKinds.Existing ? "existing:" + outcome.TargetEmbyId.Value.ToString(CultureInfo.InvariantCulture) : "new";
-                foreach (var id in native)
+                var original = source.Outcomes.FirstOrDefault(x => x.OutcomeId == outcome.OutcomeId);
+                var targetChanged = original == null || original.TargetKind != outcome.TargetKind || original.TargetEmbyId != outcome.TargetEmbyId;
+                // "new" is a one-time Apply instruction, not a durable identity fact. Persisting it would
+                // propose another new Emby person after the first one had already been created. A changed
+                // existing destination needs only one representative provider key because same-relations
+                // below make the override apply to the complete provider component.
+                if (targetChanged && outcome.TargetKind == IdentityTargetKinds.Existing && native.Count > 0)
+                {
+                    var id = native.OrderBy(x => x.Provider, StringComparer.Ordinal).ThenBy(x => x.ProviderId, StringComparer.Ordinal).First();
                     yield return new ProviderCorrection { Kind = CorrectionKinds.IdentityTarget, Operation = CorrectionOperations.Replace, Provider = id.Provider, ProviderPersonId = id.ProviderId, ReplacementValue = target, Reason = "OPERATOR_PERSON_BUILDER", Note = note, Enabled = true };
+                }
                 for (var i = 0; i < native.Count; i++)
                 for (var j = i + 1; j < native.Count; j++)
                     if (native[i].Provider != native[j].Provider)
@@ -232,7 +241,9 @@ namespace PersonCleaner.V2.Domain
         private static IEnumerable<ProviderCorrection> BuildCreditCorrections(IdentityCasePlan plan)
         {
             var outcomes = plan.Outcomes.ToDictionary(x => x.OutcomeId, StringComparer.Ordinal);
-            foreach (var credit in plan.Credits)
+            // KEEP is a reviewed decision in the case plan, but it is not a correction. Only persist an
+            // override when the operator actually chose a different local credit destination.
+            foreach (var credit in plan.Credits.Where(x => x.Disposition == "MOVE"))
             {
                 var target = outcomes[credit.TargetOutcomeId];
                 var replacement = target.TargetKind == IdentityTargetKinds.Existing
@@ -242,7 +253,7 @@ namespace PersonCleaner.V2.Domain
                 {
                     Kind = CorrectionKinds.LocalCreditTarget, Operation = CorrectionOperations.Replace, EmbyId = credit.MediaEmbyId,
                     CurrentValue = credit.SourcePersonEmbyId.ToString(CultureInfo.InvariantCulture) + "|" + credit.Role, ReplacementValue = replacement,
-                    Reason = "OPERATOR_PERSON_BUILDER", Note = "Person builder case " + plan.CaseId, Enabled = true
+                    Reason = "OPERATOR_PERSON_BUILDER", Note = plan.DisplayName, Enabled = true
                 };
             }
         }

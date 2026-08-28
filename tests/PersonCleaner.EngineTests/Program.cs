@@ -79,8 +79,9 @@ internal static class Program
         Run("holistic IMDb conflict retains the current Emby ID and provider-owner matrix", HolisticImdbConflictRetainsCurrentId);
         Run("holistic planner keeps compatible current IDs together beside a conflicting alternative", HolisticCurrentIdentitySubsetRemainsTogether);
         Run("holistic planner remains bounded across 1600 cases", HolisticPlannerRemainsBounded);
-        Run("person builder records an already-correct attribution without an Emby mutation", PersonBuilderRecordsNoOpAdjudication);
+        Run("person builder does not turn an already-correct attribution into a durable rule", PersonBuilderRecordsNoOpAdjudication);
         Run("person builder creates a suggested owner and moves media in one projection", PersonBuilderCreatesAndMoves);
+        Run("person builder does not persist one-time new-person targets", PersonBuilderDoesNotPersistNewTarget);
         Run("person builder rejects duplicate provider IDs across final people", PersonBuilderRejectsDuplicateIds);
         Run("person builder requires a destination for an unresolved identity", PersonBuilderRequiresIdentityDestination);
         Run("person builder actions precede terminal grid content", PersonBuilderActionsPrecedeGrid);
@@ -1263,7 +1264,7 @@ internal static class Program
         Equal(1, compilation.Plan.Outcomes.Count);
         Equal("KEEP", compilation.Plan.Credits.Single().Disposition);
         Equal(0, compilation.Plan.Questions.Count);
-        True(compilation.Corrections.Any(x => x.Kind == CorrectionKinds.LocalCreditTarget && x.ReplacementValue == "existing:50"));
+        True(!compilation.Corrections.Any(x => x.Kind == CorrectionKinds.LocalCreditTarget));
         Equal("No Emby changes required", compilation.Plan.ApplyCaption);
     }
 
@@ -1280,6 +1281,17 @@ internal static class Program
         Equal("MOVE", compilation.Plan.Credits.Single().Disposition);
         True(compilation.Plan.ApplyCaption.Contains("create 1 person") && compilation.Plan.ApplyCaption.Contains("move 1 credit"));
         True(compilation.Corrections.Any(x => x.Kind == CorrectionKinds.LocalCreditTarget && x.ReplacementValue == "provider:tvdb:2"));
+    }
+
+    private static void PersonBuilderDoesNotPersistNewTarget()
+    {
+        var plan = BuilderPlan();
+        var draft = PersonBuilderDraft.FromPlan(plan);
+        draft.Credits.Single().TargetOutcomeId = draft.People.Single(x => x.TargetKind == IdentityTargetKinds.New).OutcomeId;
+
+        var compilation = IdentityCasePersonBuilder.Compile(plan, draft);
+
+        True(!compilation.Corrections.Any(x => x.Kind == CorrectionKinds.IdentityTarget && x.ReplacementValue == "new"));
     }
 
     private static void PersonBuilderRejectsDuplicateIds()

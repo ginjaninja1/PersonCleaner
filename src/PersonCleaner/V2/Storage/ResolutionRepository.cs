@@ -1052,20 +1052,45 @@ ORDER BY p.emby_id";
             if (compilation?.Plan == null) throw new ArgumentNullException(nameof(compilation));
             if (compilation.Plan.State != IdentityPlanStates.Complete) throw new InvalidOperationException("Only a complete person-builder projection can be saved.");
             var corrections = (compilation.Corrections ?? new List<ProviderCorrection>()).ToList();
+            var now = Now();
+            var note = PersonBuilderNote(PersonBuilderDisplayName(compilation.Plan), now);
             foreach (var correction in corrections)
             {
                 correction.CorrectionId = 0;
+                correction.Note = note;
                 correction.NormalizeAndValidate();
             }
-            var now = Now(); var note = "Person builder case " + compilation.Plan.CaseId;
+            var legacyNote = "Person builder case " + compilation.Plan.CaseId;
             lock (sync) db.RunInTransaction(x => RunBatchedStatements(x, () =>
             {
-                Statement(x, "DELETE FROM provider_correction WHERE reason='OPERATOR_PERSON_BUILDER' AND note=@note", s => s.Bind("@note", note));
-                foreach (var correction in corrections)
+                // Provenance belongs in structured data, not in the operator-facing Note. Retain the
+                // legacy-note predicate so the first save after this change replaces old builder rules.
+                Statement(x, @"DELETE FROM provider_correction
+WHERE correction_id IN (SELECT correction_id FROM provider_correction_selection WHERE case_id=@case AND question_id='person-builder')
+   OR (reason='OPERATOR_PERSON_BUILDER' AND note=@legacy)", s => { s.Bind("@case", compilation.Plan.CaseId); s.Bind("@legacy", legacyNote); });
+                for (var i = 0; i < corrections.Count; i++)
+                {
+                    var correction = corrections[i];
                     Statement(x, "INSERT INTO provider_correction(kind,operation,provider,media_type,provider_media_id,provider_person_id,field_name,current_value,replacement_value,secondary_provider,secondary_id,emby_id,reason,note,enabled,created_utc,updated_utc) VALUES(@kind,@operation,coalesce(@provider,''),coalesce(@mediaType,''),coalesce(@mediaId,''),coalesce(@personId,''),coalesce(@field,''),coalesce(@current,''),coalesce(@replacement,''),coalesce(@secondaryProvider,''),coalesce(@secondaryId,''),@emby,@reason,coalesce(@note,''),@enabled,@now,@now)", s => BindCorrection(s, correction, now));
+                    Statement(x, "INSERT INTO provider_correction_selection VALUES(last_insert_rowid(),@run,@case,'person-builder',@choice,@now)", s => { s.Bind("@run", compilation.Plan.RunId); s.Bind("@case", compilation.Plan.CaseId); s.Bind("@choice", i.ToString(CultureInfo.InvariantCulture)); s.Bind("@now", now); });
+                }
                 SaveIdentityCasePlans(x, compilation.Plan.RunId, new[] { compilation.Plan }, false);
                 Statement(x, "UPDATE resolution_run SET updated_utc=@now WHERE run_id=@run", s => { s.Bind("@now", now); s.Bind("@run", compilation.Plan.RunId); });
             }), TransactionMode.Immediate);
+        }
+
+        private static string PersonBuilderNote(string displayName, long createdUtc)
+        {
+            var name = string.IsNullOrWhiteSpace(displayName) ? "Unknown person" : displayName.Trim();
+            var created = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(createdUtc);
+            return name + " — " + created.ToString("yyyy-MM-dd HH:mm:ss 'UTC'", CultureInfo.InvariantCulture);
+        }
+
+        private static string PersonBuilderDisplayName(IdentityCasePlan plan)
+        {
+            var names = plan.Outcomes.Select(x => x.DisplayName).Where(x => !string.IsNullOrWhiteSpace(x))
+                .Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            return names.Count == 1 ? names[0] : plan.DisplayName;
         }
 
         public int PendingCorrectionSelections(string caseId)
