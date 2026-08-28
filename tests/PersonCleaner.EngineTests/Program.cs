@@ -1011,6 +1011,7 @@ internal static class Program
         var clusters = new[] { Cluster("old", 13932, "tmdb:12539", "tvdb:252656"), Cluster("new", 13932, "tmdb:2548051", "tvdb:9096777") };
         var plan = IdentityCasePlanner.Build(1, input, new[] { decision }, clusters).Single();
         Equal(IdentityPlanStates.Complete, plan.State);
+        Equal(CasePresentationPurposes.Problem, plan.PresentationPurpose);
         Equal("Person creation and credit realignment", plan.CaseType);
         Equal(2, plan.Outcomes.Count(x => x.TargetKind == IdentityTargetKinds.New || x.TargetKind == IdentityTargetKinds.Existing));
         Equal(1, plan.Outcomes.Count(x => x.TargetKind == IdentityTargetKinds.New));
@@ -1030,6 +1031,8 @@ internal static class Program
         var decision = new ResolutionDecision { DecisionId = "donna-split", Status = "SPLIT", Action = "FORCE_SPLIT_REVIEW", DisplayName = "Donna Ewin", AnchorEmbyPersonId = 63839, ProviderKeys = "tmdb:1996180,tvdb:259110" };
         var plan = IdentityCasePlanner.Build(2, input, new[] { decision }, new[] { Cluster("tmdb", 63839, "tmdb:1996180"), Cluster("tvdb", 63839, "tvdb:259110") }).Single();
         Equal(IdentityPlanStates.Complete, plan.State);
+        Equal(CasePresentationPurposes.SatisfiedNoChange, plan.PresentationPurpose);
+        Equal("Unverified combined identity — no changes proposed", plan.CaseType);
         Equal(1, plan.Outcomes.Count);
         Equal(0, plan.Credits.Count(x => x.Disposition == "MOVE"));
         True(plan.Warning.Contains("no counter-evidence"));

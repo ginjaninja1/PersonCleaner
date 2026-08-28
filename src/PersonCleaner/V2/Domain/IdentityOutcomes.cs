@@ -40,6 +40,7 @@ namespace PersonCleaner.V2.Domain
         public string Warning { get; set; }
         public string State { get; set; }
         public string PresentationPurpose { get; set; }
+        public bool RequiresManualReview { get; set; }
         public string ApplyCaption { get; set; }
         public List<string> DecisionIds { get; set; } = new List<string>();
         public List<LocalPerson> CurrentPeople { get; set; } = new List<LocalPerson>();
@@ -178,6 +179,7 @@ namespace PersonCleaner.V2.Domain
                 CaseId = caseId,
                 DisplayName = displayName,
                 CaseType = FriendlyType(decisions),
+                RequiresManualReview = decisions.Any(x => string.Equals(x.Status, "SPLIT", StringComparison.OrdinalIgnoreCase)),
                 DecisionIds = decisions.Select(x => x.DecisionId).ToList()
             };
             foreach (var warning in decisions.SelectMany(x => x.Evidence ?? new List<EvidenceLine>())
@@ -287,7 +289,10 @@ namespace PersonCleaner.V2.Domain
             plan.State = blocked ? IdentityPlanStates.Blocked : plan.Questions.Count > 0 || plan.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.Unresolved) || plan.Credits.Any(x => x.CorrectionRequired) ? IdentityPlanStates.CorrectionRequired : IdentityPlanStates.Complete;
             CompleteSummaries(plan, planner);
             if (blocked) plan.CaseType = "Blocked by out-of-scope records";
-            else if (plan.State == IdentityPlanStates.Complete) plan.CaseType = SatisfiedCaseType(plan, planner);
+            else if (plan.State == IdentityPlanStates.Complete)
+                plan.CaseType = plan.RequiresManualReview && !HasMutations(plan)
+                    ? "Unverified combined identity — no changes proposed"
+                    : SatisfiedCaseType(plan, planner);
             plan.PresentationPurpose = PresentationPurpose(plan);
             plan.PlanHash = StableHash(Canonical(plan));
             return plan;
@@ -308,7 +313,9 @@ namespace PersonCleaner.V2.Domain
         public static string PresentationPurpose(IdentityCasePlan plan)
         {
             if (plan == null || plan.State != IdentityPlanStates.Complete) return CasePresentationPurposes.Problem;
-            return HasMutations(plan) ? CasePresentationPurposes.SatisfiedChange : CasePresentationPurposes.SatisfiedNoChange;
+            var hasMutations = HasMutations(plan);
+            if (plan.RequiresManualReview && hasMutations) return CasePresentationPurposes.Problem;
+            return hasMutations ? CasePresentationPurposes.SatisfiedChange : CasePresentationPurposes.SatisfiedNoChange;
         }
 
         private static bool SameValue(string left, string right) => string.Equals(left ?? string.Empty, right ?? string.Empty, StringComparison.OrdinalIgnoreCase);
