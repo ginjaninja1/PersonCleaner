@@ -13,6 +13,8 @@ namespace PersonCleaner.V2.Domain
         public long MediaEmbyId { get; set; }
         public string MediaType { get; set; }
         public string MediaName { get; set; }
+        public long? SeriesEmbyId { get; set; }
+        public string SeriesName { get; set; }
         public string Role { get; set; }
     }
 
@@ -42,6 +44,8 @@ namespace PersonCleaner.V2.Domain
                     MediaEmbyId = row.MediaEmbyId,
                     MediaType = string.IsNullOrWhiteSpace(row.MediaType) ? "media" : row.MediaType,
                     MediaName = string.IsNullOrWhiteSpace(row.MediaName) ? "Emby media " + row.MediaEmbyId.ToString(CultureInfo.InvariantCulture) : row.MediaName,
+                    SeriesEmbyId = row.SeriesEmbyId,
+                    SeriesName = row.SeriesName,
                     Role = row.Role ?? string.Empty,
                     Disposition = "KEEP",
                     Rationale = "Loaded from live Emby when the case review opened; this relationship was outside the gathered evidence scope.",

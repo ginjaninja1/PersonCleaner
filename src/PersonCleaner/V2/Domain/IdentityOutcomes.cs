@@ -68,6 +68,8 @@ namespace PersonCleaner.V2.Domain
         public long MediaEmbyId { get; set; }
         public string MediaType { get; set; }
         public string MediaName { get; set; }
+        public long? SeriesEmbyId { get; set; }
+        public string SeriesName { get; set; }
         public string Role { get; set; }
         public string TmdbId { get; set; }
         public string TvdbId { get; set; }

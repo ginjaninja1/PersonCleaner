@@ -4,6 +4,7 @@ using Emby.Web.GenericEdit.Elements.DxGrid;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Attributes;
 using MediaBrowser.Model.Entities;
@@ -28,6 +29,7 @@ namespace PersonCleaner.V2.UI
 
         public ButtonItem Apply { get; set; }
         public ButtonItem BackToAllCases { get; set; } = new ButtonItem("Back to all cases") { CommandId = ReviewCaseCommands.Back };
+        public ButtonItem LastAction { get; set; } = new ButtonItem(string.Empty) { IsEnabled = false };
         [GridDataSource(nameof(Rows))]
         public DxDataGrid PersonBuilder { get; set; }
         public ReviewIdentityRow[] Rows { get; set; } = new ReviewIdentityRow[0];
@@ -55,7 +57,7 @@ namespace PersonCleaner.V2.UI
             ConfigureIdentityColumns(master, personTargets);
             ConfigureMediaColumns(detail, targets);
             master.masterDetail = new DxGridMasterDetail { enabled = true, autoExpandAll = true, childRowsFieldName = nameof(ReviewIdentityRow.Media), detailGridOptions = detail };
-            var ui = new ReviewCaseDialogUI { PersonBuilder = new DxDataGrid(master), Rows = rows };
+            var ui = new ReviewCaseDialogUI { PersonBuilder = new DxDataGrid(master), Rows = rows, LastAction = new ButtonItem(result ?? string.Empty) { IsEnabled = false } };
             try
             {
                 var compilation = IdentityCasePersonBuilder.Compile(plan, draft);
@@ -88,7 +90,7 @@ namespace PersonCleaner.V2.UI
             {
                 if (people.TryGetValue(row.OutcomeId ?? string.Empty, out var person))
                 {
-                    person.TmdbId = row.TmdbId; person.TvdbId = row.TvdbId; person.ImdbId = row.ImdbId;
+                    person.TmdbId = row.TmdbId; person.TvdbId = row.TvdbId; person.ImdbId = row.ImdbId; person.PlannerNotes = row.PlannerNotes;
                     SetPersonTarget(person, row.PersonTarget);
                 }
                 foreach (var media in row.Media ?? new ReviewMediaRow[0])
@@ -109,7 +111,41 @@ namespace PersonCleaner.V2.UI
             return draft;
         }
 
-        private static PersonBuilderIdentity Clone(PersonBuilderIdentity x) => new PersonBuilderIdentity { OutcomeId = x.OutcomeId, Include = x.Include, DisplayName = x.DisplayName, TargetKind = x.TargetKind, TargetEmbyId = x.TargetEmbyId, TmdbId = x.TmdbId, TvdbId = x.TvdbId, ImdbId = x.ImdbId };
+        public static string ExpandCreateSelections(IdentityCasePlan plan, PersonBuilderDraft draft, ReviewCaseDialogUI incoming)
+        {
+            if (plan == null || draft == null || incoming?.Rows == null) return null;
+            var people = draft.People.ToDictionary(x => x.OutcomeId, StringComparer.Ordinal);
+            var addedRows = new List<ReviewIdentityRow>();
+            string result = null;
+            foreach (var row in incoming.Rows.Where(x => !x.IsInformation && !string.IsNullOrWhiteSpace(x.OutcomeId)))
+            {
+                if (!people.TryGetValue(row.OutcomeId, out var current) || current.TargetKind != IdentityTargetKinds.Existing || !current.TargetEmbyId.HasValue || !string.Equals(row.PersonTarget, "new", StringComparison.Ordinal)) continue;
+                row.PersonTarget = "existing:" + current.TargetEmbyId.Value;
+                var id = "builder:new:" + Guid.NewGuid().ToString("N");
+                var displayName = string.IsNullOrWhiteSpace(current.DisplayName) ? plan.DisplayName : current.DisplayName;
+                plan.Outcomes.Add(new IdentityOutcome
+                {
+                    OutcomeId = id, SortOrder = plan.Outcomes.Count, TargetKind = IdentityTargetKinds.New,
+                    DisplayName = displayName, Outcome = "Operator-added Emby person"
+                });
+                draft.People.Add(new PersonBuilderIdentity
+                {
+                    OutcomeId = id, Include = true, DisplayName = displayName, TargetKind = IdentityTargetKinds.New,
+                    TmdbId = string.Empty, TvdbId = string.Empty, ImdbId = string.Empty, PlannerNotes = string.Empty
+                });
+                addedRows.Add(new ReviewIdentityRow
+                {
+                    RowId = id, OutcomeId = id, PersonTarget = "new", Name = displayName,
+                    TmdbId = string.Empty, TvdbId = string.Empty, ImdbId = string.Empty, PlannerNotes = string.Empty
+                });
+                var ordinal = draft.People.Count(x => x.Include && x.TargetKind != IdentityTargetKinds.Existing);
+                result = "New " + ordinal + " Created - Allocate IDs and Associate Media";
+            }
+            if (addedRows.Count > 0) incoming.Rows = incoming.Rows.Concat(addedRows).ToArray();
+            return result;
+        }
+
+        private static PersonBuilderIdentity Clone(PersonBuilderIdentity x) => new PersonBuilderIdentity { OutcomeId = x.OutcomeId, Include = x.Include, DisplayName = x.DisplayName, TargetKind = x.TargetKind, TargetEmbyId = x.TargetEmbyId, TmdbId = x.TmdbId, TvdbId = x.TvdbId, ImdbId = x.ImdbId, PlannerNotes = x.PlannerNotes };
         private static PersonBuilderCredit Clone(PersonBuilderCredit x) => new PersonBuilderCredit { AssignmentId = x.AssignmentId, TargetOutcomeId = x.TargetOutcomeId };
         private static void SetPersonTarget(PersonBuilderIdentity person, string value)
         {
@@ -154,6 +190,7 @@ namespace PersonCleaner.V2.UI
                 if (c.dataField == nameof(ReviewIdentityRow.TmdbId)) { c.caption = "Desired TMDB"; c.width = 120; c.allowEditing = true; }
                 if (c.dataField == nameof(ReviewIdentityRow.TvdbId)) { c.caption = "Desired TVDB"; c.width = 120; c.allowEditing = true; }
                 if (c.dataField == nameof(ReviewIdentityRow.ImdbId)) { c.caption = "Desired IMDb"; c.width = 130; c.allowEditing = true; }
+                if (c.dataField == nameof(ReviewIdentityRow.PlannerNotes)) { c.caption = "Planner notes"; c.width = 240; c.allowEditing = true; }
                 if (c.dataField == nameof(ReviewIdentityRow.ChangeSummary)) { c.caption = "ID result"; c.width = 260; }
                 if (c.dataField == nameof(ReviewIdentityRow.Status)) { c.caption = "Result"; c.width = 215; }
             }
@@ -193,8 +230,9 @@ namespace PersonCleaner.V2.UI
                     : "New " + newOrdinal,
                 CurrentIds = current == null ? "Suggested person" : CurrentIds(current),
                 TmdbId = desired.TmdbId, TvdbId = desired.TvdbId, ImdbId = desired.ImdbId,
+                PlannerNotes = desired.PlannerNotes ?? string.Empty,
                 ChangeSummary = Changes(current, desired),
-                Status = desired.TargetKind == IdentityTargetKinds.Existing ? "Maintain existing person" : desired.TargetKind == IdentityTargetKinds.New ? credits.Values.Any(x => x.TargetOutcomeId == outcome.OutcomeId) ? "Create suggested person" : "Do not create — no assigned media" : "Choose maintain or create"
+                Status = desired.TargetKind == IdentityTargetKinds.Existing ? "Maintain existing person" : desired.TargetKind == IdentityTargetKinds.New ? credits.Values.Any(x => x.TargetOutcomeId == outcome.OutcomeId) ? "Create suggested person" : outcome.Outcome == "Operator-added Emby person" ? "Allocate IDs and associate media" : "Do not create — no assigned media" : "Choose maintain or create"
             };
             row.Media = plan.Credits.Where(x => credits[x.AssignmentId].TargetOutcomeId == outcome.OutcomeId)
                 .OrderBy(x => x.MediaName, StringComparer.Ordinal).ThenBy(x => x.MediaEmbyId).ThenBy(x => x.Role, StringComparer.Ordinal)
@@ -208,11 +246,21 @@ namespace PersonCleaner.V2.UI
             return new ReviewMediaRow
             {
                 RowId = credit.AssignmentId, AssignmentId = credit.AssignmentId,
-                Media = CaseLinks.Emby(credit.MediaEmbyId, serverId, credit.MediaName), Role = DisplayRole(credit.Role),
+                Media = MediaLink(credit, serverId), Role = DisplayRole(credit.Role),
                 CurrentPerson = source == null ? credit.SourcePersonEmbyId.ToString() : CaseLinks.Emby(source.EmbyId, serverId, source.EmbyId.ToString()),
                 TargetOutcomeId = desired.TargetOutcomeId,
                 TmdbOwner = ProviderOwners(credit, ProviderNames.Tmdb), TvdbOwner = ProviderOwners(credit, ProviderNames.Tvdb), Attribution = AttributionVerdict(credit)
             };
+        }
+
+        private static string MediaLink(IdentityCreditOutcome credit, string serverId)
+        {
+            var media = CaseLinks.Emby(credit.MediaEmbyId, serverId, credit.MediaName);
+            if (!string.Equals(credit.MediaType, "episode", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(credit.SeriesName)) return media;
+            var series = credit.SeriesEmbyId.HasValue && credit.SeriesEmbyId.Value > 0
+                ? CaseLinks.Emby(credit.SeriesEmbyId.Value, serverId, credit.SeriesName)
+                : WebUtility.HtmlEncode(credit.SeriesName);
+            return media + " - " + series;
         }
 
         private static string CurrentIds(LocalPerson person)
@@ -272,11 +320,11 @@ namespace PersonCleaner.V2.UI
                 }))
                 .Where(x => !string.IsNullOrWhiteSpace(x.Id)).GroupBy(x => x.Provider + ":" + x.Id, StringComparer.OrdinalIgnoreCase).Select(x => x.First())
                 .OrderBy(x => x.Provider, StringComparer.Ordinal).ThenBy(x => x.Id, StringComparer.Ordinal).ToList();
-            if (ids.Count == 0 && string.IsNullOrWhiteSpace(result)) yield break;
+            if (ids.Count == 0) yield break;
             yield return new ReviewIdentityRow
             {
                 RowId = "information", IsInformation = true, Name = "Information",
-                Status = string.IsNullOrWhiteSpace(result) ? "Participating provider IDs" : result,
+                Status = "Participating provider IDs",
                 Media = ids.Select(x => new ReviewMediaRow
                 {
                     RowId = "information:id:" + x.Provider + ":" + x.Id,
@@ -300,6 +348,7 @@ namespace PersonCleaner.V2.UI
         public string TmdbId { get; set; }
         public string TvdbId { get; set; }
         public string ImdbId { get; set; }
+        public string PlannerNotes { get; set; }
         public string ChangeSummary { get; set; }
         public string Status { get; set; }
         public ReviewMediaRow[] Media { get; set; } = new ReviewMediaRow[0];
@@ -363,15 +412,23 @@ namespace PersonCleaner.V2.UI
         {
             if (string.Equals(commandId, "DialogCancel", StringComparison.OrdinalIgnoreCase) || commandId == ReviewCaseCommands.Back) { rebuildParent(); return Task.FromResult(parent); }
             var applyCommitted = false;
+            PendingReviewAction pendingAction = null;
             try
             {
                 if (commandId == ReviewCaseCommands.IdentityGrid || commandId == ReviewCaseCommands.MediaGrid)
                 {
                     var incoming = json.DeserializeFromString<ReviewCaseDialogUI>(data);
-                    if (commandId == ReviewCaseCommands.IdentityGrid) PrepareAddedPeople(incoming);
+                    pendingAction = DescribeAction(incoming);
+                    if (commandId == ReviewCaseCommands.IdentityGrid)
+                    {
+                        var createResult = ReviewCaseDialogUI.ExpandCreateSelections(plan, draft, incoming);
+                        var addedResult = PrepareAddedPeople(incoming);
+                        if (!string.IsNullOrWhiteSpace(createResult)) pendingAction = new PendingReviewAction { Success = createResult };
+                        else if (!string.IsNullOrWhiteSpace(addedResult)) pendingAction = new PendingReviewAction { Success = addedResult };
+                    }
                     draft = ReviewCaseDialogUI.Capture(draft, incoming, commandId == ReviewCaseCommands.IdentityGrid);
-                    var preview = IdentityCasePersonBuilder.Compile(plan, draft);
-                    result = "Layout is valid: " + preview.EmbyChanges + " Emby change(s), " + preview.Corrections.Count + " minimum correction rule(s). Apply when the complete layout is correct.";
+                    IdentityCasePersonBuilder.Compile(plan, draft);
+                    if (!string.IsNullOrWhiteSpace(pendingAction?.Success)) result = pendingAction.Success;
                     Render(); Refresh(); return Task.FromResult<IPluginUIView>(this);
                 }
                 if (commandId == ReviewCaseCommands.Apply)
@@ -395,7 +452,9 @@ namespace PersonCleaner.V2.UI
             }
             catch (Exception ex)
             {
-                result = applyCommitted ? "Apply committed, but the follow-up workflow failed: " + ex.Message : ex.Message.IndexOf("rollback also failed", StringComparison.OrdinalIgnoreCase) >= 0 ? "Apply failed and Emby may contain partial changes: " + ex.Message : "Nothing was written: " + ex.Message;
+                result = !applyCommitted && !string.IsNullOrWhiteSpace(pendingAction?.Failure)
+                    ? pendingAction.Failure
+                    : applyCommitted ? "Apply committed, but the follow-up workflow failed: " + ex.Message : ex.Message.IndexOf("rollback also failed", StringComparison.OrdinalIgnoreCase) >= 0 ? "Apply failed and Emby may contain partial changes: " + ex.Message : "Nothing was written: " + ex.Message;
                 logger.ErrorException("Unable to process PersonCleaner person-builder case " + caseId, ex);
                 Render(); Refresh();
             }
@@ -427,6 +486,8 @@ namespace PersonCleaner.V2.UI
                     }
                 }
                 plan = loaded;
+                try { PopulateEpisodeContext(plan.Credits); }
+                catch (Exception ex) { logger.Warn("Unable to load episode-series labels for PersonCleaner case {0}: {1}", plan.CaseId, ex.Message); }
                 if (populateReviewMedia)
                 {
                     var supplemental = ReviewCaseCreditInventory.Missing(plan, liveReviewCredits);
@@ -468,11 +529,31 @@ namespace PersonCleaner.V2.UI
                     result.Add(new ReviewLiveCredit
                     {
                         PersonEmbyId = row.Id, MediaEmbyId = row.ItemId, MediaType = item.GetType().Name.ToLowerInvariant(), MediaName = item.Name,
+                        SeriesEmbyId = item is Episode episode ? EpisodeSeriesId(episode) : null,
+                        SeriesName = item is Episode namedEpisode ? namedEpisode.SeriesName ?? namedEpisode.Series?.Name : null,
                         Role = row.Type + (string.IsNullOrWhiteSpace(row.Role) ? string.Empty : ": " + row.Role)
                     });
                 }
             }
             return result;
+        }
+
+        private void PopulateEpisodeContext(IEnumerable<IdentityCreditOutcome> credits)
+        {
+            var episodes = (credits ?? Enumerable.Empty<IdentityCreditOutcome>()).Where(x => string.Equals(x.MediaType, "episode", StringComparison.OrdinalIgnoreCase) && x.MediaEmbyId > 0).ToList();
+            var ids = episodes.Select(x => x.MediaEmbyId).Distinct().ToArray();
+            if (ids.Length == 0) return;
+            var library = host.Resolve<ILibraryManager>();
+            var items = new Dictionary<long, Episode>();
+            for (var offset = 0; offset < ids.Length; offset += 250)
+                foreach (var episode in library.GetItemList(new InternalItemsQuery { ItemIds = ids.Skip(offset).Take(250).ToArray() }, CancellationToken.None).OfType<Episode>())
+                    items[episode.InternalId] = episode;
+            foreach (var credit in episodes)
+                if (items.TryGetValue(credit.MediaEmbyId, out var episode))
+                {
+                    credit.SeriesEmbyId = EpisodeSeriesId(episode);
+                    credit.SeriesName = episode.SeriesName ?? episode.Series?.Name;
+                }
         }
 
         private void Render()
@@ -481,18 +562,74 @@ namespace PersonCleaner.V2.UI
             ContentData = ReviewCaseDialogUI.Build(plan, draft, serverId, result);
         }
 
-        private void PrepareAddedPeople(ReviewCaseDialogUI incoming)
+        private string PrepareAddedPeople(ReviewCaseDialogUI incoming)
         {
+            string result = null;
             foreach (var row in incoming?.Rows?.Where(x => !x.IsInformation && string.IsNullOrWhiteSpace(x.OutcomeId)).ToList() ?? new List<ReviewIdentityRow>())
             {
                 var id = "builder:new:" + Guid.NewGuid().ToString("N");
                 row.RowId = id; row.OutcomeId = id;
                 var name = string.IsNullOrWhiteSpace(row.Name) ? plan.DisplayName : row.Name.Trim();
                 plan.Outcomes.Add(new IdentityOutcome { OutcomeId = id, SortOrder = plan.Outcomes.Count, TargetKind = IdentityTargetKinds.New, DisplayName = name, Outcome = "Operator-added Emby person" });
-                draft.People.Add(new PersonBuilderIdentity { OutcomeId = id, Include = true, DisplayName = name, TargetKind = IdentityTargetKinds.New, TmdbId = row.TmdbId, TvdbId = row.TvdbId, ImdbId = row.ImdbId });
+                draft.People.Add(new PersonBuilderIdentity { OutcomeId = id, Include = true, DisplayName = name, TargetKind = IdentityTargetKinds.New, TmdbId = row.TmdbId, TvdbId = row.TvdbId, ImdbId = row.ImdbId, PlannerNotes = row.PlannerNotes });
                 row.PersonTarget = "new"; row.Name = name;
+                var ordinal = draft.People.Count(x => x.Include && x.TargetKind != IdentityTargetKinds.Existing);
+                result = "New " + ordinal + " Created - Allocate IDs and Associate Media";
             }
+            return result;
         }
+
+        private PendingReviewAction DescribeAction(ReviewCaseDialogUI incoming)
+        {
+            if (incoming?.Rows == null) return null;
+            var rows = incoming.Rows.Where(x => !x.IsInformation && !string.IsNullOrWhiteSpace(x.OutcomeId)).ToDictionary(x => x.OutcomeId, StringComparer.Ordinal);
+            foreach (var person in draft.People.Where(x => x.Include))
+            {
+                if (!rows.TryGetValue(person.OutcomeId, out var row) || string.Equals(row.PersonTarget, "remove", StringComparison.Ordinal))
+                {
+                    if (person.TargetKind != IdentityTargetKinds.Existing)
+                    {
+                        var label = PersonLabel(person);
+                        return new PendingReviewAction { Success = label + " removed", Failure = label + " not removed - disassociate media first" };
+                    }
+                    continue;
+                }
+                var provider = !Same(person.TmdbId, row.TmdbId) ? "TMDB" : !Same(person.TvdbId, row.TvdbId) ? "TVDB" : !Same(person.ImdbId, row.ImdbId) ? "IMDb" : null;
+                if (provider != null) return new PendingReviewAction { Success = PersonLabel(person) + " - " + provider + "ID Changed" };
+                if (!string.Equals(person.PlannerNotes ?? string.Empty, row.PlannerNotes ?? string.Empty, StringComparison.Ordinal))
+                    return new PendingReviewAction { Success = PersonLabel(person) + " - Planner Note Updated" };
+                if (!string.Equals(TargetValue(person), row.PersonTarget ?? string.Empty, StringComparison.Ordinal) && (row.PersonTarget ?? string.Empty).StartsWith("existing:", StringComparison.Ordinal))
+                {
+                    long id;
+                    var label = long.TryParse(row.PersonTarget.Substring(9), out id) ? plan.CurrentPeople.FirstOrDefault(x => x.EmbyId == id)?.Name : null;
+                    return new PendingReviewAction { Success = (label ?? "Emby person") + " selected as Desired Emby Person" };
+                }
+            }
+            var media = incoming.Rows.SelectMany(x => x.Media ?? new ReviewMediaRow[0]).Where(x => !string.IsNullOrWhiteSpace(x.AssignmentId)).ToDictionary(x => x.AssignmentId, StringComparer.Ordinal);
+            foreach (var credit in draft.Credits)
+                if (media.TryGetValue(credit.AssignmentId, out var row) && !string.Equals(credit.TargetOutcomeId, row.TargetOutcomeId, StringComparison.Ordinal))
+                {
+                    var source = plan.Credits.FirstOrDefault(x => x.AssignmentId == credit.AssignmentId);
+                    var target = draft.People.FirstOrDefault(x => x.OutcomeId == row.TargetOutcomeId);
+                    return new PendingReviewAction { Success = (source?.MediaName ?? "Media") + " Association to " + PersonLabel(target) };
+                }
+            return null;
+        }
+
+        private string PersonLabel(PersonBuilderIdentity person)
+        {
+            if (person == null) return "person";
+            if (person.TargetKind == IdentityTargetKinds.Existing)
+                return plan.CurrentPeople.FirstOrDefault(x => x.EmbyId == person.TargetEmbyId)?.Name ?? person.DisplayName ?? "Emby person";
+            var activeNew = draft.People.Where(x => x.Include && x.TargetKind != IdentityTargetKinds.Existing).ToList();
+            var ordinal = activeNew.FindIndex(x => x.OutcomeId == person.OutcomeId) + 1;
+            return ordinal > 0 ? "New " + ordinal : person.DisplayName ?? "new person";
+        }
+
+        private static bool Same(string a, string b) => string.Equals(a ?? string.Empty, b ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+        private static string TargetValue(PersonBuilderIdentity person) => person.TargetKind == IdentityTargetKinds.Existing && person.TargetEmbyId.HasValue ? "existing:" + person.TargetEmbyId.Value : person.TargetKind == IdentityTargetKinds.New ? "new" : string.Empty;
+        private static long? EpisodeSeriesId(Episode episode) => episode == null ? null : episode.SeriesId > 0 ? (long?)episode.SeriesId : episode.Series != null && episode.Series.InternalId > 0 ? (long?)episode.Series.InternalId : null;
+        private sealed class PendingReviewAction { public string Success { get; set; } public string Failure { get; set; } }
     }
 
     internal static class CaseLinks

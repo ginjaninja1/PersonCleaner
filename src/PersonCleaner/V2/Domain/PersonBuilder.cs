@@ -32,7 +32,8 @@ namespace PersonCleaner.V2.Domain
                     TargetEmbyId = x.TargetEmbyId,
                     TmdbId = IdentityCasePlanner.PreferredProviderId(x, ProviderNames.Tmdb),
                     TvdbId = IdentityCasePlanner.PreferredProviderId(x, ProviderNames.Tvdb),
-                    ImdbId = IdentityCasePlanner.PreferredProviderId(x, ProviderNames.Imdb)
+                    ImdbId = IdentityCasePlanner.PreferredProviderId(x, ProviderNames.Imdb),
+                    PlannerNotes = string.Empty
                 }).ToList(),
                 Credits = plan.Credits.Select(x => new PersonBuilderCredit { AssignmentId = x.AssignmentId, TargetOutcomeId = x.TargetOutcomeId }).ToList()
             };
@@ -49,6 +50,7 @@ namespace PersonCleaner.V2.Domain
         public string TmdbId { get; set; }
         public string TvdbId { get; set; }
         public string ImdbId { get; set; }
+        public string PlannerNotes { get; set; }
     }
 
     public sealed class PersonBuilderCredit
@@ -151,6 +153,7 @@ namespace PersonCleaner.V2.Domain
                 {
                     AssignmentId = original.AssignmentId, SourcePersonEmbyId = original.SourcePersonEmbyId, TargetOutcomeId = targetId,
                     MediaEmbyId = original.MediaEmbyId, MediaType = original.MediaType, MediaName = original.MediaName, Role = original.Role,
+                    SeriesEmbyId = original.SeriesEmbyId, SeriesName = original.SeriesName,
                     TmdbId = original.TmdbId, TvdbId = original.TvdbId, TvdbSlug = original.TvdbSlug, ImdbId = original.ImdbId,
                     Disposition = disposition, CorrectionRequired = false,
                     Rationale = original.IsReviewSupplemental

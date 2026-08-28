@@ -86,6 +86,9 @@ internal static class Program
         Run("person builder rejects duplicate provider IDs across final people", PersonBuilderRejectsDuplicateIds);
         Run("person builder requires a destination for an unresolved identity", PersonBuilderRequiresIdentityDestination);
         Run("person builder actions precede terminal grid content", PersonBuilderActionsPrecedeGrid);
+        Run("person builder Create appends an empty row and retains the existing person", PersonBuilderCreateAppendsEmptyRow);
+        Run("person builder planner notes remain transient across grid refreshes", PersonBuilderPlannerNotesRoundTrip);
+        Run("case review episodes link both episode and series", CaseReviewEpisodeAndSeriesLinks);
         Run("case review out-of-scope media is enabled by default", CaseReviewMediaEnabledByDefault);
         Run("case review adds missing live credits and compiles only moved supplements", CaseReviewAddsMissingLiveCredits);
         Run("case planning does not scan 300000 unrelated global Emby people", CasePlanningIgnoresLargeGlobalPopulation);
@@ -1375,6 +1378,7 @@ internal static class Program
         var properties = typeof(ReviewCaseDialogUI).GetProperties().Where(x => x.DeclaringType == typeof(ReviewCaseDialogUI)).OrderBy(x => x.MetadataToken).Select(x => x.Name).ToList();
         True(properties.IndexOf(nameof(ReviewCaseDialogUI.Apply)) < properties.IndexOf(nameof(ReviewCaseDialogUI.PersonBuilder)));
         True(properties.IndexOf(nameof(ReviewCaseDialogUI.BackToAllCases)) < properties.IndexOf(nameof(ReviewCaseDialogUI.PersonBuilder)));
+        True(properties.IndexOf(nameof(ReviewCaseDialogUI.LastAction)) < properties.IndexOf(nameof(ReviewCaseDialogUI.PersonBuilder)));
         var plan = BuilderPlan();
         var draft = PersonBuilderDraft.FromPlan(plan);
         draft.Credits.Single().TargetOutcomeId = draft.People.Single(x => x.TargetKind == IdentityTargetKinds.New).OutcomeId;
@@ -1392,6 +1396,7 @@ internal static class Program
         True(!media.TvdbOwner.Contains("Alex Example") && !media.TvdbOwner.Contains("Lead"));
         True(ui.Rows.Single(x => x.OutcomeId == "existing:50").Name.Contains("#!/item?id=50"));
         True(ui.Apply != null);
+        True(ui.LastAction != null && !ui.LastAction.IsEnabled && ui.LastAction.Caption == string.Empty);
 
         ui.Rows.Single(x => x.OutcomeId == "new:tvdb2").PersonTarget = "remove";
         var rejectedRemoval = false;
@@ -1403,6 +1408,67 @@ internal static class Program
         var emptyUi = ReviewCaseDialogUI.Build(plan, emptyDraft, "server", null);
         emptyUi.Rows.Single(x => x.OutcomeId == "new:tvdb2").PersonTarget = "remove";
         True(!ReviewCaseDialogUI.Capture(emptyDraft, emptyUi, false).People.Single(x => x.OutcomeId == "new:tvdb2").Include);
+    }
+
+    private static void PersonBuilderCreateAppendsEmptyRow()
+    {
+        var plan = BuilderPlan();
+        var draft = PersonBuilderDraft.FromPlan(plan);
+        var ui = ReviewCaseDialogUI.Build(plan, draft, "server", null);
+        var existingRow = ui.Rows.Single(x => x.OutcomeId == "existing:50");
+        existingRow.PersonTarget = "new";
+
+        var result = ReviewCaseDialogUI.ExpandCreateSelections(plan, draft, ui);
+
+        Equal("existing:50", existingRow.PersonTarget);
+        Equal(3, plan.Outcomes.Count);
+        Equal(3, draft.People.Count);
+        var added = draft.People.Single(x => x.OutcomeId.StartsWith("builder:new:", StringComparison.Ordinal));
+        Equal(IdentityTargetKinds.New, added.TargetKind);
+        Equal(string.Empty, added.TmdbId);
+        Equal(string.Empty, added.TvdbId);
+        Equal(string.Empty, added.ImdbId);
+        True(!draft.Credits.Any(x => x.TargetOutcomeId == added.OutcomeId));
+        True(ui.Rows.Any(x => x.OutcomeId == added.OutcomeId && x.Media.Length == 0));
+        True(result.Contains("Created - Allocate IDs and Associate Media"));
+
+        var captured = ReviewCaseDialogUI.Capture(draft, ui, true);
+        Equal(IdentityTargetKinds.Existing, captured.People.Single(x => x.OutcomeId == "existing:50").TargetKind);
+        Equal(50L, captured.People.Single(x => x.OutcomeId == "existing:50").TargetEmbyId.Value);
+        True(captured.People.Single(x => x.OutcomeId == added.OutcomeId).Include);
+    }
+
+    private static void PersonBuilderPlannerNotesRoundTrip()
+    {
+        var plan = BuilderPlan();
+        var draft = PersonBuilderDraft.FromPlan(plan);
+        var ui = ReviewCaseDialogUI.Build(plan, draft, "server", null);
+        ui.Rows.Single(x => x.OutcomeId == "existing:50").PlannerNotes = "TMDB identity is the older actor";
+
+        var captured = ReviewCaseDialogUI.Capture(draft, ui, false);
+        Equal("TMDB identity is the older actor", captured.People.Single(x => x.OutcomeId == "existing:50").PlannerNotes);
+        var refreshed = ReviewCaseDialogUI.Build(plan, captured, "server", "Alex Example - Planner Note Updated");
+        Equal("TMDB identity is the older actor", refreshed.Rows.Single(x => x.OutcomeId == "existing:50").PlannerNotes);
+        Equal("Alex Example - Planner Note Updated", refreshed.LastAction.Caption);
+        True(!IdentityCasePersonBuilder.Compile(plan, captured).Plan.Summary.Contains("older actor"));
+    }
+
+    private static void CaseReviewEpisodeAndSeriesLinks()
+    {
+        var plan = BuilderPlan();
+        var credit = plan.Credits.Single();
+        credit.MediaType = "episode";
+        credit.MediaName = "The Reckoning";
+        credit.MediaEmbyId = 321;
+        credit.SeriesName = "Example Series";
+        credit.SeriesEmbyId = 654;
+
+        var ui = ReviewCaseDialogUI.Build(plan, PersonBuilderDraft.FromPlan(plan), "server", null);
+        var media = ui.Rows.SelectMany(x => x.Media).Single(x => x.AssignmentId == credit.AssignmentId).Media;
+        True(media.Contains(">The Reckoning</a> - <a"));
+        True(media.Contains("#!/item?id=321"));
+        True(media.Contains("#!/item?id=654"));
+        True(media.Contains(">Example Series</a>"));
     }
 
     private static void CaseReviewMediaEnabledByDefault()
