@@ -24,7 +24,7 @@ namespace PersonCleaner.V2.UI
         public static EvidenceUI Build(RunStatus run)
         {
             var summary = run == null ? "No task run exists. Open Configuration and run the scheduled task."
-                : "Run " + run.RunId + " · " + run.Status + " · " + run.Mode + " · " + run.SelectedMovies + " movies + " + run.SelectedSeries + " series · " + run.MediaFetched + " media API fetches · " + run.PeopleFetched + " person API fetches · " + run.CacheHits + " cache hits · " + run.Failures + " failures · " + run.Cases + " cases · MATCH=" + run.AutoApplicableCases + " queued for Mass Corrections · " + run.AppliedCases + " applied · " + run.SatisfiedNoChangeCases + " satisfied/no change · " + run.ProblemCases + " problem cases (" + run.DecisionBreakdown + ")";
+                : "Run " + run.RunId + " · " + run.Status + " · " + run.Mode + " · " + run.SelectedMovies + " movies + " + run.SelectedSeries + " series · " + run.MediaFetched + " media API fetches · " + run.PeopleFetched + " person API fetches · " + run.CacheHits + " cache hits · " + run.Failures + " failures · " + run.Cases + " cases · \nMATCH=" + run.AutoApplicableCases + " queued for Mass Corrections · " + run.AppliedCases + " applied · " + run.SatisfiedNoChangeCases + " satisfied/no change · " + run.ProblemCases + " problem cases \n(" + run.DecisionBreakdown + ")";
             return new EvidenceUI
             {
                 RunSummary = new CaptionItem(summary),
