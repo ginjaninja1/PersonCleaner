@@ -40,7 +40,9 @@ namespace PersonCleaner.V2.UI
                 finally { RemoveResolverTokens(resolverTokens, targetPeople); }
                 ApplyNewProviderIds(plan, receipt);
                 Postflight(plan, receipt, liveMediaPeople);
-                receipt.Summary = plan.ApplyCaption.Substring("Apply: ".Length) + ".";
+                receipt.Summary = HasMutations(plan)
+                    ? (plan.ApplyCaption.StartsWith("Apply: ", StringComparison.Ordinal) ? plan.ApplyCaption.Substring("Apply: ".Length) + "." : plan.ApplyCaption)
+                    : "Confirmed person-ID and media-credit layout; no Emby changes were required.";
                 persistCommit(receipt);
                 return receipt;
             }

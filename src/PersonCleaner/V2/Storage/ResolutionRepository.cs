@@ -1035,62 +1035,20 @@ ORDER BY p.emby_id";
         {
             if (correction == null) throw new ArgumentNullException(nameof(correction));
             if (string.IsNullOrWhiteSpace(caseId) || string.IsNullOrWhiteSpace(questionId) || string.IsNullOrWhiteSpace(choiceId)) throw new ArgumentException("The contextual correction selection is incomplete.");
-            correction.NormalizeAndValidate();
-            if (correction.CorrectionId > 0) throw new InvalidOperationException("A contextual correction choice must create a new durable correction.");
             var now = Now(); var id = 0L;
-            lock (sync) db.RunInTransaction(x =>
+            lock (sync)
             {
-                Statement(x, "INSERT INTO provider_correction(kind,operation,provider,media_type,provider_media_id,provider_person_id,field_name,current_value,replacement_value,secondary_provider,secondary_id,emby_id,reason,note,enabled,created_utc,updated_utc) VALUES(@kind,@operation,coalesce(@provider,''),coalesce(@mediaType,''),coalesce(@mediaId,''),coalesce(@personId,''),coalesce(@field,''),coalesce(@current,''),coalesce(@replacement,''),coalesce(@secondaryProvider,''),coalesce(@secondaryId,''),@emby,@reason,coalesce(@note,''),@enabled,@now,@now)", s => BindCorrection(s, correction, now));
-                using (var s = x.PrepareStatement("SELECT last_insert_rowid()")) foreach (var row in s.Rows()) id = row.GetInt64(0);
-                Statement(x, "INSERT INTO provider_correction_selection VALUES(@id,@run,@case,@question,@choice,@now)", s => { s.Bind("@id", id); s.Bind("@run", sourceRunId); s.Bind("@case", caseId); s.Bind("@question", questionId); s.Bind("@choice", choiceId); s.Bind("@now", now); });
-            }, TransactionMode.Immediate);
-            correction.CorrectionId = id; return id;
-        }
-
-        public void SavePersonBuilder(PersonBuilderCompilation compilation)
-        {
-            if (compilation?.Plan == null) throw new ArgumentNullException(nameof(compilation));
-            if (compilation.Plan.State != IdentityPlanStates.Complete) throw new InvalidOperationException("Only a complete person-builder projection can be saved.");
-            var corrections = (compilation.Corrections ?? new List<ProviderCorrection>()).ToList();
-            var now = Now();
-            var note = PersonBuilderNote(PersonBuilderDisplayName(compilation.Plan), now);
-            foreach (var correction in corrections)
-            {
-                correction.CorrectionId = 0;
-                correction.Note = note;
+                correction.Note = CreatedRuleNote(CaseDisplayName(sourceRunId, caseId), now);
                 correction.NormalizeAndValidate();
-            }
-            var legacyNote = "Person builder case " + compilation.Plan.CaseId;
-            lock (sync) db.RunInTransaction(x => RunBatchedStatements(x, () =>
-            {
-                // Provenance belongs in structured data, not in the operator-facing Note. Retain the
-                // legacy-note predicate so the first save after this change replaces old builder rules.
-                Statement(x, @"DELETE FROM provider_correction
-WHERE correction_id IN (SELECT correction_id FROM provider_correction_selection WHERE case_id=@case AND question_id='person-builder')
-   OR (reason='OPERATOR_PERSON_BUILDER' AND note=@legacy)", s => { s.Bind("@case", compilation.Plan.CaseId); s.Bind("@legacy", legacyNote); });
-                for (var i = 0; i < corrections.Count; i++)
+                if (correction.CorrectionId > 0) throw new InvalidOperationException("A contextual correction choice must create a new durable correction.");
+                db.RunInTransaction(x =>
                 {
-                    var correction = corrections[i];
                     Statement(x, "INSERT INTO provider_correction(kind,operation,provider,media_type,provider_media_id,provider_person_id,field_name,current_value,replacement_value,secondary_provider,secondary_id,emby_id,reason,note,enabled,created_utc,updated_utc) VALUES(@kind,@operation,coalesce(@provider,''),coalesce(@mediaType,''),coalesce(@mediaId,''),coalesce(@personId,''),coalesce(@field,''),coalesce(@current,''),coalesce(@replacement,''),coalesce(@secondaryProvider,''),coalesce(@secondaryId,''),@emby,@reason,coalesce(@note,''),@enabled,@now,@now)", s => BindCorrection(s, correction, now));
-                    Statement(x, "INSERT INTO provider_correction_selection VALUES(last_insert_rowid(),@run,@case,'person-builder',@choice,@now)", s => { s.Bind("@run", compilation.Plan.RunId); s.Bind("@case", compilation.Plan.CaseId); s.Bind("@choice", i.ToString(CultureInfo.InvariantCulture)); s.Bind("@now", now); });
-                }
-                SaveIdentityCasePlans(x, compilation.Plan.RunId, new[] { compilation.Plan }, false);
-                Statement(x, "UPDATE resolution_run SET updated_utc=@now WHERE run_id=@run", s => { s.Bind("@now", now); s.Bind("@run", compilation.Plan.RunId); });
-            }), TransactionMode.Immediate);
-        }
-
-        private static string PersonBuilderNote(string displayName, long createdUtc)
-        {
-            var name = string.IsNullOrWhiteSpace(displayName) ? "Unknown person" : displayName.Trim();
-            var created = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(createdUtc);
-            return name + " — " + created.ToString("yyyy-MM-dd HH:mm:ss 'UTC'", CultureInfo.InvariantCulture);
-        }
-
-        private static string PersonBuilderDisplayName(IdentityCasePlan plan)
-        {
-            var names = plan.Outcomes.Select(x => x.DisplayName).Where(x => !string.IsNullOrWhiteSpace(x))
-                .Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            return names.Count == 1 ? names[0] : plan.DisplayName;
+                    using (var s = x.PrepareStatement("SELECT last_insert_rowid()")) foreach (var row in s.Rows()) id = row.GetInt64(0);
+                    Statement(x, "INSERT INTO provider_correction_selection VALUES(@id,@run,@case,@question,@choice,@now)", s => { s.Bind("@id", id); s.Bind("@run", sourceRunId); s.Bind("@case", caseId); s.Bind("@question", questionId); s.Bind("@choice", choiceId); s.Bind("@now", now); });
+                }, TransactionMode.Immediate);
+            }
+            correction.CorrectionId = id; return id;
         }
 
         public int PendingCorrectionSelections(string caseId)
@@ -1109,14 +1067,39 @@ WHERE s.case_id=@case AND a.correction_id IS NULL"))
             return count;
         }
 
-        public long CommitIdentityCase(IdentityCasePlan plan, IdentityCaseApplyReceipt receipt)
+        public long CommitIdentityCase(PersonBuilderCompilation compilation, IdentityCaseApplyReceipt receipt)
         {
-            if (plan == null) throw new ArgumentNullException(nameof(plan));
+            if (compilation?.Plan == null) throw new ArgumentNullException(nameof(compilation));
             if (receipt == null) throw new ArgumentNullException(nameof(receipt));
-            var applyId = 0L; var now = Now();
+            if (string.IsNullOrWhiteSpace(compilation.ReviewedPlanHash)) throw new InvalidOperationException("The reviewed evidence hash is missing.");
+            var plan = compilation.Plan;
+            var selections = (compilation.CorrectionSelections ?? new List<PersonBuilderCorrectionSelection>()).ToList();
+            var now = Now();
+            var note = CreatedRuleNote(PersonBuilderDisplayName(plan), now);
+            foreach (var selection in selections)
+            {
+                if (string.IsNullOrWhiteSpace(selection?.QuestionId) || string.IsNullOrWhiteSpace(selection.ChoiceId) || selection.Correction == null)
+                    throw new InvalidOperationException("An applied correction rule is missing its question or choice provenance.");
+                selection.Correction.CorrectionId = 0;
+                selection.Correction.Note = note;
+                selection.Correction.NormalizeAndValidate();
+            }
+            var applyId = 0L;
             lock (sync) db.RunInTransaction(x =>
             {
-                Statement(x, "INSERT INTO identity_case_apply(source_run_id,case_id,reviewed_plan_hash,started_utc,finished_utc,status,summary) VALUES(@run,@case,@hash,@now,@now,'COMMITTED',@summary)", s => { s.Bind("@run", plan.RunId); s.Bind("@case", plan.CaseId); s.Bind("@hash", plan.PlanHash); s.Bind("@now", now); s.Bind("@summary", receipt.Summary); });
+                // Older builds saved the complete person-builder projection as durable corrections.
+                // Applying a case replaces those broad layout rules with only the exact contextual
+                // choices required to reproduce the operator-confirmed result on future runs.
+                Statement(x, @"DELETE FROM provider_correction
+WHERE correction_id IN (SELECT correction_id FROM provider_correction_selection WHERE case_id=@case AND question_id='person-builder')
+   OR (reason='OPERATOR_PERSON_BUILDER' AND note=@legacy)", s => { s.Bind("@case", plan.CaseId); s.Bind("@legacy", "Person builder case " + plan.CaseId); });
+                foreach (var selection in selections)
+                {
+                    var correction = selection.Correction;
+                    Statement(x, "INSERT INTO provider_correction(kind,operation,provider,media_type,provider_media_id,provider_person_id,field_name,current_value,replacement_value,secondary_provider,secondary_id,emby_id,reason,note,enabled,created_utc,updated_utc) VALUES(@kind,@operation,coalesce(@provider,''),coalesce(@mediaType,''),coalesce(@mediaId,''),coalesce(@personId,''),coalesce(@field,''),coalesce(@current,''),coalesce(@replacement,''),coalesce(@secondaryProvider,''),coalesce(@secondaryId,''),@emby,@reason,coalesce(@note,''),@enabled,@now,@now)", s => BindCorrection(s, correction, now));
+                    Statement(x, "INSERT INTO provider_correction_selection VALUES(last_insert_rowid(),@run,@case,@question,@choice,@now)", s => { s.Bind("@run", plan.RunId); s.Bind("@case", plan.CaseId); s.Bind("@question", selection.QuestionId); s.Bind("@choice", selection.ChoiceId); s.Bind("@now", now); });
+                }
+                Statement(x, "INSERT INTO identity_case_apply(source_run_id,case_id,reviewed_plan_hash,started_utc,finished_utc,status,summary) VALUES(@run,@case,@hash,@now,@now,'COMMITTED',@summary)", s => { s.Bind("@run", plan.RunId); s.Bind("@case", plan.CaseId); s.Bind("@hash", compilation.ReviewedPlanHash); s.Bind("@now", now); s.Bind("@summary", receipt.Summary); });
                 using (var s = x.PrepareStatement("SELECT last_insert_rowid()")) foreach (var r in s.Rows()) applyId = r.GetInt64(0);
                 for (var i = 0; i < receipt.Changes.Count; i++)
                 {
@@ -1141,6 +1124,36 @@ WHERE s.case_id=@case AND a.correction_id IS NULL"))
                 }
             }, TransactionMode.Immediate);
             return applyId;
+        }
+
+        private string CaseDisplayName(long runId, string caseId)
+        {
+            using (var s = db.PrepareStatement("SELECT display_name FROM resolution_case WHERE run_id=@run AND case_id=@case"))
+            {
+                s.Bind("@run", runId); s.Bind("@case", caseId);
+                foreach (var row in s.Rows()) return DistinctDisplayName(row.GetString(0));
+            }
+            return "Unknown person";
+        }
+
+        private static string PersonBuilderDisplayName(IdentityCasePlan plan)
+        {
+            var names = plan.Outcomes.Select(x => x.DisplayName).Where(x => !string.IsNullOrWhiteSpace(x))
+                .Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            return names.Count == 1 ? names[0] : DistinctDisplayName(plan.DisplayName);
+        }
+
+        private static string DistinctDisplayName(string displayName)
+        {
+            var names = (displayName ?? string.Empty).Split(new[] { " / " }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim()).Where(x => x.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            return names.Count == 0 ? "Unknown person" : string.Join(" / ", names);
+        }
+
+        private static string CreatedRuleNote(string displayName, long createdUtc)
+        {
+            var created = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(createdUtc);
+            return DistinctDisplayName(displayName) + " — " + created.ToString("yyyy-MM-dd HH:mm:ss 'UTC'", CultureInfo.InvariantCulture);
         }
 
         private static string ProviderIdText(LocalPerson person)

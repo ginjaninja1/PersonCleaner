@@ -60,9 +60,17 @@ namespace PersonCleaner.V2.Domain
     public sealed class PersonBuilderCompilation
     {
         public IdentityCasePlan Plan { get; set; }
+        public string ReviewedPlanHash { get; set; }
+        public List<PersonBuilderCorrectionSelection> CorrectionSelections { get; set; } = new List<PersonBuilderCorrectionSelection>();
         public List<ProviderCorrection> Corrections { get; set; } = new List<ProviderCorrection>();
-        public int RecordedDecisions { get; set; }
         public int EmbyChanges { get; set; }
+    }
+
+    public sealed class PersonBuilderCorrectionSelection
+    {
+        public string QuestionId { get; set; }
+        public string ChoiceId { get; set; }
+        public ProviderCorrection Correction { get; set; }
     }
 
     public static class IdentityCasePersonBuilder
@@ -149,15 +157,98 @@ namespace PersonCleaner.V2.Domain
                 });
             }
 
-            var compilation = new PersonBuilderCompilation { Plan = plan };
-            compilation.Corrections.AddRange(BuildIdentityCorrections(source, plan));
-            compilation.Corrections.AddRange(BuildCreditCorrections(plan));
-            compilation.Corrections = compilation.Corrections.GroupBy(CorrectionKey, StringComparer.Ordinal).Select(x => x.Last()).ToList();
-            compilation.RecordedDecisions = plan.Credits.Count + plan.Outcomes.Sum(x => Providers.Count(p => !string.IsNullOrWhiteSpace(Preferred(x, p))));
+            var compilation = new PersonBuilderCompilation { Plan = plan, ReviewedPlanHash = source.PlanHash };
+            compilation.CorrectionSelections.AddRange(BuildCorrectionSelections(source, plan, people, credits));
+            compilation.CorrectionSelections = compilation.CorrectionSelections
+                .GroupBy(x => CorrectionKey(x.Correction), StringComparer.Ordinal).Select(x => x.First()).ToList();
+            compilation.Corrections = compilation.CorrectionSelections.Select(x => x.Correction).ToList();
             compilation.EmbyChanges = CompleteProjection(plan);
             plan.PlanHash = Hash(Canonical(plan));
             return compilation;
         }
+
+        private static IEnumerable<PersonBuilderCorrectionSelection> BuildCorrectionSelections(IdentityCasePlan source, IdentityCasePlan result, IDictionary<string, PersonBuilderIdentity> people, IDictionary<string, PersonBuilderCredit> credits)
+        {
+            foreach (var question in source.Questions.OrderBy(x => x.QuestionId, StringComparer.Ordinal))
+            {
+                IdentityQuestionChoice selected = null;
+                if (!string.IsNullOrWhiteSpace(question.AssignmentId) && credits.TryGetValue(question.AssignmentId, out var credit))
+                {
+                    var outcome = result.Outcomes.FirstOrDefault(x => x.OutcomeId == credit.TargetOutcomeId);
+                    selected = question.Choices.Where(x => CreditChoiceTargets(x?.Correction, outcome, credit.TargetOutcomeId))
+                        .OrderBy(x => x.Correction.Kind == CorrectionKinds.MediaCredit ? 0 : 1).ThenBy(x => x.ChoiceId, StringComparer.Ordinal).FirstOrDefault();
+                }
+                else if (!string.IsNullOrWhiteSpace(question.OutcomeId) && people.TryGetValue(question.OutcomeId, out var person))
+                {
+                    var original = source.Outcomes.FirstOrDefault(x => x.OutcomeId == question.OutcomeId);
+                    selected = question.Choices.Where(x => IdentityChoiceMatches(x?.Correction, original, person)).OrderBy(x => x.ChoiceId, StringComparer.Ordinal).FirstOrDefault();
+                }
+
+                if (selected?.Correction == null)
+                {
+                    if (question.Choices.Count > 0)
+                        throw new InvalidOperationException("The selected layout does not identify one correction rule for: " + question.Narrative);
+                    continue;
+                }
+                yield return new PersonBuilderCorrectionSelection
+                {
+                    QuestionId = question.QuestionId,
+                    ChoiceId = selected.ChoiceId,
+                    Correction = Clone(selected.Correction)
+                };
+            }
+        }
+
+        private static bool CreditChoiceTargets(ProviderCorrection correction, IdentityOutcome outcome, string outcomeId)
+        {
+            if (correction == null || outcome == null) return false;
+            if (correction.Kind == CorrectionKinds.LocalCreditTarget)
+            {
+                var target = outcome.TargetKind == IdentityTargetKinds.Existing && outcome.TargetEmbyId.HasValue
+                    ? "existing:" + outcome.TargetEmbyId.Value.ToString(CultureInfo.InvariantCulture)
+                    : "outcome:" + outcomeId;
+                return Same(correction.ReplacementValue, target);
+            }
+            if (correction.Kind != CorrectionKinds.MediaCredit) return false;
+            if (correction.Operation == CorrectionOperations.Replace)
+                return outcome.ProviderIds.Any(x => x.Source == "native" && Same(x.Provider, correction.Provider) && Same(x.ProviderId, correction.ReplacementValue));
+            if (correction.Operation == CorrectionOperations.Unusable)
+                return !outcome.ProviderIds.Any(x => x.Source == "native" && Same(x.Provider, correction.Provider));
+            return false;
+        }
+
+        private static bool IdentityChoiceMatches(ProviderCorrection correction, IdentityOutcome original, PersonBuilderIdentity desired)
+        {
+            if (correction == null || desired == null) return false;
+            if (correction.Kind == CorrectionKinds.IdentityTarget)
+            {
+                var target = desired.TargetKind == IdentityTargetKinds.Existing && desired.TargetEmbyId.HasValue
+                    ? "existing:" + desired.TargetEmbyId.Value.ToString(CultureInfo.InvariantCulture)
+                    : desired.TargetKind == IdentityTargetKinds.New ? "new" : string.Empty;
+                return Same(correction.ReplacementValue, target);
+            }
+            if (correction.Kind != CorrectionKinds.PersonExternalId) return false;
+            var after = DesiredId(desired, correction.FieldName);
+            if (correction.Operation == CorrectionOperations.Replace) return Same(after, correction.ReplacementValue);
+            if (correction.Operation != CorrectionOperations.Unusable || !string.IsNullOrWhiteSpace(after)) return false;
+            return original != null && original.ProviderIds.Any(x => Same(x.Provider, correction.FieldName) && Same(x.ProviderId, correction.CurrentValue));
+        }
+
+        private static string DesiredId(PersonBuilderIdentity person, string provider)
+        {
+            if (Same(provider, ProviderNames.Tmdb)) return person.TmdbId;
+            if (Same(provider, ProviderNames.Tvdb)) return person.TvdbId;
+            if (Same(provider, ProviderNames.Imdb)) return person.ImdbId;
+            return null;
+        }
+
+        private static ProviderCorrection Clone(ProviderCorrection x) => new ProviderCorrection
+        {
+            Kind = x.Kind, Operation = x.Operation, Provider = x.Provider, MediaType = x.MediaType,
+            ProviderMediaId = x.ProviderMediaId, ProviderPersonId = x.ProviderPersonId, FieldName = x.FieldName,
+            CurrentValue = x.CurrentValue, ReplacementValue = x.ReplacementValue, SecondaryProvider = x.SecondaryProvider,
+            SecondaryId = x.SecondaryId, EmbyId = x.EmbyId, Reason = x.Reason, Note = x.Note, Enabled = true
+        };
 
         private static IdentityCasePlan CloneHeader(IdentityCasePlan source)
         {
@@ -191,85 +282,6 @@ namespace PersonCleaner.V2.Domain
             plan.Summary = "Person builder result: maintain " + plan.Outcomes.Count(x => x.TargetKind == IdentityTargetKinds.Existing) + " existing person(s), create " + creates + " person(s), move " + moves + " media credit(s), and change " + changes + " provider ID(s).";
             return creates + moves + changes;
         }
-
-        private static IEnumerable<ProviderCorrection> BuildIdentityCorrections(IdentityCasePlan source, IdentityCasePlan plan)
-        {
-            var note = plan.DisplayName;
-            foreach (var outcome in plan.Outcomes)
-            {
-                var native = outcome.ProviderIds.Where(x => x.Source == "native" && (x.Provider == ProviderNames.Tmdb || x.Provider == ProviderNames.Tvdb)).ToList();
-                var target = outcome.TargetKind == IdentityTargetKinds.Existing ? "existing:" + outcome.TargetEmbyId.Value.ToString(CultureInfo.InvariantCulture) : "new";
-                var original = source.Outcomes.FirstOrDefault(x => x.OutcomeId == outcome.OutcomeId);
-                var targetChanged = original == null || original.TargetKind != outcome.TargetKind || original.TargetEmbyId != outcome.TargetEmbyId;
-                // "new" is a one-time Apply instruction, not a durable identity fact. Persisting it would
-                // propose another new Emby person after the first one had already been created. A changed
-                // existing destination needs only one representative provider key because same-relations
-                // below make the override apply to the complete provider component.
-                if (targetChanged && outcome.TargetKind == IdentityTargetKinds.Existing && native.Count > 0)
-                {
-                    var id = native.OrderBy(x => x.Provider, StringComparer.Ordinal).ThenBy(x => x.ProviderId, StringComparer.Ordinal).First();
-                    yield return new ProviderCorrection { Kind = CorrectionKinds.IdentityTarget, Operation = CorrectionOperations.Replace, Provider = id.Provider, ProviderPersonId = id.ProviderId, ReplacementValue = target, Reason = "OPERATOR_PERSON_BUILDER", Note = note, Enabled = true };
-                }
-                for (var i = 0; i < native.Count; i++)
-                for (var j = i + 1; j < native.Count; j++)
-                    if (native[i].Provider != native[j].Provider)
-                        yield return Relation(native[i], native[j], CorrectionOperations.Same, note);
-
-                if (!outcome.TargetEmbyId.HasValue) continue;
-                var current = source.CurrentPeople.FirstOrDefault(x => x.EmbyId == outcome.TargetEmbyId.Value);
-                if (current == null) continue;
-                foreach (var provider in Providers)
-                {
-                    var before = LocalId(current, provider); var after = Preferred(outcome, provider);
-                    if (Same(before, after)) continue;
-                    yield return new ProviderCorrection
-                    {
-                        Kind = CorrectionKinds.LocalPersonBinding, Operation = string.IsNullOrWhiteSpace(after) ? CorrectionOperations.Unusable : CorrectionOperations.Replace,
-                        Provider = provider, EmbyId = current.EmbyId, CurrentValue = before, ReplacementValue = after,
-                        Reason = "OPERATOR_PERSON_BUILDER", Note = note, Enabled = true
-                    };
-                }
-            }
-            var rows = plan.Outcomes.Select(x => x.ProviderIds.Where(y => y.Source == "native" && (y.Provider == ProviderNames.Tmdb || y.Provider == ProviderNames.Tvdb)).ToList()).ToList();
-            for (var left = 0; left < rows.Count; left++)
-            for (var right = left + 1; right < rows.Count; right++)
-            foreach (var a in rows[left])
-            foreach (var b in rows[right])
-                if (a.Provider != b.Provider) yield return Relation(a, b, CorrectionOperations.Different, note);
-        }
-
-        private static IEnumerable<ProviderCorrection> BuildCreditCorrections(IdentityCasePlan plan)
-        {
-            var outcomes = plan.Outcomes.ToDictionary(x => x.OutcomeId, StringComparer.Ordinal);
-            // KEEP is a reviewed decision in the case plan, but it is not a correction. Only persist an
-            // override when the operator actually chose a different local credit destination.
-            foreach (var credit in plan.Credits.Where(x => x.Disposition == "MOVE"))
-            {
-                var target = outcomes[credit.TargetOutcomeId];
-                var replacement = target.TargetKind == IdentityTargetKinds.Existing
-                    ? "existing:" + target.TargetEmbyId.Value.ToString(CultureInfo.InvariantCulture)
-                    : ProviderTarget(target);
-                yield return new ProviderCorrection
-                {
-                    Kind = CorrectionKinds.LocalCreditTarget, Operation = CorrectionOperations.Replace, EmbyId = credit.MediaEmbyId,
-                    CurrentValue = credit.SourcePersonEmbyId.ToString(CultureInfo.InvariantCulture) + "|" + credit.Role, ReplacementValue = replacement,
-                    Reason = "OPERATOR_PERSON_BUILDER", Note = plan.DisplayName, Enabled = true
-                };
-            }
-        }
-
-        private static string ProviderTarget(IdentityOutcome outcome)
-        {
-            var id = outcome.ProviderIds.FirstOrDefault(x => x.Source == "native" && (x.Provider == ProviderNames.Tmdb || x.Provider == ProviderNames.Tvdb));
-            if (id == null) throw new InvalidOperationException("A new person requires a native provider identity.");
-            return "provider:" + id.Provider + ":" + id.ProviderId;
-        }
-
-        private static ProviderCorrection Relation(IdentityProviderId a, IdentityProviderId b, string operation, string note) => new ProviderCorrection
-        {
-            Kind = CorrectionKinds.IdentityRelation, Operation = operation, Provider = a.Provider, ProviderPersonId = a.ProviderId,
-            SecondaryProvider = b.Provider, SecondaryId = b.ProviderId, Reason = "OPERATOR_PERSON_BUILDER", Note = note, Enabled = true
-        };
 
         private static List<IdentityProviderId> DesiredProviderIds(IdentityOutcome original, PersonBuilderIdentity desired)
         {

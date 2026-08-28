@@ -79,8 +79,9 @@ internal static class Program
         Run("holistic IMDb conflict retains the current Emby ID and provider-owner matrix", HolisticImdbConflictRetainsCurrentId);
         Run("holistic planner keeps compatible current IDs together beside a conflicting alternative", HolisticCurrentIdentitySubsetRemainsTogether);
         Run("holistic planner remains bounded across 1600 cases", HolisticPlannerRemainsBounded);
-        Run("person builder does not turn an already-correct attribution into a durable rule", PersonBuilderRecordsNoOpAdjudication);
-        Run("person builder creates a suggested owner and moves media in one projection", PersonBuilderCreatesAndMoves);
+        Run("person builder records only the provider rule selected by a no-op layout", PersonBuilderRecordsNoOpAdjudication);
+        Run("person builder selects Tim-like exact provider credit replacement", PersonBuilderSelectsProviderReplacement);
+        Run("person builder creates a suggested owner and selects one provider rule", PersonBuilderCreatesAndMoves);
         Run("person builder does not persist one-time new-person targets", PersonBuilderDoesNotPersistNewTarget);
         Run("person builder rejects duplicate provider IDs across final people", PersonBuilderRejectsDuplicateIds);
         Run("person builder requires a destination for an unresolved identity", PersonBuilderRequiresIdentityDestination);
@@ -1264,8 +1265,51 @@ internal static class Program
         Equal(1, compilation.Plan.Outcomes.Count);
         Equal("KEEP", compilation.Plan.Credits.Single().Disposition);
         Equal(0, compilation.Plan.Questions.Count);
-        True(!compilation.Corrections.Any(x => x.Kind == CorrectionKinds.LocalCreditTarget));
+        Equal(1, compilation.Corrections.Count);
+        Equal(CorrectionKinds.MediaCredit, compilation.Corrections.Single().Kind);
+        Equal(CorrectionOperations.Unusable, compilation.Corrections.Single().Operation);
+        Equal(ProviderNames.Tvdb, compilation.Corrections.Single().Provider);
         Equal("No Emby changes required", compilation.Plan.ApplyCaption);
+        True(ReviewCaseDialogUI.Build(plan, draft, "server", null).Apply != null);
+    }
+
+    private static void PersonBuilderSelectsProviderReplacement()
+    {
+        var plan = BuilderPlan();
+        var existing = plan.Outcomes.Single(x => x.TargetKind == IdentityTargetKinds.Existing);
+        var suggested = plan.Outcomes.Single(x => x.TargetKind == IdentityTargetKinds.New);
+        existing.ProviderIds.Add(new IdentityProviderId { Provider = ProviderNames.Tvdb, ProviderId = "2", Source = "native" });
+        suggested.ProviderIds = new List<IdentityProviderId> { new IdentityProviderId { Provider = ProviderNames.Tmdb, ProviderId = "3", Source = "native" }, new IdentityProviderId { Provider = ProviderNames.Imdb, ProviderId = "nm3", Source = "external" } };
+        plan.Credits.Single().Attributions = new List<IdentityCreditAttribution>
+        {
+            new IdentityCreditAttribution { Provider = ProviderNames.Tmdb, ProviderMediaId = "20", ProviderPersonId = "3", Role = "Actor: Lead", RoleCategory = "Actor", OutcomeId = suggested.OutcomeId },
+            new IdentityCreditAttribution { Provider = ProviderNames.Tvdb, ProviderMediaId = "200", ProviderPersonId = "2", Role = "Actor: Lead", RoleCategory = "Actor", OutcomeId = existing.OutcomeId }
+        };
+        var question = plan.Questions.Single();
+        question.Choices = new List<IdentityQuestionChoice>
+        {
+            new IdentityQuestionChoice
+            {
+                ChoiceId = "question-credit-1:existing-replace",
+                Correction = new ProviderCorrection { Kind = CorrectionKinds.MediaCredit, Operation = CorrectionOperations.Replace, Provider = ProviderNames.Tmdb, MediaType = MediaTypes.Movie, ProviderMediaId = "20", ProviderPersonId = "3", CurrentValue = "Actor: Lead", ReplacementValue = "1", Reason = "OPERATOR_PROVIDER_ATTRIBUTION", Enabled = true }
+            },
+            new IdentityQuestionChoice
+            {
+                ChoiceId = "question-credit-1:new-unusable",
+                Correction = new ProviderCorrection { Kind = CorrectionKinds.MediaCredit, Operation = CorrectionOperations.Unusable, Provider = ProviderNames.Tvdb, MediaType = MediaTypes.Movie, ProviderMediaId = "200", ProviderPersonId = "2", CurrentValue = "Actor: Lead", Reason = "OPERATOR_PROVIDER_ATTRIBUTION", Enabled = true }
+            }
+        };
+
+        var compilation = IdentityCasePersonBuilder.Compile(plan, PersonBuilderDraft.FromPlan(plan));
+
+        Equal(1, compilation.Corrections.Count);
+        var correction = compilation.Corrections.Single();
+        Equal(CorrectionKinds.MediaCredit, correction.Kind);
+        Equal(CorrectionOperations.Replace, correction.Operation);
+        Equal(ProviderNames.Tmdb, correction.Provider);
+        Equal("20", correction.ProviderMediaId);
+        Equal("3", correction.ProviderPersonId);
+        Equal("1", correction.ReplacementValue);
     }
 
     private static void PersonBuilderCreatesAndMoves()
@@ -1280,7 +1324,9 @@ internal static class Program
         Equal(2, compilation.Plan.Outcomes.Count);
         Equal("MOVE", compilation.Plan.Credits.Single().Disposition);
         True(compilation.Plan.ApplyCaption.Contains("create 1 person") && compilation.Plan.ApplyCaption.Contains("move 1 credit"));
-        True(compilation.Corrections.Any(x => x.Kind == CorrectionKinds.LocalCreditTarget && x.ReplacementValue == "provider:tvdb:2"));
+        Equal(1, compilation.Corrections.Count);
+        Equal(CorrectionKinds.MediaCredit, compilation.Corrections.Single().Kind);
+        Equal(ProviderNames.Tmdb, compilation.Corrections.Single().Provider);
     }
 
     private static void PersonBuilderDoesNotPersistNewTarget()
@@ -1325,7 +1371,6 @@ internal static class Program
     private static void PersonBuilderActionsPrecedeGrid()
     {
         var properties = typeof(ReviewCaseDialogUI).GetProperties().Where(x => x.DeclaringType == typeof(ReviewCaseDialogUI)).OrderBy(x => x.MetadataToken).Select(x => x.Name).ToList();
-        True(properties.IndexOf(nameof(ReviewCaseDialogUI.SaveBuilder)) < properties.IndexOf(nameof(ReviewCaseDialogUI.PersonBuilder)));
         True(properties.IndexOf(nameof(ReviewCaseDialogUI.Apply)) < properties.IndexOf(nameof(ReviewCaseDialogUI.PersonBuilder)));
         True(properties.IndexOf(nameof(ReviewCaseDialogUI.BackToAllCases)) < properties.IndexOf(nameof(ReviewCaseDialogUI.PersonBuilder)));
         var plan = BuilderPlan();
@@ -1388,7 +1433,18 @@ internal static class Program
                 new IdentityCreditAttribution { Provider = ProviderNames.Tvdb, ProviderMediaId = "200", ProviderPersonId = "2", PersonName = "Alex Example", Role = "Actor: Lead", RoleCategory = "Actor", OutcomeId = suggested.OutcomeId }
             }
         });
-        plan.Questions.Add(new IdentityQuestion { QuestionId = "question-credit-1", Kind = CorrectionKinds.LocalCreditTarget, AssignmentId = "credit-1", Narrative = "Who should receive the credit?" });
+        var question = new IdentityQuestion { QuestionId = "question-credit-1", Kind = CorrectionKinds.LocalCreditTarget, AssignmentId = "credit-1", Narrative = "Who should receive the credit?" };
+        question.Choices.Add(new IdentityQuestionChoice
+        {
+            ChoiceId = "question-credit-1:existing", Caption = "Provider credit belongs to existing person", Effect = "Ignore the conflicting TVDB assertion.",
+            Correction = new ProviderCorrection { Kind = CorrectionKinds.MediaCredit, Operation = CorrectionOperations.Unusable, Provider = ProviderNames.Tvdb, MediaType = MediaTypes.Movie, ProviderMediaId = "200", ProviderPersonId = "2", CurrentValue = "Actor: Lead", Reason = "OPERATOR_PROVIDER_ATTRIBUTION", Enabled = true }
+        });
+        question.Choices.Add(new IdentityQuestionChoice
+        {
+            ChoiceId = "question-credit-1:new", Caption = "Provider credit belongs to new person", Effect = "Ignore the conflicting TMDB assertion.",
+            Correction = new ProviderCorrection { Kind = CorrectionKinds.MediaCredit, Operation = CorrectionOperations.Unusable, Provider = ProviderNames.Tmdb, MediaType = MediaTypes.Movie, ProviderMediaId = "20", ProviderPersonId = "1", CurrentValue = "Actor: Lead", Reason = "OPERATOR_PROVIDER_ATTRIBUTION", Enabled = true }
+        });
+        plan.Questions.Add(question);
         return plan;
     }
 

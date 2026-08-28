@@ -24,7 +24,6 @@ namespace PersonCleaner.V2.UI
     {
         public override string EditorTitle => null;
 
-        public ButtonItem SaveBuilder { get; set; }
         public ButtonItem Apply { get; set; }
         public ButtonItem BackToAllCases { get; set; } = new ButtonItem("Back to all cases") { CommandId = ReviewCaseCommands.Back };
         [GridDataSource(nameof(Rows))]
@@ -54,20 +53,21 @@ namespace PersonCleaner.V2.UI
             ConfigureIdentityColumns(master, personTargets);
             ConfigureMediaColumns(detail, targets);
             master.masterDetail = new DxGridMasterDetail { enabled = true, autoExpandAll = true, childRowsFieldName = nameof(ReviewIdentityRow.Media), detailGridOptions = detail };
-            var ui = new ReviewCaseDialogUI
-            {
-                PersonBuilder = new DxDataGrid(master), Rows = rows,
-                SaveBuilder = plan.State == IdentityPlanStates.Applied || plan.State == IdentityPlanStates.Blocked ? null : new ButtonItem("Save person layout")
-                {
-                    CommandId = ReviewCaseCommands.SaveBuilder,
-                    ConfirmationPrompt = "Save this person, provider-ID and media-attribution layout for later?"
-                }
-            };
+            var ui = new ReviewCaseDialogUI { PersonBuilder = new DxDataGrid(master), Rows = rows };
             try
             {
-                var preview = IdentityCasePersonBuilder.Compile(plan, draft).Plan;
-                if (preview.State == IdentityPlanStates.Complete && IdentityCaseExecutor.HasMutations(preview))
-                    ui.Apply = new ButtonItem(preview.ApplyCaption) { CommandId = ReviewCaseCommands.Apply, ConfirmationPrompt = "Save and apply exactly this person-ID and media-credit layout after re-reading live Emby?" };
+                var compilation = IdentityCasePersonBuilder.Compile(plan, draft);
+                var preview = compilation.Plan;
+                if (plan.State != IdentityPlanStates.Applied && plan.State != IdentityPlanStates.Blocked && preview.State == IdentityPlanStates.Complete)
+                {
+                    var caption = IdentityCaseExecutor.HasMutations(preview) ? preview.ApplyCaption : "Apply: confirm layout";
+                    var rules = compilation.Corrections.Count;
+                    ui.Apply = new ButtonItem(caption)
+                    {
+                        CommandId = ReviewCaseCommands.Apply,
+                        ConfirmationPrompt = "Apply exactly this person-ID and media-credit layout after re-reading live Emby? " + rules + " minimum correction rule(s) will be recorded only after the apply commits."
+                    };
+                }
             }
             catch { }
             return ui;
@@ -325,7 +325,6 @@ namespace PersonCleaner.V2.UI
     {
         public const string Back = "case-back-to-all";
         public const string Apply = "case-apply";
-        public const string SaveBuilder = "case-save-person-builder";
         public const string IdentityGrid = "case-person-builder-identities";
         public const string MediaGrid = "case-person-builder-media";
     }
@@ -359,7 +358,6 @@ namespace PersonCleaner.V2.UI
         {
             if (string.Equals(commandId, "DialogCancel", StringComparison.OrdinalIgnoreCase) || commandId == ReviewCaseCommands.Back) { rebuildParent(); return Task.FromResult(parent); }
             var applyCommitted = false;
-            var layoutSaved = false;
             try
             {
                 if (commandId == ReviewCaseCommands.IdentityGrid || commandId == ReviewCaseCommands.MediaGrid)
@@ -368,49 +366,31 @@ namespace PersonCleaner.V2.UI
                     if (commandId == ReviewCaseCommands.IdentityGrid) PrepareAddedPeople(incoming);
                     draft = ReviewCaseDialogUI.Capture(draft, incoming, commandId == ReviewCaseCommands.IdentityGrid);
                     var preview = IdentityCasePersonBuilder.Compile(plan, draft);
-                    result = "Layout is valid: " + preview.RecordedDecisions + " decisions, " + preview.EmbyChanges + " Emby change(s). Save when the complete layout is correct.";
-                    Render(); Refresh(); return Task.FromResult<IPluginUIView>(this);
-                }
-                if (commandId == ReviewCaseCommands.SaveBuilder)
-                {
-                    if (!string.IsNullOrWhiteSpace(data)) draft = ReviewCaseDialogUI.Capture(draft, json.DeserializeFromString<ReviewCaseDialogUI>(data), false);
-                    var compilation = IdentityCasePersonBuilder.Compile(plan, draft);
-                    using (var repository = Open()) repository.SavePersonBuilder(compilation);
-                    layoutSaved = true;
-                    plan = compilation.Plan; draft = PersonBuilderDraft.FromPlan(plan);
-                    result = compilation.RecordedDecisions + " decisions saved atomically; " + compilation.EmbyChanges + " Emby change(s) are ready. No whole-run recalculation was performed.";
+                    result = "Layout is valid: " + preview.EmbyChanges + " Emby change(s), " + preview.Corrections.Count + " minimum correction rule(s). Apply when the complete layout is correct.";
                     Render(); Refresh(); return Task.FromResult<IPluginUIView>(this);
                 }
                 if (commandId == ReviewCaseCommands.Apply)
                 {
                     if (!string.IsNullOrWhiteSpace(data)) draft = ReviewCaseDialogUI.Capture(draft, json.DeserializeFromString<ReviewCaseDialogUI>(data), false);
                     var compilation = IdentityCasePersonBuilder.Compile(plan, draft);
-                    using (var repository = Open()) repository.SavePersonBuilder(compilation);
-                    layoutSaved = true;
-                    plan = compilation.Plan; draft = PersonBuilderDraft.FromPlan(plan);
-                    if (!IdentityCaseExecutor.HasMutations(plan))
-                    {
-                        result = compilation.RecordedDecisions + " decisions saved; the layout already matches Emby, so nothing was applied.";
-                        Render(); Refresh(); return Task.FromResult<IPluginUIView>(this);
-                    }
-                    var reviewedHash = plan.PlanHash;
                     var fresh = LoadPlan();
-                    if (fresh.PlanHash != reviewedHash) throw new InvalidOperationException("The persisted projection changed after it was displayed. Review the latest layout before applying.");
-                    if (fresh.State != IdentityPlanStates.Complete) throw new InvalidOperationException("This person layout is not complete.");
-                    if (!IdentityCaseExecutor.HasMutations(fresh)) throw new InvalidOperationException("The decisions are saved, but this layout requires no Emby changes.");
+                    if (fresh.PlanHash != compilation.ReviewedPlanHash) throw new InvalidOperationException("The evidence changed after this layout was displayed. Review the latest case before applying.");
+                    if (fresh.State == IdentityPlanStates.Applied) throw new InvalidOperationException("This exact case has already been applied.");
+                    if (fresh.State == IdentityPlanStates.Blocked) throw new InvalidOperationException("This case is blocked because the evaluated scope is incomplete.");
+                    var appliedPlan = compilation.Plan;
                     var library = host.Resolve<ILibraryManager>();
-                    var beforeMetadata = IdentityApplyAudit.CaptureBefore(fresh, library);
+                    var beforeMetadata = IdentityApplyAudit.CaptureBefore(appliedPlan, library);
                     var executor = new IdentityCaseExecutor(library);
                     IdentityCaseApplyReceipt receipt;
-                    using (var repository = Open()) { receipt = executor.Apply(fresh, committed => repository.CommitIdentityCase(fresh, committed)); applyCommitted = true; }
-                    IdentityApplyAudit.Log(fresh, receipt, beforeMetadata, library, logger);
-                    logger.Info("PersonCleaner applied person-builder case {0}: {1}", fresh.CaseId, receipt.Summary);
+                    using (var repository = Open()) { receipt = executor.Apply(appliedPlan, committed => repository.CommitIdentityCase(compilation, committed)); applyCommitted = true; }
+                    IdentityApplyAudit.Log(appliedPlan, receipt, beforeMetadata, library, logger);
+                    logger.Info("PersonCleaner applied person-builder case {0}: {1}", appliedPlan.CaseId, receipt.Summary);
                     rebuildParent(); return Task.FromResult(parent);
                 }
             }
             catch (Exception ex)
             {
-                result = applyCommitted ? "Apply committed, but the follow-up workflow failed: " + ex.Message : ex.Message.IndexOf("rollback also failed", StringComparison.OrdinalIgnoreCase) >= 0 ? "Apply failed and Emby may contain partial changes: " + ex.Message : layoutSaved ? "The layout was saved, but applying it failed: " + ex.Message : "Nothing was written: " + ex.Message;
+                result = applyCommitted ? "Apply committed, but the follow-up workflow failed: " + ex.Message : ex.Message.IndexOf("rollback also failed", StringComparison.OrdinalIgnoreCase) >= 0 ? "Apply failed and Emby may contain partial changes: " + ex.Message : "Nothing was written: " + ex.Message;
                 logger.ErrorException("Unable to process PersonCleaner person-builder case " + caseId, ex);
                 Render(); Refresh();
             }
