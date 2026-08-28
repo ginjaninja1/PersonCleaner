@@ -1388,7 +1388,14 @@ internal static class Program
         True(information.Media.Any(x => x.Media.Contains("TMDB") && x.Media.Contains("themoviedb.org/person/1")));
         True(information.Media.All(x => !x.Media.Contains("Alex Example")));
         Equal("spacer", information.Media.Last().Media);
-        Equal("New 1", ui.Rows.Single(x => x.OutcomeId == "new:tvdb2").Name);
+        var newRow = ui.Rows.Single(x => x.OutcomeId == "new:tvdb2");
+        Equal("Alex Example", newRow.Name);
+        Equal("New 1", newRow.CurrentIds);
+        True(ui.PersonBuilder.Options.masterDetail.autoExpandAll == false);
+        True(ui.PersonBuilder.Options.columns.Single(x => x.dataField == nameof(ReviewIdentityRow.Name)).allowEditing == true);
+        var targetChoices = (ReviewTargetChoice[])ui.PersonBuilder.Options.masterDetail.detailGridOptions.columns.Single(x => x.dataField == nameof(ReviewMediaRow.TargetOutcomeId)).lookup.dataSource;
+        Equal("50", targetChoices.Single(x => x.Value == "existing:50").Caption);
+        Equal("New 1", targetChoices.Single(x => x.Value == "new:tvdb2").Caption);
         var media = ui.Rows.SelectMany(x => x.Media).Single(x => x.AssignmentId == "credit-1");
         Equal("Lead", media.Role);
         True(media.CurrentPerson.Contains(">50</a>"));
@@ -1408,6 +1415,16 @@ internal static class Program
         var emptyUi = ReviewCaseDialogUI.Build(plan, emptyDraft, "server", null);
         emptyUi.Rows.Single(x => x.OutcomeId == "new:tvdb2").PersonTarget = "remove";
         True(!ReviewCaseDialogUI.Capture(emptyDraft, emptyUi, false).People.Single(x => x.OutcomeId == "new:tvdb2").Include);
+
+        var namingDraft = PersonBuilderDraft.FromPlan(plan);
+        var namingUi = ReviewCaseDialogUI.Build(plan, namingDraft, "server", null);
+        namingUi.Rows.Single(x => x.OutcomeId == "existing:50").Name = "Ignored existing rename";
+        namingUi.Rows.Single(x => x.OutcomeId == "new:tvdb2").Name = "Alex Example Junior";
+        namingUi.Rows.SelectMany(x => x.Media).Single(x => x.AssignmentId == "credit-1").TargetOutcomeId = "new:tvdb2";
+        var namedDraft = ReviewCaseDialogUI.Capture(namingDraft, namingUi, false);
+        Equal("Alex Example", namedDraft.People.Single(x => x.OutcomeId == "existing:50").DisplayName);
+        Equal("Alex Example Junior", namedDraft.People.Single(x => x.OutcomeId == "new:tvdb2").DisplayName);
+        Equal("Alex Example Junior", IdentityCasePersonBuilder.Compile(plan, namedDraft).Plan.Outcomes.Single(x => x.OutcomeId == "new:tvdb2").DisplayName);
     }
 
     private static void PersonBuilderCreateAppendsEmptyRow()

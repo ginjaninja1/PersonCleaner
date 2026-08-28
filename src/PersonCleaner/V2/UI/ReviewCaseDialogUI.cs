@@ -56,7 +56,7 @@ namespace PersonCleaner.V2.UI
             detail.scrolling = Scrolling();
             ConfigureIdentityColumns(master, personTargets);
             ConfigureMediaColumns(detail, targets);
-            master.masterDetail = new DxGridMasterDetail { enabled = true, autoExpandAll = true, childRowsFieldName = nameof(ReviewIdentityRow.Media), detailGridOptions = detail };
+            master.masterDetail = new DxGridMasterDetail { enabled = true, autoExpandAll = false, childRowsFieldName = nameof(ReviewIdentityRow.Media), detailGridOptions = detail };
             var ui = new ReviewCaseDialogUI { PersonBuilder = new DxDataGrid(master), Rows = rows, LastAction = new ButtonItem(result ?? string.Empty) { IsEnabled = false } };
             try
             {
@@ -90,6 +90,7 @@ namespace PersonCleaner.V2.UI
             {
                 if (people.TryGetValue(row.OutcomeId ?? string.Empty, out var person))
                 {
+                    if (person.TargetKind == IdentityTargetKinds.New && !string.IsNullOrWhiteSpace(row.Name)) person.DisplayName = row.Name.Trim();
                     person.TmdbId = row.TmdbId; person.TvdbId = row.TvdbId; person.ImdbId = row.ImdbId; person.PlannerNotes = row.PlannerNotes;
                     SetPersonTarget(person, row.PersonTarget);
                 }
@@ -185,7 +186,7 @@ namespace PersonCleaner.V2.UI
                     c.caption = "Desired Emby person"; c.width = 245; c.allowEditing = true; c.showEditorAlways = true;
                     c.lookup = new DxGridLookup { dataSource = targets, valueExpr = nameof(ReviewTargetChoice.Value), displayExpr = nameof(ReviewTargetChoice.Caption), allowClearing = false };
                 }
-                if (c.dataField == nameof(ReviewIdentityRow.Name)) { c.caption = "Name"; c.width = 155; c.encodeHtml = false; }
+                if (c.dataField == nameof(ReviewIdentityRow.Name)) { c.caption = "Name"; c.width = 155; c.encodeHtml = false; c.allowEditing = true; }
                 if (c.dataField == nameof(ReviewIdentityRow.CurrentIds)) { c.caption = "Current IDs"; c.width = 230; c.encodeHtml = false; }
                 if (c.dataField == nameof(ReviewIdentityRow.TmdbId)) { c.caption = "Desired TMDB"; c.width = 120; c.allowEditing = true; }
                 if (c.dataField == nameof(ReviewIdentityRow.TvdbId)) { c.caption = "Desired TVDB"; c.width = 120; c.allowEditing = true; }
@@ -219,19 +220,19 @@ namespace PersonCleaner.V2.UI
         private static ReviewIdentityRow BuildIdentity(IdentityCasePlan plan, IdentityOutcome outcome, PersonBuilderIdentity desired, IDictionary<string, PersonBuilderCredit> credits, string serverId, int newOrdinal)
         {
             LocalPerson current = null;
-            if (outcome.TargetEmbyId.HasValue) current = plan.CurrentPeople.FirstOrDefault(x => x.EmbyId == outcome.TargetEmbyId.Value);
+            if (desired.TargetKind == IdentityTargetKinds.Existing && desired.TargetEmbyId.HasValue) current = plan.CurrentPeople.FirstOrDefault(x => x.EmbyId == desired.TargetEmbyId.Value);
             if (current == null) current = outcome.SourceEmbyIds.Select(id => plan.CurrentPeople.FirstOrDefault(x => x.EmbyId == id)).FirstOrDefault(x => x != null);
             var row = new ReviewIdentityRow
             {
                 RowId = outcome.OutcomeId, OutcomeId = outcome.OutcomeId,
                 PersonTarget = desired.TargetKind == IdentityTargetKinds.Existing && desired.TargetEmbyId.HasValue ? "existing:" + desired.TargetEmbyId : desired.TargetKind == IdentityTargetKinds.New ? "new" : null,
                 Name = desired.TargetKind == IdentityTargetKinds.Existing && desired.TargetEmbyId.HasValue
-                    ? CaseLinks.Emby(desired.TargetEmbyId.Value, serverId, desired.DisplayName)
-                    : "New " + newOrdinal,
-                CurrentIds = current == null ? "Suggested person" : CurrentIds(current),
+                    ? CaseLinks.Emby(desired.TargetEmbyId.Value, serverId, current?.Name ?? desired.DisplayName)
+                    : desired.DisplayName,
+                CurrentIds = desired.TargetKind == IdentityTargetKinds.New ? "New " + newOrdinal : current == null ? "Suggested person" : CurrentIds(current),
                 TmdbId = desired.TmdbId, TvdbId = desired.TvdbId, ImdbId = desired.ImdbId,
                 PlannerNotes = desired.PlannerNotes ?? string.Empty,
-                ChangeSummary = Changes(current, desired),
+                ChangeSummary = Changes(desired.TargetKind == IdentityTargetKinds.New ? null : current, desired),
                 Status = desired.TargetKind == IdentityTargetKinds.Existing ? "Maintain existing person" : desired.TargetKind == IdentityTargetKinds.New ? credits.Values.Any(x => x.TargetOutcomeId == outcome.OutcomeId) ? "Create suggested person" : outcome.Outcome == "Operator-added Emby person" ? "Allocate IDs and associate media" : "Do not create — no assigned media" : "Choose maintain or create"
             };
             row.Media = plan.Credits.Where(x => credits[x.AssignmentId].TargetOutcomeId == outcome.OutcomeId)
@@ -596,6 +597,8 @@ namespace PersonCleaner.V2.UI
                 }
                 var provider = !Same(person.TmdbId, row.TmdbId) ? "TMDB" : !Same(person.TvdbId, row.TvdbId) ? "TVDB" : !Same(person.ImdbId, row.ImdbId) ? "IMDb" : null;
                 if (provider != null) return new PendingReviewAction { Success = PersonLabel(person) + " - " + provider + "ID Changed" };
+                if (person.TargetKind == IdentityTargetKinds.New && !string.IsNullOrWhiteSpace(row.Name) && !string.Equals(person.DisplayName ?? string.Empty, row.Name.Trim(), StringComparison.Ordinal))
+                    return new PendingReviewAction { Success = PersonLabel(person) + " - Name Changed to " + row.Name.Trim() };
                 if (!string.Equals(person.PlannerNotes ?? string.Empty, row.PlannerNotes ?? string.Empty, StringComparison.Ordinal))
                     return new PendingReviewAction { Success = PersonLabel(person) + " - Planner Note Updated" };
                 if (!string.Equals(TargetValue(person), row.PersonTarget ?? string.Empty, StringComparison.Ordinal) && (row.PersonTarget ?? string.Empty).StartsWith("existing:", StringComparison.Ordinal))
