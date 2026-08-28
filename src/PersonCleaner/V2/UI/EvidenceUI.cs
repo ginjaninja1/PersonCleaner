@@ -18,16 +18,17 @@ namespace PersonCleaner.V2.UI
         public override string EditorDescription => description ?? "No calculation run is available.";
         public CaptionItem RunSummary { get; set; }
         public ButtonItem OpenProblemEvidence { get; set; } = new ButtonItem("Open decision evidence Full Screen (Problem cases)") { CommandId = "open-problem-evidence" };
+        public ButtonItem OpenSatisfiedEvidence { get; set; } = new ButtonItem("Open satisfied decision evidence full screen") { CommandId = "open-satisfied-evidence" };
         public ButtonItem OpenEvidence { get; set; } = new ButtonItem("Open decision evidence Full Screen (All cases)") { CommandId = "open-evidence" };
 
         public static EvidenceUI Build(RunStatus run)
         {
             var summary = run == null ? "No task run exists. Open Configuration and run the scheduled task."
-                : "Run " + run.RunId + " · " + run.Status + " · " + run.Mode + " · " + run.SelectedMovies + " movies + " + run.SelectedSeries + " series · " + run.MediaFetched + " media API fetches · " + run.PeopleFetched + " person API fetches · " + run.CacheHits + " cache hits · " + run.Failures + " failures · " + run.Decisions + " decisions (" + run.DecisionBreakdown + ")";
+                : "Run " + run.RunId + " · " + run.Status + " · " + run.Mode + " · " + run.SelectedMovies + " movies + " + run.SelectedSeries + " series · " + run.MediaFetched + " media API fetches · " + run.PeopleFetched + " person API fetches · " + run.CacheHits + " cache hits · " + run.Failures + " failures · " + run.Cases + " cases · MATCH=" + run.AutoApplicableCases + " queued for Mass Corrections · " + run.AppliedCases + " applied · " + run.SatisfiedNoChangeCases + " satisfied/no change · " + run.ProblemCases + " problem cases (" + run.DecisionBreakdown + ")";
             return new EvidenceUI
             {
                 RunSummary = new CaptionItem(summary),
-                description = "Open the evidence viewer for the full-screen decision grid. Expand a row for evidence, or tick Change to preview the exact validated Emby operations in a separate dialog."
+                description = "Open the SQL-filtered problem, satisfied-change, or all-case evidence grid. Expand a row for evidence, or tick Open case to preview the exact validated Emby operations in a separate dialog."
             };
         }
     }
@@ -48,9 +49,11 @@ namespace PersonCleaner.V2.UI
             try
             {
                 if (commandId == "open-problem-evidence")
-                    return Task.FromResult<IPluginUIView>(new EvidenceDialogView(plugin, host, logger, true));
+                    return Task.FromResult<IPluginUIView>(new EvidenceDialogView(plugin, host, logger, EvidenceCaseFilter.Problem));
+                if (commandId == "open-satisfied-evidence")
+                    return Task.FromResult<IPluginUIView>(new EvidenceDialogView(plugin, host, logger, EvidenceCaseFilter.SatisfiedChange));
                 if (commandId == "open-evidence")
-                    return Task.FromResult<IPluginUIView>(new EvidenceDialogView(plugin, host, logger, false));
+                    return Task.FromResult<IPluginUIView>(new EvidenceDialogView(plugin, host, logger, EvidenceCaseFilter.All));
             }
             catch (Exception ex) { logger.ErrorException("Unable to open the PersonCleaner evidence dialog", ex); }
             Rebuild(); Refresh();

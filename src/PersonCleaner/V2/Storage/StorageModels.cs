@@ -2,6 +2,13 @@ namespace PersonCleaner.V2.Storage
 {
     using PersonCleaner.V2.Domain;
 
+    public enum EvidenceCaseFilter
+    {
+        All,
+        Problem,
+        SatisfiedChange
+    }
+
     internal sealed class QueueItem
     {
         public string Provider { get; set; }
@@ -115,6 +122,11 @@ namespace PersonCleaner.V2.Storage
         public int CacheHits { get; set; }
         public int Failures { get; set; }
         public int Decisions { get; set; }
+        public int Cases { get; set; }
+        public int AutoApplicableCases { get; set; }
+        public int AppliedCases { get; set; }
+        public int SatisfiedNoChangeCases { get; set; }
+        public int ProblemCases { get; set; }
         public string DecisionBreakdown { get; set; }
     }
 

@@ -19,11 +19,14 @@ namespace PersonCleaner.V2.UI
     public sealed class ConfigurationUI : EditableOptionsBase
     {
         public override string EditorTitle => "PersonCleaner configuration";
-        public override string EditorDescription => "The calculation runs as an Emby scheduled task. Emby metadata is read-only; raw provider payloads, flattened evidence and proposed decisions live in PersonCleaner's private workspace.";
+        public override string EditorDescription => "Evidence calculation is read-only and runs as an Emby scheduled task. Raw provider payloads, flattened evidence and persisted case plans live in PersonCleaner's private workspace; the separately gated Mass Corrections task can apply satisfied changes.";
 
         public CaptionItem ScopeHeading { get; set; } = new CaptionItem("Scope and safety");
         [DisplayName("Enable PersonCleaner")]
         public bool EnablePlugin { get; set; }
+        [DisplayName("Enabled Mass Corrections Task")]
+        [Description("Off by default. When enabled, the Mass Corrections scheduled task applies only complete, persisted changes from the latest evidence run. Problem cases are never applied automatically.")]
+        public bool EnableMassCorrectionsTask { get; set; }
         [DisplayName("Sandbox mode")]
         [Description("Recommended while developing: select a stable, deterministic sample from each media pool instead of scanning the whole library.")]
         public bool SandboxMode { get; set; } = true;
@@ -111,6 +114,7 @@ namespace PersonCleaner.V2.UI
         {
             var target = Plugin.Instance.Configuration;
             target.EnablePlugin = source.EnablePlugin;
+            target.EnableMassCorrectionsTask = source.EnableMassCorrectionsTask;
             target.ExecutionMode = source.SandboxMode ? "Sandbox" : "Full";
             target.SandboxSampleSizePerMediaType = Clamp(source.SandboxSampleSizePerMediaType, 1, 500);
             target.SandboxSeed = source.SandboxSeed;
@@ -130,7 +134,7 @@ namespace PersonCleaner.V2.UI
             target.AutomaticMatchThreshold = Unit(source.AutomaticMatchThreshold);
             target.HumanReviewThreshold = Math.Min(Unit(source.HumanReviewThreshold), target.AutomaticMatchThreshold);
             Plugin.Instance.SaveConfiguration();
-            logger.Info("PersonCleaner configuration saved: mode={0}, sample={1}+{1}, explicit media={2}, explicit people={3}, complete affected people={4}, populate case review media={5}, TMDB key={6}, TVDB key={7}, TMDB concurrency={8}, TVDB concurrency={9}", target.ExecutionMode, target.SandboxSampleSizePerMediaType, CountIds(target.SandboxIncludedMediaIds), CountIds(target.SandboxIncludedPersonIds), target.SandboxAutoExpandPersonMedia, target.PopulateCaseReviewWithOutOfScopeMediaItems, !string.IsNullOrWhiteSpace(target.TmdbApiKey), !string.IsNullOrWhiteSpace(target.TvdbApiKey), target.TmdbMaximumConcurrentRequests, target.TvdbMaximumConcurrentRequests);
+            logger.Info("PersonCleaner configuration saved: mode={0}, mass corrections enabled={1}, sample={2}+{2}, explicit media={3}, explicit people={4}, complete affected people={5}, populate case review media={6}, TMDB key={7}, TVDB key={8}, TMDB concurrency={9}, TVDB concurrency={10}", target.ExecutionMode, target.EnableMassCorrectionsTask, target.SandboxSampleSizePerMediaType, CountIds(target.SandboxIncludedMediaIds), CountIds(target.SandboxIncludedPersonIds), target.SandboxAutoExpandPersonMedia, target.PopulateCaseReviewWithOutOfScopeMediaItems, !string.IsNullOrWhiteSpace(target.TmdbApiKey), !string.IsNullOrWhiteSpace(target.TvdbApiKey), target.TmdbMaximumConcurrentRequests, target.TvdbMaximumConcurrentRequests);
         }
 
         private void Rebuild()
@@ -138,16 +142,22 @@ namespace PersonCleaner.V2.UI
             var c = Plugin.Instance.Configuration;
             var worker = tasks.ScheduledTasks.FirstOrDefault(x => string.Equals(x.ScheduledTask.Key, "PersonCleanerEntityResolutionV2", StringComparison.Ordinal));
             var link = worker == null ? "/scheduledtasks" : "/scheduledtask?id=" + worker.Id;
+            var massWorker = tasks.ScheduledTasks.FirstOrDefault(x => string.Equals(x.ScheduledTask.Key, "PersonCleanerMassCorrectionsV2", StringComparison.Ordinal));
+            var massLink = massWorker == null ? "/scheduledtasks" : "/scheduledtask?id=" + massWorker.Id;
             ContentData = new ConfigurationUI
             {
-                EnablePlugin = c.EnablePlugin, SandboxMode = !string.Equals(c.ExecutionMode, "Full", StringComparison.OrdinalIgnoreCase), SandboxSampleSizePerMediaType = c.SandboxSampleSizePerMediaType, SandboxSeed = c.SandboxSeed,
+                EnablePlugin = c.EnablePlugin, EnableMassCorrectionsTask = c.EnableMassCorrectionsTask, SandboxMode = !string.Equals(c.ExecutionMode, "Full", StringComparison.OrdinalIgnoreCase), SandboxSampleSizePerMediaType = c.SandboxSampleSizePerMediaType, SandboxSeed = c.SandboxSeed,
                 SandboxIncludedMediaIds = c.SandboxIncludedMediaIds, SandboxIncludedPersonIds = c.SandboxIncludedPersonIds, SandboxAutoExpandPersonMedia = c.SandboxAutoExpandPersonMedia,
                 PopulateCaseReviewWithOutOfScopeMediaItems = c.PopulateCaseReviewWithOutOfScopeMediaItems,
                 TmdbApiKey = c.TmdbApiKey, TvdbApiKey = c.TvdbApiKey, TvdbSubscriberPin = c.TvdbSubscriberPin, CacheTtlDays = c.CacheTtlDays, FailureRetryMinutes = c.FailureRetryMinutes,
                 TmdbMaximumConcurrentRequests = c.TmdbMaximumConcurrentRequests, TvdbMaximumConcurrentRequests = c.TvdbMaximumConcurrentRequests,
                 TmdbMinimumRequestIntervalMilliseconds = c.TmdbMinimumRequestIntervalMilliseconds, TvdbMinimumRequestIntervalMilliseconds = c.TvdbMinimumRequestIntervalMilliseconds,
                 AutomaticMatchThreshold = c.AutomaticMatchThreshold, HumanReviewThreshold = c.HumanReviewThreshold,
-                ScheduledTaskLink = new GenericItemList { new GenericListItem { PrimaryText = "Run or schedule evidence calculation", SecondaryText = "Hydration and calculation are background work; the dashboard stays query-only.", Icon = IconNames.schedule, Status = ItemStatus.Succeeded, HyperLink = link, HyperLinkTargetExternal = false } }
+                ScheduledTaskLink = new GenericItemList
+                {
+                    new GenericListItem { PrimaryText = "Run or schedule evidence calculation", SecondaryText = "Hydration and calculation are background work; the dashboard stays query-only.", Icon = IconNames.schedule, Status = ItemStatus.Succeeded, HyperLink = link, HyperLinkTargetExternal = false },
+                    new GenericListItem { PrimaryText = "Run or schedule Mass Corrections", SecondaryText = c.EnableMassCorrectionsTask ? "Enabled: applies only persisted satisfied changes from the latest completed run." : "Disabled by configuration (default): running the task makes no changes.", Icon = IconNames.schedule, Status = ItemStatus.Succeeded, HyperLink = massLink, HyperLinkTargetExternal = false }
+                }
             };
         }
 

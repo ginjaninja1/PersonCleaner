@@ -48,7 +48,7 @@ namespace PersonCleaner
 
 
         public override string Description =>
-            "Builds a media-first evidence graph and previews validated, operator-approved Emby person updates.";
+            "Builds a media-first evidence graph and persists validated Emby person updates for manual review or configuration-gated mass correction.";
 
 
         public override Guid Id =>

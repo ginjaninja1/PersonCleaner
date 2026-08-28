@@ -64,13 +64,7 @@ namespace PersonCleaner.V2.UI
 
         internal static bool HasMutations(IdentityCasePlan plan)
         {
-            if (plan.Credits.Any(x => x.Disposition == "MOVE") || plan.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.New)) return true;
-            foreach (var snapshot in plan.CurrentPeople)
-            {
-                var outcome = plan.Outcomes.FirstOrDefault(x => x.TargetEmbyId == snapshot.EmbyId);
-                if (!Same(snapshot.TmdbId, DesiredProviderId(outcome, ProviderNames.Tmdb)) || !Same(snapshot.TvdbId, DesiredProviderId(outcome, ProviderNames.Tvdb)) || !Same(snapshot.ImdbId, DesiredProviderId(outcome, ProviderNames.Imdb))) return true;
-            }
-            return false;
+            return IdentityCasePlanner.HasMutations(plan);
         }
 
         private void Preflight(IdentityCasePlan plan, IReadOnlyDictionary<long, List<PersonInfo>> liveMediaPeople)

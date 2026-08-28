@@ -90,6 +90,8 @@ internal static class Program
         Run("person builder planner notes remain transient across grid refreshes", PersonBuilderPlannerNotesRoundTrip);
         Run("case review episodes link both episode and series", CaseReviewEpisodeAndSeriesLinks);
         Run("case review out-of-scope media is enabled by default", CaseReviewMediaEnabledByDefault);
+        Run("mass corrections are disabled by default", MassCorrectionsDisabledByDefault);
+        Run("case presentation purpose separates problem, change, and no-change cases", CasePresentationPurposeSeparatesCases);
         Run("case review adds missing live credits and compiles only moved supplements", CaseReviewAddsMissingLiveCredits);
         Run("case planning does not scan 300000 unrelated global Emby people", CasePlanningIgnoresLargeGlobalPopulation);
         Run("large unrelated provider-credit sets remain bounded", LargeProviderCreditSetRemainsBounded);
@@ -714,9 +716,14 @@ internal static class Program
         input.Media.Add(Media(284293, "Still Alice"));
         input.LocalCredits.Add(Credit(402910, 284293));
 
-        var decision = new ResolutionEngine().Resolve(input, new ResolutionSettings()).Single(x => x.Status == "DRIFT");
+        var engine = new ResolutionEngine();
+        var decisions = engine.Resolve(input, new ResolutionSettings());
+        var decision = decisions.Single(x => x.Status == "DRIFT");
         Equal(ResolutionActions.IncompleteScope, decision.Action);
         True(decision.Evidence.Any(x => x.SignalType == "GLOBAL_BINDING_OWNER" && x.Narrative.Contains("402058")));
+        var identityCase = IdentityCasePlanner.Build(1, input, decisions, engine.Clusters).Single();
+        Equal("Blocked by out-of-scope records", identityCase.CaseType);
+        Equal(CasePresentationPurposes.Problem, identityCase.PresentationPurpose);
         var plan = DecisionChangePlanner.Build(new DecisionChangeContext { Decision = decision, LocalPeople = input.LocalPeople, GlobalLocalPeople = input.GlobalLocalPeople, ProposedProviderPeople = input.ProviderPeople });
         Equal(0, plan.Changes.Count);
         decision.Action = "HUMAN_REVIEW";
@@ -1004,6 +1011,7 @@ internal static class Program
         var clusters = new[] { Cluster("old", 13932, "tmdb:12539", "tvdb:252656"), Cluster("new", 13932, "tmdb:2548051", "tvdb:9096777") };
         var plan = IdentityCasePlanner.Build(1, input, new[] { decision }, clusters).Single();
         Equal(IdentityPlanStates.Complete, plan.State);
+        Equal("Person creation and credit realignment", plan.CaseType);
         Equal(2, plan.Outcomes.Count(x => x.TargetKind == IdentityTargetKinds.New || x.TargetKind == IdentityTargetKinds.Existing));
         Equal(1, plan.Outcomes.Count(x => x.TargetKind == IdentityTargetKinds.New));
         Equal(2, plan.Credits.Count(x => x.Disposition == "MOVE"));
@@ -1059,6 +1067,7 @@ internal static class Program
         Equal("1809473", outcome.ProviderIds.Single(x => x.Provider == ProviderNames.Tmdb).ProviderId);
         Equal("nm8745734", outcome.ProviderIds.Single(x => x.Provider == ProviderNames.Imdb).ProviderId);
         Equal("No Emby changes required", plan.ApplyCaption);
+        Equal("No Emby changes required", plan.CaseType);
     }
 
     private static void HolisticExistingNameIsHonest()
@@ -1105,6 +1114,7 @@ internal static class Program
         var plan = IdentityCasePlanner.Build(8, input, new[] { decision }, new[] { Cluster("identity", 36092, "tmdb:238303", "tvdb:424547") }).Single();
 
         True(plan.ApplyCaption.Contains("change 1 ID"));
+        Equal("Provider ID alignment", plan.CaseType);
         True(plan.Warning.Contains("provider records agree") && plan.Warning.Contains("current Emby person still differs"));
     }
 
@@ -1491,6 +1501,32 @@ internal static class Program
     private static void CaseReviewMediaEnabledByDefault()
     {
         True(new PersonCleaner.Configuration.PluginConfiguration().PopulateCaseReviewWithOutOfScopeMediaItems);
+    }
+
+    private static void MassCorrectionsDisabledByDefault()
+    {
+        True(!new PersonCleaner.Configuration.PluginConfiguration().EnableMassCorrectionsTask);
+    }
+
+    private static void CasePresentationPurposeSeparatesCases()
+    {
+        var noChange = new IdentityCasePlan
+        {
+            State = IdentityPlanStates.Complete,
+            CurrentPeople = new List<LocalPerson> { new LocalPerson { EmbyId = 1, TmdbId = "10" } },
+            Outcomes = new List<IdentityOutcome> { new IdentityOutcome { OutcomeId = "existing:1", TargetKind = IdentityTargetKinds.Existing, TargetEmbyId = 1, ProviderIds = new List<IdentityProviderId> { new IdentityProviderId { Provider = ProviderNames.Tmdb, ProviderId = "10", Source = "native" } } } }
+        };
+        Equal(CasePresentationPurposes.SatisfiedNoChange, IdentityCasePlanner.PresentationPurpose(noChange));
+
+        var safeChange = new IdentityCasePlan
+        {
+            State = IdentityPlanStates.Complete,
+            CurrentPeople = new List<LocalPerson> { new LocalPerson { EmbyId = 2 } },
+            Outcomes = new List<IdentityOutcome> { new IdentityOutcome { OutcomeId = "existing:2", TargetKind = IdentityTargetKinds.Existing, TargetEmbyId = 2, ProviderIds = new List<IdentityProviderId> { new IdentityProviderId { Provider = ProviderNames.Tvdb, ProviderId = "20", Source = "native" } } } }
+        };
+        Equal(CasePresentationPurposes.SatisfiedChange, IdentityCasePlanner.PresentationPurpose(safeChange));
+        safeChange.State = IdentityPlanStates.CorrectionRequired;
+        Equal(CasePresentationPurposes.Problem, IdentityCasePlanner.PresentationPurpose(safeChange));
     }
 
     private static void CaseReviewAddsMissingLiveCredits()

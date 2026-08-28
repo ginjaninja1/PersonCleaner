@@ -60,7 +60,7 @@ Important table groups:
 | Human truth | `manual_bridge`, `provider_correction`, `correction_application` | Confirmed/rejected identity relations, persistent provider-fact overlays and per-run trigger audit |
 | Pair and cluster audit | `resolution_pair`, `resolution_pair_feature`, `resolution_cluster`, `resolution_cluster_member` | Versioned pair features, disposition, component membership and separate identity/anchor confidence |
 | Relationship audit | `resolution_decision`, `resolution_evidence`, `resolution_media`, `resolution_credit_assignment` | Pre-rendered relationship evidence and schema-8 per-decision assignment audit |
-| Final case projection | `resolution_case`, `resolution_case_decision`, `resolution_case_person_snapshot`, `resolution_identity_outcome*`, `resolution_case_credit`, `resolution_case_credit_attribution`, `resolution_question*` | Case-wide current/final identities, final IDs, credit destinations, provider-native title owners and explicit durable correction choices |
+| Final case projection | `resolution_case`, `resolution_case_decision`, `resolution_case_person_snapshot`, `resolution_identity_outcome*`, `resolution_case_credit`, `resolution_case_credit_attribution`, `resolution_question*` | Case-wide current/final identities, final IDs, credit destinations, provider-native title owners, explicit durable correction choices, and indexed `PROBLEM`/`SATISFIED_CHANGE`/`SATISFIED_NO_CHANGE` presentation purpose |
 | Apply audit | `identity_case_apply`, `identity_case_apply_change` | Reviewed plan hash and the exact committed operations; no delete mutation exists |
 
 The schema is created idempotently by `ResolutionRepository`. It uses WAL, normal synchronous mode, foreign keys, a 30-second busy timeout, narrow primary keys, and reverse indexes for external-ID and person-credit lookup.
@@ -185,7 +185,7 @@ For an actionable region, the engine persists each exact `KEEP` or `MOVE` relati
 
 Construction is proportional to the observed graph, not all people or all possible component/person pairs. Person-to-component adjacency and canonical-media-to-component inverted indexes drive connected-component traversal and credit assignment. Explicit sandbox additions and optional affected-person completion therefore remain bounded; neither performs transitive expansion through newly encountered co-credited people.
 
-The result remains a proposal in plugin shadow storage until explicit operator approval. The commit path validates live preconditions, then applies only the provider-ID and persisted credit moves shown in the dialog. It does not delete people, media, or images.
+Every result remains a proposal in plugin shadow storage until case-specific operator approval or execution of the configuration-gated Mass Corrections task. The task is off by default and selects only unapplied `SATISFIED_CHANGE` rows from the latest completed run. Manual and mass application share the same live preflight, exact provider-ID/credit mutation, postflight, rollback, receipt, and audit path. Neither path deletes people, media, or images.
 
 Before assigning a provider person ID, commit preflight asks Emby's indexed `AnyProviderIdEquals` query only for owners of the IDs being assigned and rejects an owner outside the evaluated scope. This repeats the calculation-time global-binding veto without scanning the library or turning global people into resolution evidence.
 
@@ -234,7 +234,7 @@ Until that phase exists, PersonCleaner may correct Emby database relationships a
 
 ## UI contract
 
-The evidence page loads at most the configured summary limit (default 100), ordered as `SPLIT`, `REALIGNMENT`, `MERGE`, `CONFLATION`, `DRIFT`, `ORPHAN`, `MATCH_WITH_CONFLICT`, then `MATCH`. Each summary includes:
+The evidence page offers SQL-filtered problem, pending satisfied-change, and all-case views over the persisted case projection. `PROBLEM` means manual intervention or oversight is required; `SATISFIED_CHANGE` is eligible for Mass Corrections; `SATISFIED_NO_CHANGE` records an accepted result with no Emby mutation. Each summary includes:
 
 - decision status and proposed shadow action;
 - ordinary-language headline and explanation;

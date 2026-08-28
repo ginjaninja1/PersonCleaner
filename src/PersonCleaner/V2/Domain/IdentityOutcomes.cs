@@ -22,6 +22,13 @@ namespace PersonCleaner.V2.Domain
         public const string Applied = "APPLIED";
     }
 
+    public static class CasePresentationPurposes
+    {
+        public const string Problem = "PROBLEM";
+        public const string SatisfiedChange = "SATISFIED_CHANGE";
+        public const string SatisfiedNoChange = "SATISFIED_NO_CHANGE";
+    }
+
     public sealed class IdentityCasePlan
     {
         public long RunId { get; set; }
@@ -32,6 +39,7 @@ namespace PersonCleaner.V2.Domain
         public string Summary { get; set; }
         public string Warning { get; set; }
         public string State { get; set; }
+        public string PresentationPurpose { get; set; }
         public string ApplyCaption { get; set; }
         public List<string> DecisionIds { get; set; } = new List<string>();
         public List<LocalPerson> CurrentPeople { get; set; } = new List<LocalPerson>();
@@ -278,8 +286,43 @@ namespace PersonCleaner.V2.Domain
             var blocked = decisions.Any(x => x.Action == ResolutionActions.IncompleteScope);
             plan.State = blocked ? IdentityPlanStates.Blocked : plan.Questions.Count > 0 || plan.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.Unresolved) || plan.Credits.Any(x => x.CorrectionRequired) ? IdentityPlanStates.CorrectionRequired : IdentityPlanStates.Complete;
             CompleteSummaries(plan, planner);
+            if (blocked) plan.CaseType = "Blocked by out-of-scope records";
+            else if (plan.State == IdentityPlanStates.Complete) plan.CaseType = SatisfiedCaseType(plan, planner);
+            plan.PresentationPurpose = PresentationPurpose(plan);
             plan.PlanHash = StableHash(Canonical(plan));
             return plan;
+        }
+
+        public static bool HasMutations(IdentityCasePlan plan)
+        {
+            if (plan == null) return false;
+            if (plan.Credits.Any(x => x.Disposition == "MOVE") || plan.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.New)) return true;
+            foreach (var snapshot in plan.CurrentPeople)
+            {
+                var outcome = plan.Outcomes.FirstOrDefault(x => x.TargetEmbyId == snapshot.EmbyId);
+                if (!SameValue(snapshot.TmdbId, PreferredProviderId(outcome, ProviderNames.Tmdb)) || !SameValue(snapshot.TvdbId, PreferredProviderId(outcome, ProviderNames.Tvdb)) || !SameValue(snapshot.ImdbId, PreferredProviderId(outcome, ProviderNames.Imdb))) return true;
+            }
+            return false;
+        }
+
+        public static string PresentationPurpose(IdentityCasePlan plan)
+        {
+            if (plan == null || plan.State != IdentityPlanStates.Complete) return CasePresentationPurposes.Problem;
+            return HasMutations(plan) ? CasePresentationPurposes.SatisfiedChange : CasePresentationPurposes.SatisfiedNoChange;
+        }
+
+        private static bool SameValue(string left, string right) => string.Equals(left ?? string.Empty, right ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+
+        private static string SatisfiedCaseType(IdentityCasePlan plan, PlannerIndex planner)
+        {
+            var creates = plan.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.New);
+            var moves = plan.Credits.Any(x => x.Disposition == "MOVE");
+            var ids = ProviderIdChangeCount(plan, planner) > 0;
+            if (creates && moves) return ids ? "Person creation, credit realignment and provider ID alignment" : "Person creation and credit realignment";
+            if (moves) return ids ? "Credit realignment and provider ID alignment" : "Credit realignment";
+            if (creates) return ids ? "Person creation and provider ID alignment" : "Person creation";
+            if (ids) return "Provider ID alignment";
+            return "No Emby changes required";
         }
 
         private static void BuildCredits(IdentityCasePlan plan, ResolutionInput input, PlannerIndex index, List<OutcomeBuilder> builders)

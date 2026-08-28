@@ -5,6 +5,7 @@ namespace PersonCleaner.Configuration
     public sealed class PluginConfiguration : BasePluginConfiguration
     {
         public bool EnablePlugin { get; set; } = true;
+        public bool EnableMassCorrectionsTask { get; set; } = false;
         public string ExecutionMode { get; set; } = "Sandbox";
         public int SandboxSampleSizePerMediaType { get; set; } = 50;
         public int SandboxSeed { get; set; } = 20260823;

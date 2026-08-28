@@ -12,7 +12,7 @@ namespace PersonCleaner.V2.Storage
 {
     internal sealed class ResolutionRepository : IDisposable
     {
-        private const int SchemaVersion = 10;
+        private const int SchemaVersion = 11;
         private readonly object sync = new object();
         [ThreadStatic] private static StatementBatch activeStatementBatch;
         private IDatabaseConnection db;
@@ -51,10 +51,10 @@ namespace PersonCleaner.V2.Storage
                 }
                 foreach (var sql in Schema) db.Execute(sql);
                 if (!version.HasValue) db.Execute("INSERT INTO schema_info(singleton,version) VALUES(1," + SchemaVersion.ToString(CultureInfo.InvariantCulture) + ")");
-                if (!ColumnExists("provider_media", "slug") || !ColumnExists("provider_media_credit", "role_category") || !ColumnExists("resolution_decision", "local_anchor_confidence") || !ColumnExists("cache_manifest", "materializer_version") || !ColumnExists("provider_media_observation", "materializer_version") || !ColumnExists("work_queue", "graph_eligible") || !TableExists("resolution_pair") || !TableExists("resolution_cluster") || !TableExists("provider_correction") || !TableExists("correction_application") || !TableExists("provider_correction_selection") || !TableExists("provider_absence_cache") || !TableExists("acquisition_observation") || !TableExists("global_local_person") || !TableExists("resolution_credit_assignment") || !TableExists("resolution_case") || !TableExists("resolution_case_person_snapshot") || !TableExists("resolution_identity_outcome") || !TableExists("resolution_case_credit") || !TableExists("resolution_case_credit_attribution") || !TableExists("resolution_question") || !TableExists("identity_case_apply"))
+                if (!ColumnExists("provider_media", "slug") || !ColumnExists("provider_media_credit", "role_category") || !ColumnExists("resolution_decision", "local_anchor_confidence") || !ColumnExists("cache_manifest", "materializer_version") || !ColumnExists("provider_media_observation", "materializer_version") || !ColumnExists("work_queue", "graph_eligible") || !ColumnExists("resolution_case", "presentation_purpose") || !TableExists("resolution_pair") || !TableExists("resolution_cluster") || !TableExists("provider_correction") || !TableExists("correction_application") || !TableExists("provider_correction_selection") || !TableExists("provider_absence_cache") || !TableExists("acquisition_observation") || !TableExists("global_local_person") || !TableExists("resolution_credit_assignment") || !TableExists("resolution_case") || !TableExists("resolution_case_person_snapshot") || !TableExists("resolution_identity_outcome") || !TableExists("resolution_case_credit") || !TableExists("resolution_case_credit_attribution") || !TableExists("resolution_question") || !TableExists("identity_case_apply"))
                 {
                     db.Dispose(); db = null;
-                    throw new InvalidOperationException("PersonCleaner schema 10 is incomplete. Stop Emby and restore the most recent pre-migration backup before applying the numbered migrations again.");
+                    throw new InvalidOperationException("PersonCleaner schema 11 is incomplete. Stop Emby and restore the most recent pre-migration backup before applying the numbered migrations again.");
                 }
                 // v2 originally represented the non-media dimension of person
                 // work as an empty string. Emby's SQLite binder can coerce an
@@ -537,10 +537,10 @@ WHERE a.run_id=@run AND a.outcome='PRESENT'";
                 // Emby's SQLite binder represents an empty string as SQL NULL.
                 // Keep the schema's intentional empty-text representation for
                 // optional fields by coalescing at the statement boundary.
-                Statement(x, "INSERT INTO resolution_case(run_id,case_id,plan_hash,display_name,case_type,summary,warning,state,apply_caption) VALUES(@run,@case,@hash,@name,@type,@summary,COALESCE(@warning,''),@state,@apply)", s =>
+                Statement(x, "INSERT INTO resolution_case(run_id,case_id,plan_hash,display_name,case_type,summary,warning,state,apply_caption,presentation_purpose) VALUES(@run,@case,@hash,@name,@type,@summary,COALESCE(@warning,''),@state,@apply,@purpose)", s =>
                 {
                     s.Bind("@run", runId); s.Bind("@case", plan.CaseId); s.Bind("@hash", plan.PlanHash); s.Bind("@name", plan.DisplayName); s.Bind("@type", plan.CaseType);
-                    s.Bind("@summary", plan.Summary); s.Bind("@warning", plan.Warning ?? string.Empty); s.Bind("@state", plan.State); s.Bind("@apply", plan.ApplyCaption);
+                    s.Bind("@summary", plan.Summary); s.Bind("@warning", plan.Warning ?? string.Empty); s.Bind("@state", plan.State); s.Bind("@apply", plan.ApplyCaption); s.Bind("@purpose", IdentityCasePlanner.PresentationPurpose(plan));
                 });
                 for (var i = 0; i < plan.DecisionIds.Count; i++)
                     Statement(x, "INSERT INTO resolution_case_decision VALUES(@run,@case,@decision,@sort)", s => { s.Bind("@run", runId); s.Bind("@case", plan.CaseId); s.Bind("@decision", plan.DecisionIds[i]); s.Bind("@sort", i); });
@@ -599,10 +599,10 @@ WHERE a.run_id=@run AND a.outcome='PRESENT'";
             {
                 var runId = LatestCompletedRunId();
                 IdentityCasePlan plan = null;
-                using (var s = db.PrepareStatement("SELECT case_id,plan_hash,display_name,case_type,summary,warning,state,apply_caption FROM resolution_case WHERE run_id=@run AND case_id=@case"))
+                using (var s = db.PrepareStatement("SELECT case_id,plan_hash,display_name,case_type,summary,warning,state,apply_caption,presentation_purpose FROM resolution_case WHERE run_id=@run AND case_id=@case"))
                 {
                     s.Bind("@run", runId); s.Bind("@case", caseId);
-                    foreach (var r in s.Rows()) plan = new IdentityCasePlan { RunId = runId, CaseId = r.GetString(0), PlanHash = r.GetString(1), DisplayName = r.GetString(2), CaseType = r.GetString(3), Summary = r.GetString(4), Warning = r.GetString(5), State = r.GetString(6), ApplyCaption = r.GetString(7) };
+                    foreach (var r in s.Rows()) plan = new IdentityCasePlan { RunId = runId, CaseId = r.GetString(0), PlanHash = r.GetString(1), DisplayName = r.GetString(2), CaseType = r.GetString(3), Summary = r.GetString(4), Warning = r.GetString(5), State = r.GetString(6), ApplyCaption = r.GetString(7), PresentationPurpose = r.GetString(8) };
                 }
                 if (plan == null) throw new InvalidOperationException("The selected identity case is no longer present in the latest completed run.");
                 using (var s = db.PrepareStatement("SELECT 1 FROM identity_case_apply WHERE source_run_id=@run AND case_id=@case AND reviewed_plan_hash=@hash AND status='COMMITTED' LIMIT 1"))
@@ -644,6 +644,28 @@ WHERE a.run_id=@run AND a.outcome='PRESENT'";
                 }
                 return plan;
             }
+        }
+
+        public List<string> AutoApplicableCaseIds()
+        {
+            var result = new List<string>();
+            lock (sync)
+            {
+                using (var active = db.PrepareStatement("SELECT 1 FROM resolution_run WHERE status='running' LIMIT 1"))
+                    foreach (var ignored in active.Rows()) throw new InvalidOperationException("Person evidence is currently being rebuilt. Run Mass Corrections after the evidence task completes.");
+                var runId = LatestCompletedRunId();
+                if (runId <= 0) return result;
+                using (var s = db.PrepareStatement(@"SELECT c.case_id
+FROM resolution_case c
+WHERE c.run_id=@run AND c.presentation_purpose='SATISFIED_CHANGE'
+AND NOT EXISTS(SELECT 1 FROM identity_case_apply a WHERE a.source_run_id=c.run_id AND a.case_id=c.case_id AND a.reviewed_plan_hash=c.plan_hash AND a.status='COMMITTED')
+ORDER BY c.case_id"))
+                {
+                    s.Bind("@run", runId);
+                    foreach (var r in s.Rows()) result.Add(r.GetString(0));
+                }
+            }
+            return result;
         }
 
         public IdentityCasePlan IdentityCaseByReference(string caseId, IEnumerable<long> sourceEmbyIds)
@@ -823,18 +845,180 @@ ORDER BY c.enabled DESC,c.updated_utc DESC,c.correction_id DESC"))
                     foreach (var r in s.Rows()) run = new RunStatus { RunId = r.GetInt64(0), Status = r.GetString(1), Mode = r.GetString(2), Phase = r.GetString(3), Message = r.GetString(4), SelectedMovies = r.GetInt(5), SelectedSeries = r.GetInt(6), MediaFetched = r.GetInt(7), PeopleFetched = r.GetInt(8), CacheHits = r.GetInt(9), Failures = r.GetInt(10), Decisions = r.GetInt(11) };
                 if (run == null) return null;
 
-                var counts = new List<string>();
-                using (var s = db.PrepareStatement("SELECT status,count(*) FROM resolution_decision WHERE run_id=@run GROUP BY status ORDER BY CASE status WHEN 'SPLIT' THEN 0 WHEN 'REALIGNMENT' THEN 1 WHEN 'MERGE' THEN 2 WHEN 'CONFLATION' THEN 3 WHEN 'DRIFT' THEN 4 WHEN 'ORPHAN' THEN 5 WHEN 'MATCH_WITH_CONFLICT' THEN 6 ELSE 7 END,status"))
+                using (var s = db.PrepareStatement(@"SELECT count(*),
+COALESCE(SUM(CASE WHEN c.presentation_purpose='SATISFIED_CHANGE' AND NOT EXISTS(SELECT 1 FROM identity_case_apply a WHERE a.source_run_id=c.run_id AND a.case_id=c.case_id AND a.reviewed_plan_hash=c.plan_hash AND a.status='COMMITTED') THEN 1 ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN c.presentation_purpose='SATISFIED_CHANGE' AND EXISTS(SELECT 1 FROM identity_case_apply a WHERE a.source_run_id=c.run_id AND a.case_id=c.case_id AND a.reviewed_plan_hash=c.plan_hash AND a.status='COMMITTED') THEN 1 ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN c.presentation_purpose='SATISFIED_NO_CHANGE' THEN 1 ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN c.presentation_purpose='PROBLEM' THEN 1 ELSE 0 END),0)
+FROM resolution_case c WHERE c.run_id=@run"))
                 {
                     s.Bind("@run", run.RunId);
-                    foreach (var r in s.Rows()) counts.Add(r.GetString(0) + "=" + r.GetInt(1).ToString(CultureInfo.InvariantCulture));
+                    foreach (var r in s.Rows())
+                    {
+                        run.Cases = r.GetInt(0); run.AutoApplicableCases = r.GetInt(1); run.AppliedCases = r.GetInt(2);
+                        run.SatisfiedNoChangeCases = r.GetInt(3); run.ProblemCases = r.GetInt(4);
+                    }
+                }
+                var counts = new List<string>();
+                using (var s = db.PrepareStatement("SELECT case_type,count(*) FROM resolution_case WHERE run_id=@run AND presentation_purpose='PROBLEM' GROUP BY case_type ORDER BY case_type"))
+                {
+                    s.Bind("@run", run.RunId);
+                    foreach (var r in s.Rows()) counts.Add(CaseTypeCode(r.GetString(0)) + "=" + r.GetInt(1).ToString(CultureInfo.InvariantCulture));
                 }
                 run.DecisionBreakdown = counts.Count == 0 ? "none" : string.Join(", ", counts);
                 return run;
             }
         }
 
-        public DashboardDecision[] Dashboard(int mediaExamples)
+        private static string CaseTypeCode(string value)
+        {
+            switch (value)
+            {
+                case "Blocked by out-of-scope records": return "BLOCKED_BY_OUT_OF_SCOPE";
+                case "Provider attribution disagreement": return "CONFLATION";
+                case "Credits assigned to the wrong Emby person": return "REALIGNMENT";
+                case "Possible combined identities": return "SPLIT";
+                case "Emby provider-ID drift": return "DRIFT";
+                case "Provider identity missing": return "ORPHAN";
+                case "Identity aligned; provider metadata warning": return "MATCH_WITH_CONFLICT";
+                case "Provider records agree": return "MATCH";
+                default: return (value ?? "UNKNOWN").ToUpperInvariant().Replace(' ', '_').Replace('-', '_');
+            }
+        }
+
+        public DashboardDecision[] Dashboard(int mediaExamples, EvidenceCaseFilter filter = EvidenceCaseFilter.All)
+        {
+            var result = new List<DashboardDecision>();
+            lock (sync)
+            {
+                var runId = LatestCompletedRunId();
+                if (runId <= 0) return result.ToArray();
+                var selected = SelectedCasesSql(filter);
+                var cases = new Dictionary<string, DashboardCaseRow>(StringComparer.Ordinal);
+                using (var s = db.PrepareStatement(selected + @"
+SELECT c.case_id,c.plan_hash,c.display_name,c.case_type,c.summary,c.warning,c.state,c.apply_caption,c.presentation_purpose,
+CASE WHEN EXISTS(SELECT 1 FROM identity_case_apply a WHERE a.source_run_id=c.run_id AND a.case_id=c.case_id AND a.reviewed_plan_hash=c.plan_hash AND a.status='COMMITTED') THEN 1 ELSE 0 END,
+(SELECT count(DISTINCT m.emby_media_id) FROM resolution_case_decision cd JOIN resolution_media m ON m.run_id=cd.run_id AND m.decision_id=cd.decision_id WHERE cd.run_id=c.run_id AND cd.case_id=c.case_id)
+FROM selected_cases c
+ORDER BY CASE c.presentation_purpose WHEN 'PROBLEM' THEN 0 WHEN 'SATISFIED_CHANGE' THEN 1 ELSE 2 END,c.case_type,c.display_name,c.case_id"))
+                {
+                    s.Bind("@run", runId);
+                    foreach (var r in s.Rows())
+                    {
+                        var applied = r.GetInt(9) != 0; var purpose = r.GetString(8); var state = r.GetString(6); var apply = r.GetString(7); var summary = r.GetString(4); var warning = r.GetString(5);
+                        var row = new DashboardDecision
+                        {
+                            CaseId = r.GetString(0), Person = r.GetString(2), Status = r.GetString(3), Decision = summary,
+                            Action = applied ? "Applied" : purpose == CasePresentationPurposes.SatisfiedNoChange ? "No Emby changes required" : state == IdentityPlanStates.Complete ? apply : state == IdentityPlanStates.Blocked ? "Blocked — incomplete scope" : "Correction required",
+                            Automation = applied ? "Applied" : purpose == CasePresentationPurposes.SatisfiedNoChange ? "No work required" : purpose == CasePresentationPurposes.SatisfiedChange ? "Ready for Mass Corrections" : state == IdentityPlanStates.Blocked ? "Blocked" : "Manual oversight required",
+                            AutomationReason = string.IsNullOrWhiteSpace(warning) ? summary : summary + " " + warning,
+                            Why = string.IsNullOrWhiteSpace(warning) ? summary : summary + " " + warning,
+                            ImpactedTitles = r.GetInt(10), EmbyAnchor = "—", CurrentProviderIds = "No current provider IDs", ProviderIdentities = string.Empty
+                        };
+                        if (applied) { row.AutomationReason += " This exact persisted plan has already been applied."; row.Why = row.AutomationReason; }
+                        var holder = new DashboardCaseRow { Row = row, PlanHash = r.GetString(1), State = state, Purpose = purpose };
+                        holder.Details.Add(new DashboardDetail { DetailId = row.CaseId + ":assessment", Section = "Case assessment", Order = 0, Signal = "PRESENTATION_PURPOSE", Verdict = purpose, Explanation = row.AutomationReason, RawMetric = "state=" + state + ";purpose=" + purpose });
+                        cases[row.CaseId] = holder; result.Add(row);
+                    }
+                }
+                if (cases.Count == 0) return result.ToArray();
+
+                var decisionCases = new Dictionary<string, DashboardDecisionCase>(StringComparer.Ordinal);
+                using (var s = db.PrepareStatement(selected + @"
+SELECT cd.case_id,cd.sort_order,d.decision_id,d.status,d.action,d.provider_keys,d.confidence,d.local_anchor_confidence,d.headline,d.explanation
+FROM selected_cases c JOIN resolution_case_decision cd ON cd.run_id=c.run_id AND cd.case_id=c.case_id
+JOIN resolution_decision d ON d.run_id=cd.run_id AND d.decision_id=cd.decision_id
+ORDER BY cd.case_id,cd.sort_order,d.decision_id"))
+                {
+                    s.Bind("@run", runId);
+                    foreach (var r in s.Rows())
+                    {
+                        var holder = cases[r.GetString(0)]; var decisionId = r.GetString(2); var providerKeys = r.GetString(5); var status = r.GetString(3); var ordinal = holder.DecisionIds.Count + 1;
+                        holder.DecisionIds.Add(decisionId); holder.DecisionLabels.Add(RelationshipLabel(providerKeys, status)); holder.Confidence.Add(r.GetDouble(6)); holder.LocalConfidence.Add(r.GetDouble(7));
+                        foreach (var key in ProviderKeys(providerKeys)) holder.ProviderKeys.Add(key);
+                        var section = "Relationship " + ordinal.ToString(CultureInfo.InvariantCulture) + " — " + providerKeys;
+                        holder.Details.Add(new DashboardDetail { DetailId = holder.Row.CaseId + ":relationship:" + ordinal, Section = section, Order = ordinal * 1000, Signal = r.GetString(4), Verdict = status, Explanation = r.GetString(8) + " " + r.GetString(9), RawMetric = decisionId });
+                        decisionCases[decisionId] = new DashboardDecisionCase { Case = holder, Section = section, Order = ordinal * 1000 };
+                    }
+                }
+
+                using (var s = db.PrepareStatement(selected + @"
+SELECT e.decision_id,e.sort_order,e.signal_type,e.verdict,e.narrative,e.metric_raw
+FROM selected_cases c JOIN resolution_case_decision cd ON cd.run_id=c.run_id AND cd.case_id=c.case_id
+JOIN resolution_evidence e ON e.run_id=cd.run_id AND e.decision_id=cd.decision_id
+ORDER BY cd.case_id,cd.sort_order,e.sort_order,e.signal_type"))
+                {
+                    s.Bind("@run", runId);
+                    foreach (var r in s.Rows()) if (decisionCases.TryGetValue(r.GetString(0), out var relationship))
+                        relationship.Case.Details.Add(new DashboardDetail { DetailId = relationship.Case.Row.CaseId + ":e:" + r.GetString(0) + ":" + r.GetInt(1).ToString(CultureInfo.InvariantCulture) + ":" + r.GetString(2), Section = relationship.Section, Order = relationship.Order + Math.Max(1, r.GetInt(1)), Signal = r.GetString(2), Verdict = r.GetString(3), Explanation = r.GetString(4), RawMetric = r.GetString(5) });
+                }
+
+                using (var s = db.PrepareStatement(selected + @",
+media_rows AS (
+ SELECT DISTINCT cd.case_id,m.emby_media_id,m.media_type,m.display_name,m.role,cm.tmdb_id,cm.tvdb_id,cm.imdb_id,pm.slug
+ FROM selected_cases c JOIN resolution_case_decision cd ON cd.run_id=c.run_id AND cd.case_id=c.case_id
+ JOIN resolution_media m ON m.run_id=cd.run_id AND m.decision_id=cd.decision_id
+ LEFT JOIN current_media cm ON cm.emby_id=m.emby_media_id
+ LEFT JOIN provider_media pm ON pm.provider='tvdb' AND pm.media_type=m.media_type AND pm.provider_media_id=cm.tvdb_id
+), ranked AS (
+ SELECT media_rows.*,ROW_NUMBER() OVER(PARTITION BY case_id ORDER BY media_type,display_name,emby_media_id,role) row_number FROM media_rows
+)
+SELECT case_id,row_number,media_type,display_name,role,emby_media_id,tmdb_id,tvdb_id,imdb_id,slug
+FROM ranked WHERE row_number<=@mediaLimit ORDER BY case_id,row_number"))
+                {
+                    s.Bind("@run", runId); s.Bind("@mediaLimit", Math.Max(0, mediaExamples));
+                    foreach (var r in s.Rows()) if (cases.TryGetValue(r.GetString(0), out var holder))
+                        holder.Details.Add(new DashboardDetail { DetailId = holder.Row.CaseId + ":m:" + r.GetInt(1).ToString(CultureInfo.InvariantCulture), Section = "Affected titles", Order = 100000 + r.GetInt(1), Signal = r.GetString(2), Verdict = r.GetString(4), Explanation = r.GetString(3), RawMetric = string.Empty, EmbyMediaId = r.GetInt64(5), MediaType = r.GetString(2), TmdbId = Null(r, 6), TvdbId = Null(r, 7), ImdbId = Null(r, 8), TvdbSlug = Null(r, 9) });
+                }
+
+                using (var s = db.PrepareStatement(selected + @"
+SELECT p.case_id,p.emby_id,p.tmdb_id,p.tvdb_id,p.imdb_id
+FROM selected_cases c JOIN resolution_case_person_snapshot p ON p.run_id=c.run_id AND p.case_id=c.case_id
+ORDER BY p.case_id,p.emby_id"))
+                {
+                    s.Bind("@run", runId);
+                    foreach (var r in s.Rows()) if (cases.TryGetValue(r.GetString(0), out var holder))
+                    {
+                        holder.EmbyIds.Add(r.GetInt64(1).ToString(CultureInfo.InvariantCulture));
+                        AddProviderId(holder.CurrentProviderIds, ProviderNames.Tmdb, Null(r, 2)); AddProviderId(holder.CurrentProviderIds, ProviderNames.Tvdb, Null(r, 3)); AddProviderId(holder.CurrentProviderIds, ProviderNames.Imdb, Null(r, 4));
+                    }
+                }
+
+                foreach (var holder in cases.Values)
+                {
+                    var row = holder.Row; row.DecisionId = holder.DecisionIds.FirstOrDefault(); row.UnderlyingDecisionIds = holder.DecisionIds.ToArray(); row.UnderlyingDecisionLabels = holder.DecisionLabels.ToArray();
+                    row.Relationships = holder.DecisionIds.Count; row.ProviderRecords = holder.ProviderKeys.Count; row.ProviderIdentities = string.Join(", ", holder.ProviderKeys.OrderBy(x => x, StringComparer.Ordinal));
+                    row.EmbyAnchor = holder.EmbyIds.Count == 0 ? "—" : string.Join(", ", holder.EmbyIds); row.CurrentProviderIds = holder.CurrentProviderIds.Count == 0 ? "No current provider IDs" : string.Join(", ", holder.CurrentProviderIds.OrderBy(x => x, StringComparer.Ordinal));
+                    row.Confidence = PercentRange(holder.Confidence); row.LocalAnchorConfidence = PercentRange(holder.LocalConfidence); row.Details = holder.Details.OrderBy(x => x.Order).ThenBy(x => x.DetailId, StringComparer.Ordinal).ToArray();
+                }
+            }
+            return result.ToArray();
+        }
+
+        private static string SelectedCasesSql(EvidenceCaseFilter filter)
+        {
+            var where = filter == EvidenceCaseFilter.Problem
+                ? " AND c.presentation_purpose='PROBLEM'"
+                : filter == EvidenceCaseFilter.SatisfiedChange
+                    ? " AND c.presentation_purpose='SATISFIED_CHANGE' AND NOT EXISTS(SELECT 1 FROM identity_case_apply a WHERE a.source_run_id=c.run_id AND a.case_id=c.case_id AND a.reviewed_plan_hash=c.plan_hash AND a.status='COMMITTED')"
+                    : string.Empty;
+            return "WITH selected_cases AS (SELECT c.* FROM resolution_case c WHERE c.run_id=@run" + where + ")";
+        }
+
+        private static IEnumerable<string> ProviderKeys(string value) => (value ?? string.Empty).Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()).Where(x => x.Contains(":"));
+        private static string RelationshipLabel(string providerKeys, string status)
+        {
+            var value = providerKeys + " — " + status;
+            return value.Length <= 110 ? value : value.Substring(0, 107) + "...";
+        }
+        private static string PercentRange(IEnumerable<double> source)
+        {
+            var values = source.Select(x => Math.Round(x * 100, MidpointRounding.AwayFromZero)).Distinct().OrderBy(x => x).ToList();
+            return values.Count == 0 ? "—" : values.Count == 1 ? values[0].ToString("0", CultureInfo.InvariantCulture) + "%" : values.First().ToString("0", CultureInfo.InvariantCulture) + "–" + values.Last().ToString("0", CultureInfo.InvariantCulture) + "%";
+        }
+        private static void AddProviderId(ISet<string> target, string provider, string id) { if (!string.IsNullOrWhiteSpace(id)) target.Add(provider + ":" + id); }
+
+        private DashboardDecision[] LegacyDashboard(int mediaExamples)
         {
             var result = new List<DashboardDecision>();
             lock (sync)
@@ -1342,6 +1526,29 @@ WHERE correction_id IN (SELECT correction_id FROM provider_correction_selection 
             public string ApplyCaption { get; set; }
         }
 
+        private sealed class DashboardCaseRow
+        {
+            public DashboardDecision Row { get; set; }
+            public string PlanHash { get; set; }
+            public string State { get; set; }
+            public string Purpose { get; set; }
+            public List<string> DecisionIds { get; } = new List<string>();
+            public List<string> DecisionLabels { get; } = new List<string>();
+            public HashSet<string> ProviderKeys { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            public HashSet<string> CurrentProviderIds { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            public List<string> EmbyIds { get; } = new List<string>();
+            public List<double> Confidence { get; } = new List<double>();
+            public List<double> LocalConfidence { get; } = new List<double>();
+            public List<DashboardDetail> Details { get; } = new List<DashboardDetail>();
+        }
+
+        private sealed class DashboardDecisionCase
+        {
+            public DashboardCaseRow Case { get; set; }
+            public string Section { get; set; }
+            public int Order { get; set; }
+        }
+
         private static readonly string[] Schema =
         {
             "CREATE TABLE IF NOT EXISTS schema_info(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL)",
@@ -1390,8 +1597,8 @@ WHERE correction_id IN (SELECT correction_id FROM provider_correction_selection 
             "CREATE TABLE IF NOT EXISTS provider_correction(correction_id INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL,operation TEXT NOT NULL,provider TEXT NOT NULL DEFAULT '',media_type TEXT NOT NULL DEFAULT '',provider_media_id TEXT NOT NULL DEFAULT '',provider_person_id TEXT NOT NULL DEFAULT '',field_name TEXT NOT NULL DEFAULT '',current_value TEXT NOT NULL DEFAULT '',replacement_value TEXT NOT NULL DEFAULT '',secondary_provider TEXT NOT NULL DEFAULT '',secondary_id TEXT NOT NULL DEFAULT '',emby_id INTEGER,reason TEXT NOT NULL,note TEXT NOT NULL DEFAULT '',enabled INTEGER NOT NULL CHECK(enabled IN(0,1)),created_utc INTEGER NOT NULL,updated_utc INTEGER NOT NULL)",
             "CREATE INDEX IF NOT EXISTS idx_provider_correction_enabled ON provider_correction(enabled,kind,provider)",
             "CREATE TABLE IF NOT EXISTS correction_application(run_id INTEGER NOT NULL,correction_id INTEGER NOT NULL,matched_count INTEGER NOT NULL,changed_count INTEGER NOT NULL,summary TEXT NOT NULL,applied_utc INTEGER NOT NULL,PRIMARY KEY(run_id,correction_id),FOREIGN KEY(run_id) REFERENCES resolution_run(run_id) ON DELETE CASCADE,FOREIGN KEY(correction_id) REFERENCES provider_correction(correction_id) ON DELETE CASCADE) WITHOUT ROWID",
-            "CREATE TABLE IF NOT EXISTS resolution_case(run_id INTEGER NOT NULL,case_id TEXT NOT NULL,plan_hash TEXT NOT NULL,display_name TEXT NOT NULL,case_type TEXT NOT NULL,summary TEXT NOT NULL,warning TEXT NOT NULL DEFAULT '',state TEXT NOT NULL CHECK(state IN('COMPLETE','CORRECTION_REQUIRED','BLOCKED')),apply_caption TEXT NOT NULL,PRIMARY KEY(run_id,case_id),FOREIGN KEY(run_id) REFERENCES resolution_run(run_id) ON DELETE CASCADE) WITHOUT ROWID",
-            "CREATE INDEX IF NOT EXISTS idx_resolution_case_ui ON resolution_case(run_id,state,display_name,case_id)",
+            "CREATE TABLE IF NOT EXISTS resolution_case(run_id INTEGER NOT NULL,case_id TEXT NOT NULL,plan_hash TEXT NOT NULL,display_name TEXT NOT NULL,case_type TEXT NOT NULL,summary TEXT NOT NULL,warning TEXT NOT NULL DEFAULT '',state TEXT NOT NULL CHECK(state IN('COMPLETE','CORRECTION_REQUIRED','BLOCKED')),apply_caption TEXT NOT NULL,presentation_purpose TEXT NOT NULL CHECK(presentation_purpose IN('PROBLEM','SATISFIED_CHANGE','SATISFIED_NO_CHANGE')),PRIMARY KEY(run_id,case_id),FOREIGN KEY(run_id) REFERENCES resolution_run(run_id) ON DELETE CASCADE) WITHOUT ROWID",
+            "CREATE INDEX IF NOT EXISTS idx_resolution_case_ui ON resolution_case(run_id,presentation_purpose,case_type,display_name,case_id)",
             "CREATE TABLE IF NOT EXISTS resolution_case_decision(run_id INTEGER NOT NULL,case_id TEXT NOT NULL,decision_id TEXT NOT NULL,sort_order INTEGER NOT NULL,PRIMARY KEY(run_id,case_id,decision_id),FOREIGN KEY(run_id,case_id) REFERENCES resolution_case(run_id,case_id) ON DELETE CASCADE,FOREIGN KEY(run_id,decision_id) REFERENCES resolution_decision(run_id,decision_id) ON DELETE CASCADE) WITHOUT ROWID",
             "CREATE TABLE IF NOT EXISTS resolution_identity_outcome(run_id INTEGER NOT NULL,case_id TEXT NOT NULL,outcome_id TEXT NOT NULL,sort_order INTEGER NOT NULL,cluster_key TEXT NOT NULL,target_kind TEXT NOT NULL CHECK(target_kind IN('EXISTING','NEW','UNRESOLVED')),target_emby_id INTEGER,display_name TEXT NOT NULL,outcome TEXT NOT NULL,PRIMARY KEY(run_id,case_id,outcome_id),CHECK((target_kind='EXISTING' AND target_emby_id IS NOT NULL) OR (target_kind IN('NEW','UNRESOLVED') AND target_emby_id IS NULL)),FOREIGN KEY(run_id,case_id) REFERENCES resolution_case(run_id,case_id) ON DELETE CASCADE) WITHOUT ROWID",
             "CREATE TABLE IF NOT EXISTS resolution_case_person_snapshot(run_id INTEGER NOT NULL,case_id TEXT NOT NULL,emby_id INTEGER NOT NULL,name TEXT NOT NULL,tmdb_id TEXT,tvdb_id TEXT,imdb_id TEXT,PRIMARY KEY(run_id,case_id,emby_id),FOREIGN KEY(run_id,case_id) REFERENCES resolution_case(run_id,case_id) ON DELETE CASCADE) WITHOUT ROWID",
@@ -1403,6 +1610,7 @@ WHERE correction_id IN (SELECT correction_id FROM provider_correction_selection 
             "CREATE TABLE IF NOT EXISTS resolution_question(run_id INTEGER NOT NULL,case_id TEXT NOT NULL,question_id TEXT NOT NULL,kind TEXT NOT NULL,outcome_id TEXT,assignment_id TEXT,narrative TEXT NOT NULL,PRIMARY KEY(run_id,case_id,question_id),FOREIGN KEY(run_id,case_id) REFERENCES resolution_case(run_id,case_id) ON DELETE CASCADE,FOREIGN KEY(run_id,case_id,outcome_id) REFERENCES resolution_identity_outcome(run_id,case_id,outcome_id) ON DELETE CASCADE,FOREIGN KEY(run_id,case_id,assignment_id) REFERENCES resolution_case_credit(run_id,case_id,assignment_id) ON DELETE CASCADE) WITHOUT ROWID",
             "CREATE TABLE IF NOT EXISTS resolution_question_choice(run_id INTEGER NOT NULL,case_id TEXT NOT NULL,question_id TEXT NOT NULL,choice_id TEXT NOT NULL,caption TEXT NOT NULL,effect TEXT NOT NULL,correction_kind TEXT NOT NULL,correction_operation TEXT NOT NULL,provider TEXT NOT NULL DEFAULT '',media_type TEXT NOT NULL DEFAULT '',provider_media_id TEXT NOT NULL DEFAULT '',provider_person_id TEXT NOT NULL DEFAULT '',field_name TEXT NOT NULL DEFAULT '',current_value TEXT NOT NULL DEFAULT '',replacement_value TEXT NOT NULL DEFAULT '',secondary_provider TEXT NOT NULL DEFAULT '',secondary_id TEXT NOT NULL DEFAULT '',emby_id INTEGER,reason TEXT NOT NULL,note TEXT NOT NULL DEFAULT '',PRIMARY KEY(run_id,case_id,question_id,choice_id),FOREIGN KEY(run_id,case_id,question_id) REFERENCES resolution_question(run_id,case_id,question_id) ON DELETE CASCADE) WITHOUT ROWID",
             "CREATE TABLE IF NOT EXISTS identity_case_apply(apply_id INTEGER PRIMARY KEY AUTOINCREMENT,source_run_id INTEGER NOT NULL,case_id TEXT NOT NULL,reviewed_plan_hash TEXT NOT NULL,started_utc INTEGER NOT NULL,finished_utc INTEGER,status TEXT NOT NULL CHECK(status IN('STARTED','COMMITTED','ROLLED_BACK','FAILED')),summary TEXT NOT NULL)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_case_apply_committed ON identity_case_apply(source_run_id,case_id,reviewed_plan_hash) WHERE status='COMMITTED'",
             "CREATE TABLE IF NOT EXISTS identity_case_apply_change(apply_id INTEGER NOT NULL,change_order INTEGER NOT NULL,change_kind TEXT NOT NULL,source_emby_id INTEGER,target_emby_id INTEGER,outcome_id TEXT,media_emby_id INTEGER,role TEXT,provider TEXT,old_value TEXT,new_value TEXT,summary TEXT NOT NULL,PRIMARY KEY(apply_id,change_order),FOREIGN KEY(apply_id) REFERENCES identity_case_apply(apply_id) ON DELETE CASCADE) WITHOUT ROWID",
             "CREATE TABLE IF NOT EXISTS provider_correction_selection(correction_id INTEGER PRIMARY KEY,source_run_id INTEGER NOT NULL,case_id TEXT NOT NULL,question_id TEXT NOT NULL,choice_id TEXT NOT NULL,selected_utc INTEGER NOT NULL,FOREIGN KEY(correction_id) REFERENCES provider_correction(correction_id) ON DELETE CASCADE)"
         };
