@@ -527,10 +527,12 @@ WHERE a.run_id=@run AND a.outcome='PRESENT'";
             }), TransactionMode.Immediate);
         }
 
-        private static void SaveIdentityCasePlans(IDatabaseConnection x, long runId, IEnumerable<IdentityCasePlan> plans)
+        private static void SaveIdentityCasePlans(IDatabaseConnection x, long runId, IEnumerable<IdentityCasePlan> plans, bool replaceWholeRun = true)
         {
-            Statement(x, "DELETE FROM resolution_case WHERE run_id=@run", s => s.Bind("@run", runId));
-            foreach (var plan in plans ?? Enumerable.Empty<IdentityCasePlan>())
+            var rows = (plans ?? Enumerable.Empty<IdentityCasePlan>()).ToList();
+            if (replaceWholeRun) Statement(x, "DELETE FROM resolution_case WHERE run_id=@run", s => s.Bind("@run", runId));
+            else foreach (var plan in rows) Statement(x, "DELETE FROM resolution_case WHERE run_id=@run AND case_id=@case", s => { s.Bind("@run", runId); s.Bind("@case", plan.CaseId); });
+            foreach (var plan in rows)
             {
                 // Emby's SQLite binder represents an empty string as SQL NULL.
                 // Keep the schema's intentional empty-text representation for
@@ -1043,6 +1045,27 @@ ORDER BY p.emby_id";
                 Statement(x, "INSERT INTO provider_correction_selection VALUES(@id,@run,@case,@question,@choice,@now)", s => { s.Bind("@id", id); s.Bind("@run", sourceRunId); s.Bind("@case", caseId); s.Bind("@question", questionId); s.Bind("@choice", choiceId); s.Bind("@now", now); });
             }, TransactionMode.Immediate);
             correction.CorrectionId = id; return id;
+        }
+
+        public void SavePersonBuilder(PersonBuilderCompilation compilation)
+        {
+            if (compilation?.Plan == null) throw new ArgumentNullException(nameof(compilation));
+            if (compilation.Plan.State != IdentityPlanStates.Complete) throw new InvalidOperationException("Only a complete person-builder projection can be saved.");
+            var corrections = (compilation.Corrections ?? new List<ProviderCorrection>()).ToList();
+            foreach (var correction in corrections)
+            {
+                correction.CorrectionId = 0;
+                correction.NormalizeAndValidate();
+            }
+            var now = Now(); var note = "Person builder case " + compilation.Plan.CaseId;
+            lock (sync) db.RunInTransaction(x => RunBatchedStatements(x, () =>
+            {
+                Statement(x, "DELETE FROM provider_correction WHERE reason='OPERATOR_PERSON_BUILDER' AND note=@note", s => s.Bind("@note", note));
+                foreach (var correction in corrections)
+                    Statement(x, "INSERT INTO provider_correction(kind,operation,provider,media_type,provider_media_id,provider_person_id,field_name,current_value,replacement_value,secondary_provider,secondary_id,emby_id,reason,note,enabled,created_utc,updated_utc) VALUES(@kind,@operation,coalesce(@provider,''),coalesce(@mediaType,''),coalesce(@mediaId,''),coalesce(@personId,''),coalesce(@field,''),coalesce(@current,''),coalesce(@replacement,''),coalesce(@secondaryProvider,''),coalesce(@secondaryId,''),@emby,@reason,coalesce(@note,''),@enabled,@now,@now)", s => BindCorrection(s, correction, now));
+                SaveIdentityCasePlans(x, compilation.Plan.RunId, new[] { compilation.Plan }, false);
+                Statement(x, "UPDATE resolution_run SET updated_utc=@now WHERE run_id=@run", s => { s.Bind("@now", now); s.Bind("@run", compilation.Plan.RunId); });
+            }), TransactionMode.Immediate);
         }
 
         public int PendingCorrectionSelections(string caseId)

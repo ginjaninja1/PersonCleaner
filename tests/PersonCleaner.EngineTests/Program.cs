@@ -1,5 +1,6 @@
 using PersonCleaner.V2.Domain;
 using PersonCleaner.V2.Storage;
+using PersonCleaner.V2.UI;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -78,6 +79,11 @@ internal static class Program
         Run("holistic IMDb conflict retains the current Emby ID and provider-owner matrix", HolisticImdbConflictRetainsCurrentId);
         Run("holistic planner keeps compatible current IDs together beside a conflicting alternative", HolisticCurrentIdentitySubsetRemainsTogether);
         Run("holistic planner remains bounded across 1600 cases", HolisticPlannerRemainsBounded);
+        Run("person builder records an already-correct attribution without an Emby mutation", PersonBuilderRecordsNoOpAdjudication);
+        Run("person builder creates a suggested owner and moves media in one projection", PersonBuilderCreatesAndMoves);
+        Run("person builder rejects duplicate provider IDs across final people", PersonBuilderRejectsDuplicateIds);
+        Run("person builder requires a destination for an unresolved identity", PersonBuilderRequiresIdentityDestination);
+        Run("person builder actions precede terminal grid content", PersonBuilderActionsPrecedeGrid);
         Run("case planning does not scan 300000 unrelated global Emby people", CasePlanningIgnoresLargeGlobalPopulation);
         Run("large unrelated provider-credit sets remain bounded", LargeProviderCreditSetRemainsBounded);
         Console.WriteLine("Passed " + passed + " entity-resolution tests; failed " + failed + ".");
@@ -570,17 +576,19 @@ internal static class Program
     {
         var person = Person(ProviderNames.Tvdb, "331984", "Daniel Newman", ProviderNames.Imdb, "nm1649096", "shared"); person.Birthday = "1981-06-14";
         AddObservedCredit(person, "shared", "Actor", "Wulf"); person.Credits[0].MediaType = MediaTypes.Movie; person.Credits[0].ProviderMediaId = "2035";
-        var input = BaseInput(person); input.ProviderCredits.AddRange(person.Credits); input.LocalPeople.Add(new LocalPerson { EmbyId = 41636, Name = "Daniel Newman", TvdbId = "331984" });
+        var input = BaseInput(person); input.ProviderCredits.AddRange(person.Credits); input.LocalPeople.Add(new LocalPerson { EmbyId = 41636, Name = "Daniel Newman", TvdbId = "331984", ImdbId = "nm1649096" });
         var corrections = new[]
         {
             new ProviderCorrection { CorrectionId = 3, Kind = CorrectionKinds.PersonField, Operation = CorrectionOperations.Replace, Provider = ProviderNames.Tvdb, ProviderPersonId = "331984", FieldName = "birthday", CurrentValue = "1981-06-14", ReplacementValue = "1976-05-12", Reason = "PROVIDER_MISMATCH" },
             new ProviderCorrection { CorrectionId = 4, Kind = CorrectionKinds.PersonExternalId, Operation = CorrectionOperations.Unusable, Provider = ProviderNames.Tvdb, ProviderPersonId = "331984", FieldName = ProviderNames.Imdb, CurrentValue = "nm1649096", Reason = "PROVIDER_MISMATCH" },
-            new ProviderCorrection { CorrectionId = 5, Kind = CorrectionKinds.LocalPersonBinding, Operation = CorrectionOperations.Unusable, Provider = ProviderNames.Tvdb, EmbyId = 41636, CurrentValue = "331984", Reason = "PROVIDER_MISMATCH" }
+            new ProviderCorrection { CorrectionId = 5, Kind = CorrectionKinds.LocalPersonBinding, Operation = CorrectionOperations.Unusable, Provider = ProviderNames.Tvdb, EmbyId = 41636, CurrentValue = "331984", Reason = "PROVIDER_MISMATCH" },
+            new ProviderCorrection { CorrectionId = 6, Kind = CorrectionKinds.LocalPersonBinding, Operation = CorrectionOperations.Replace, Provider = ProviderNames.Imdb, EmbyId = 41636, CurrentValue = "nm1649096", ReplacementValue = "nm0000001", Reason = "PROVIDER_MISMATCH" }
         };
         ProviderCorrectionOverlay.Apply(input, new CorrectionApplicationTracker(corrections));
         Equal("1976-05-12", input.ProviderPeople.Single().Birthday);
         True(!input.ProviderPeople.Single().ExternalIds.ContainsKey(ProviderNames.Imdb));
         True(input.LocalPeople.Single().TvdbId == null);
+        Equal("nm0000001", input.LocalPeople.Single().ImdbId);
     }
 
     private static void ProviderIdentityCorrectionBecomesBridge()
@@ -1242,6 +1250,134 @@ internal static class Program
         var clock = Stopwatch.StartNew(); var plans = IdentityCasePlanner.Build(1, input, decisions, clusters); clock.Stop();
         Equal(count, plans.Count);
         True(clock.Elapsed < TimeSpan.FromSeconds(5));
+    }
+
+    private static void PersonBuilderRecordsNoOpAdjudication()
+    {
+        var plan = BuilderPlan();
+        var draft = PersonBuilderDraft.FromPlan(plan);
+        var compilation = IdentityCasePersonBuilder.Compile(plan, draft);
+
+        Equal(IdentityPlanStates.Complete, compilation.Plan.State);
+        Equal(0, compilation.EmbyChanges);
+        Equal(1, compilation.Plan.Outcomes.Count);
+        Equal("KEEP", compilation.Plan.Credits.Single().Disposition);
+        Equal(0, compilation.Plan.Questions.Count);
+        True(compilation.Corrections.Any(x => x.Kind == CorrectionKinds.LocalCreditTarget && x.ReplacementValue == "existing:50"));
+        Equal("No Emby changes required", compilation.Plan.ApplyCaption);
+    }
+
+    private static void PersonBuilderCreatesAndMoves()
+    {
+        var plan = BuilderPlan();
+        var draft = PersonBuilderDraft.FromPlan(plan);
+        var suggested = draft.People.Single(x => x.TargetKind == IdentityTargetKinds.New);
+        draft.Credits.Single().TargetOutcomeId = suggested.OutcomeId;
+        var compilation = IdentityCasePersonBuilder.Compile(plan, draft);
+
+        Equal(2, compilation.EmbyChanges);
+        Equal(2, compilation.Plan.Outcomes.Count);
+        Equal("MOVE", compilation.Plan.Credits.Single().Disposition);
+        True(compilation.Plan.ApplyCaption.Contains("create 1 person") && compilation.Plan.ApplyCaption.Contains("move 1 credit"));
+        True(compilation.Corrections.Any(x => x.Kind == CorrectionKinds.LocalCreditTarget && x.ReplacementValue == "provider:tvdb:2"));
+    }
+
+    private static void PersonBuilderRejectsDuplicateIds()
+    {
+        var plan = BuilderPlan();
+        var draft = PersonBuilderDraft.FromPlan(plan);
+        var suggested = draft.People.Single(x => x.TargetKind == IdentityTargetKinds.New);
+        suggested.TmdbId = "1";
+        draft.Credits.Single().TargetOutcomeId = suggested.OutcomeId;
+        var failed = false;
+        try { IdentityCasePersonBuilder.Compile(plan, draft); }
+        catch (InvalidOperationException ex) { failed = ex.Message.Contains("cannot belong to more than one"); }
+        True(failed);
+    }
+
+    private static void PersonBuilderRequiresIdentityDestination()
+    {
+        var plan = BuilderPlan();
+        var existing = plan.Outcomes.Single(x => x.TargetKind == IdentityTargetKinds.Existing);
+        existing.TargetKind = IdentityTargetKinds.Unresolved; existing.TargetEmbyId = null;
+        var draft = PersonBuilderDraft.FromPlan(plan);
+        var failed = false;
+        try { IdentityCasePersonBuilder.Compile(plan, draft); }
+        catch (InvalidOperationException ex) { failed = ex.Message.Contains("maintain an existing Emby person or be created"); }
+        True(failed);
+        var destination = draft.People.Single(x => x.OutcomeId == existing.OutcomeId);
+        destination.TargetKind = IdentityTargetKinds.Existing; destination.TargetEmbyId = 50;
+        Equal(IdentityPlanStates.Complete, IdentityCasePersonBuilder.Compile(plan, draft).Plan.State);
+    }
+
+    private static void PersonBuilderActionsPrecedeGrid()
+    {
+        var properties = typeof(ReviewCaseDialogUI).GetProperties().Where(x => x.DeclaringType == typeof(ReviewCaseDialogUI)).OrderBy(x => x.MetadataToken).Select(x => x.Name).ToList();
+        True(properties.IndexOf(nameof(ReviewCaseDialogUI.SaveBuilder)) < properties.IndexOf(nameof(ReviewCaseDialogUI.PersonBuilder)));
+        True(properties.IndexOf(nameof(ReviewCaseDialogUI.Apply)) < properties.IndexOf(nameof(ReviewCaseDialogUI.PersonBuilder)));
+        True(properties.IndexOf(nameof(ReviewCaseDialogUI.BackToAllCases)) < properties.IndexOf(nameof(ReviewCaseDialogUI.PersonBuilder)));
+        var plan = BuilderPlan();
+        var draft = PersonBuilderDraft.FromPlan(plan);
+        draft.Credits.Single().TargetOutcomeId = draft.People.Single(x => x.TargetKind == IdentityTargetKinds.New).OutcomeId;
+        var ui = ReviewCaseDialogUI.Build(plan, draft, "server", null);
+        var information = ui.Rows.Single(x => x.IsInformation);
+        Equal("Information", information.Name);
+        True(information.Media.Any(x => x.Media.Contains("TMDB") && x.Media.Contains("themoviedb.org/person/1")));
+        True(information.Media.All(x => !x.Media.Contains("Alex Example")));
+        Equal("spacer", information.Media.Last().Media);
+        Equal("New 1", ui.Rows.Single(x => x.OutcomeId == "new:tvdb2").Name);
+        var media = ui.Rows.SelectMany(x => x.Media).Single(x => x.AssignmentId == "credit-1");
+        Equal("Lead", media.Role);
+        True(media.CurrentPerson.Contains(">50</a>"));
+        True(!media.TmdbOwner.Contains("Alex Example") && !media.TmdbOwner.Contains("Lead"));
+        True(!media.TvdbOwner.Contains("Alex Example") && !media.TvdbOwner.Contains("Lead"));
+        True(ui.Rows.Single(x => x.OutcomeId == "existing:50").Name.Contains("#!/item?id=50"));
+        True(ui.Apply != null);
+
+        ui.Rows.Single(x => x.OutcomeId == "new:tvdb2").PersonTarget = "remove";
+        var rejectedRemoval = false;
+        try { ReviewCaseDialogUI.Capture(draft, ui, false); }
+        catch (InvalidOperationException ex) { rejectedRemoval = ex.Message.Contains("Move every media credit"); }
+        True(rejectedRemoval);
+
+        var emptyDraft = PersonBuilderDraft.FromPlan(plan);
+        var emptyUi = ReviewCaseDialogUI.Build(plan, emptyDraft, "server", null);
+        emptyUi.Rows.Single(x => x.OutcomeId == "new:tvdb2").PersonTarget = "remove";
+        True(!ReviewCaseDialogUI.Capture(emptyDraft, emptyUi, false).People.Single(x => x.OutcomeId == "new:tvdb2").Include);
+    }
+
+    private static IdentityCasePlan BuilderPlan()
+    {
+        var plan = new IdentityCasePlan
+        {
+            RunId = 1, CaseId = "builder-case", PlanHash = "reviewed", DisplayName = "Alex Example", CaseType = "Credits assigned to the wrong Emby person",
+            Summary = "Review the proposed identities.", State = IdentityPlanStates.CorrectionRequired, ApplyCaption = "Correction required",
+            DecisionIds = new List<string> { "builder-case" },
+            CurrentPeople = new List<LocalPerson> { new LocalPerson { EmbyId = 50, Name = "Alex Example", TmdbId = "1", ImdbId = "nm1" } }
+        };
+        var existing = new IdentityOutcome
+        {
+            OutcomeId = "existing:50", SortOrder = 0, TargetKind = IdentityTargetKinds.Existing, TargetEmbyId = 50, DisplayName = "Alex Example", Outcome = "Retain Emby person 50",
+            SourceEmbyIds = new List<long> { 50 }, ProviderIds = new List<IdentityProviderId> { new IdentityProviderId { Provider = ProviderNames.Tmdb, ProviderId = "1", Source = "native" }, new IdentityProviderId { Provider = ProviderNames.Imdb, ProviderId = "nm1", Source = "external" } }
+        };
+        var suggested = new IdentityOutcome
+        {
+            OutcomeId = "new:tvdb2", SortOrder = 1, TargetKind = IdentityTargetKinds.New, DisplayName = "Alex Example", Outcome = "Create provider-identified Emby person",
+            ProviderIds = new List<IdentityProviderId> { new IdentityProviderId { Provider = ProviderNames.Tvdb, ProviderId = "2", Source = "native" }, new IdentityProviderId { Provider = ProviderNames.Imdb, ProviderId = "nm2", Source = "external" } }
+        };
+        plan.Outcomes.Add(existing); plan.Outcomes.Add(suggested);
+        plan.Credits.Add(new IdentityCreditOutcome
+        {
+            AssignmentId = "credit-1", SourcePersonEmbyId = 50, TargetOutcomeId = existing.OutcomeId, MediaEmbyId = 20, MediaType = MediaTypes.Movie,
+            MediaName = "Disputed title", Role = "Actor: Lead", Disposition = "KEEP", CorrectionRequired = true,
+            Attributions = new List<IdentityCreditAttribution>
+            {
+                new IdentityCreditAttribution { Provider = ProviderNames.Tmdb, ProviderMediaId = "20", ProviderPersonId = "1", PersonName = "Alex Example", Role = "Actor: Lead", RoleCategory = "Actor", OutcomeId = existing.OutcomeId },
+                new IdentityCreditAttribution { Provider = ProviderNames.Tvdb, ProviderMediaId = "200", ProviderPersonId = "2", PersonName = "Alex Example", Role = "Actor: Lead", RoleCategory = "Actor", OutcomeId = suggested.OutcomeId }
+            }
+        });
+        plan.Questions.Add(new IdentityQuestion { QuestionId = "question-credit-1", Kind = CorrectionKinds.LocalCreditTarget, AssignmentId = "credit-1", Narrative = "Who should receive the credit?" });
+        return plan;
     }
 
     private static void LargeProviderCreditSetRemainsBounded()

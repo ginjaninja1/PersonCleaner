@@ -613,6 +613,11 @@ namespace PersonCleaner.V2.Domain
         {
             if ((value ?? string.Empty).StartsWith("outcome:", StringComparison.Ordinal)) return plan.Outcomes.FirstOrDefault(x => x.OutcomeId == value.Substring(8));
             if ((value ?? string.Empty).StartsWith("existing:", StringComparison.Ordinal)) { long id; return long.TryParse(value.Substring(9), out id) ? plan.Outcomes.FirstOrDefault(x => x.TargetEmbyId == id) : null; }
+            if ((value ?? string.Empty).StartsWith("provider:", StringComparison.Ordinal))
+            {
+                var parts = value.Split(new[] { ':' }, 3);
+                return parts.Length == 3 ? plan.Outcomes.FirstOrDefault(x => x.ProviderIds.Any(y => y.Provider == parts[1] && y.ProviderId == parts[2])) : null;
+            }
             return null;
         }
 

@@ -88,7 +88,7 @@ namespace PersonCleaner.V2.Domain
             }
             if (Kind == CorrectionKinds.LocalPersonBinding || Kind == CorrectionKinds.LocalMediaBinding)
             {
-                RequireProvider(Provider);
+                if (Kind == CorrectionKinds.LocalPersonBinding) RequirePersonProvider(Provider); else RequireProvider(Provider);
                 if (!EmbyId.HasValue || EmbyId.Value <= 0) throw new ArgumentException("Enter a valid Emby item ID.");
                 RequireUnusableOrReplacement();
                 return;
@@ -123,6 +123,10 @@ namespace PersonCleaner.V2.Domain
         private static void RequireProvider(string provider)
         {
             if (provider != ProviderNames.Tmdb && provider != ProviderNames.Tvdb) throw new ArgumentException("Provider must be tmdb or tvdb.");
+        }
+        private static void RequirePersonProvider(string provider)
+        {
+            if (provider != ProviderNames.Tmdb && provider != ProviderNames.Tvdb && provider != ProviderNames.Imdb) throw new ArgumentException("Person provider must be tmdb, tvdb or imdb.");
         }
         private static string Lower(string value) => Trim(value).ToLowerInvariant();
         private static string Trim(string value) => (value ?? string.Empty).Trim();
@@ -317,8 +321,8 @@ namespace PersonCleaner.V2.Domain
         private static bool MatchMedia(ProviderCorrection rule, string provider, string type, string id) => rule.Provider == provider && rule.MediaType == type && rule.ProviderMediaId == id;
         private static bool ValueMatches(string expected, string actual) => string.IsNullOrWhiteSpace(expected) || string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase);
         private static bool SamePair(string a, string b, string c, string d) => a == c && b == d || a == d && b == c;
-        private static string GetPersonBinding(LocalPerson x, string provider) => provider == ProviderNames.Tmdb ? x.TmdbId : x.TvdbId;
-        private static void SetPersonBinding(LocalPerson x, string provider, string value) { if (provider == ProviderNames.Tmdb) x.TmdbId = value; else x.TvdbId = value; }
+        private static string GetPersonBinding(LocalPerson x, string provider) => provider == ProviderNames.Tmdb ? x.TmdbId : provider == ProviderNames.Tvdb ? x.TvdbId : x.ImdbId;
+        private static void SetPersonBinding(LocalPerson x, string provider, string value) { if (provider == ProviderNames.Tmdb) x.TmdbId = value; else if (provider == ProviderNames.Tvdb) x.TvdbId = value; else x.ImdbId = value; }
         private static string GetMediaBinding(MediaSeed x, string provider) => provider == ProviderNames.Tmdb ? x.TmdbId : x.TvdbId;
         private static void SetMediaBinding(MediaSeed x, string provider, string value) { if (provider == ProviderNames.Tmdb) x.TmdbId = value; else x.TvdbId = value; }
         private static string RoleName(string role) { var i = (role ?? string.Empty).IndexOf(':'); return i < 0 ? role : role.Substring(i + 1).Trim(); }
