@@ -146,13 +146,17 @@ namespace PersonCleaner.V2.Domain
                 var targetId = credits[original.AssignmentId].TargetOutcomeId;
                 var target = active[targetId];
                 var disposition = target.TargetKind == IdentityTargetKinds.Existing && target.TargetEmbyId == original.SourcePersonEmbyId ? "KEEP" : "MOVE";
+                if (original.IsReviewSupplemental && disposition == "KEEP") continue;
                 plan.Credits.Add(new IdentityCreditOutcome
                 {
                     AssignmentId = original.AssignmentId, SourcePersonEmbyId = original.SourcePersonEmbyId, TargetOutcomeId = targetId,
                     MediaEmbyId = original.MediaEmbyId, MediaType = original.MediaType, MediaName = original.MediaName, Role = original.Role,
                     TmdbId = original.TmdbId, TvdbId = original.TvdbId, TvdbSlug = original.TvdbSlug, ImdbId = original.ImdbId,
                     Disposition = disposition, CorrectionRequired = false,
-                    Rationale = disposition == "KEEP" ? "Operator confirmed this Emby attribution in the person builder." : "Operator assigned this media credit in the person builder.",
+                    Rationale = original.IsReviewSupplemental
+                        ? "Operator reassigned a live Emby relationship that was outside the gathered evidence scope."
+                        : disposition == "KEEP" ? "Operator confirmed this Emby attribution in the person builder." : "Operator assigned this media credit in the person builder.",
+                    IsReviewSupplemental = original.IsReviewSupplemental,
                     Attributions = original.Attributions.Where(x => active.ContainsKey(x.OutcomeId)).Select(Clone).ToList()
                 });
             }

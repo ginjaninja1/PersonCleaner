@@ -3,8 +3,10 @@ using Emby.Web.GenericEdit.Elements;
 using Emby.Web.GenericEdit.Elements.DxGrid;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller;
+using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Attributes;
+using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Logging;
 using MediaBrowser.Model.Plugins;
 using MediaBrowser.Model.Plugins.UI.Views;
@@ -237,6 +239,7 @@ namespace PersonCleaner.V2.UI
 
         private static string AttributionVerdict(IdentityCreditOutcome credit)
         {
+            if (credit.IsReviewSupplemental) return "Outside evidence scope";
             var rows = credit.Attributions ?? new List<IdentityCreditAttribution>();
             if (rows.Count == 0) return "No provider assertion";
             if (rows.GroupBy(x => x.Provider, StringComparer.Ordinal).Any(x => x.Select(y => y.OutcomeId).Distinct(StringComparer.Ordinal).Count() > 1)) return "Competing owners within one provider";
@@ -341,6 +344,8 @@ namespace PersonCleaner.V2.UI
         private readonly HashSet<long> originalEmbyIds = new HashSet<long>();
         private IdentityCasePlan plan;
         private PersonBuilderDraft draft;
+        private List<ReviewLiveCredit> liveReviewCredits = new List<ReviewLiveCredit>();
+        private bool populateReviewMedia;
         private string result;
 
         public ReviewCaseDialogView(PluginInfo plugin, IServerApplicationHost host, ILogger logger, IPluginUIView parent, Action rebuildParent, DashboardDecision reviewCase) : base(plugin.Id)
@@ -405,8 +410,30 @@ namespace PersonCleaner.V2.UI
         {
             try
             {
-                plan = LoadPlan();
-                if (resetDraft || draft == null || !string.Equals(draft.ReviewedPlanHash, plan.PlanHash, StringComparison.Ordinal)) draft = PersonBuilderDraft.FromPlan(plan);
+                var loaded = LoadPlan();
+                var resetReviewSnapshot = resetDraft || draft == null || !string.Equals(draft.ReviewedPlanHash, loaded.PlanHash, StringComparison.Ordinal);
+                if (resetReviewSnapshot)
+                {
+                    populateReviewMedia = Plugin.Instance.Configuration.PopulateCaseReviewWithOutOfScopeMediaItems;
+                    liveReviewCredits = new List<ReviewLiveCredit>();
+                    if (populateReviewMedia)
+                    {
+                        try { liveReviewCredits = ReadLiveReviewCredits(loaded.CurrentPeople); }
+                        catch (Exception ex)
+                        {
+                            logger.ErrorException("Unable to populate out-of-scope media for PersonCleaner case " + loaded.CaseId, ex);
+                            result = "The case evidence loaded, but out-of-scope Emby media could not be populated: " + ex.Message;
+                        }
+                    }
+                }
+                plan = loaded;
+                if (populateReviewMedia)
+                {
+                    var supplemental = ReviewCaseCreditInventory.Missing(plan, liveReviewCredits);
+                    plan.Credits.AddRange(supplemental);
+                    logger.Info("PersonCleaner case {0} review inventory: read {1} live Emby relationship(s), added {2} relationship(s) outside evidence scope.", plan.CaseId, liveReviewCredits.Count, supplemental.Count);
+                }
+                if (resetReviewSnapshot) draft = PersonBuilderDraft.FromPlan(plan);
                 Render();
             }
             catch (Exception ex)
@@ -416,6 +443,36 @@ namespace PersonCleaner.V2.UI
                 draft = draft ?? PersonBuilderDraft.FromPlan(plan);
                 result = result ?? "The case could not be reloaded: " + ex.Message; Render();
             }
+        }
+
+        private List<ReviewLiveCredit> ReadLiveReviewCredits(IEnumerable<LocalPerson> currentPeople)
+        {
+            var personIds = currentPeople.Select(x => x.EmbyId).Where(x => x > 0).Distinct().ToArray();
+            if (personIds.Length == 0) return new List<ReviewLiveCredit>();
+            var library = host.Resolve<ILibraryManager>();
+            var media = new Dictionary<long, BaseItem>();
+            for (var offset = 0; offset < personIds.Length; offset += 250)
+            {
+                var rows = library.GetItemList(new InternalItemsQuery { Recursive = true, PersonIds = personIds.Skip(offset).Take(250).ToArray() }, CancellationToken.None);
+                foreach (var item in rows.Where(x => x != null && !(x is Person) && x.InternalId > 0)) media[item.InternalId] = item;
+            }
+            var involved = new HashSet<long>(personIds);
+            var result = new List<ReviewLiveCredit>();
+            var mediaIds = media.Keys.OrderBy(x => x).ToArray();
+            for (var offset = 0; offset < mediaIds.Length; offset += 250)
+            {
+                var rows = library.GetItemPeople(new InternalPeopleQuery { ItemIds = mediaIds.Skip(offset).Take(250).ToArray(), EnableIds = true, EnableProviderIds = true, EnableGroupByName = false });
+                foreach (var row in rows.Where(x => x.Id > 0 && involved.Contains(x.Id)))
+                {
+                    if (!media.TryGetValue(row.ItemId, out var item)) continue;
+                    result.Add(new ReviewLiveCredit
+                    {
+                        PersonEmbyId = row.Id, MediaEmbyId = row.ItemId, MediaType = item.GetType().Name.ToLowerInvariant(), MediaName = item.Name,
+                        Role = row.Type + (string.IsNullOrWhiteSpace(row.Role) ? string.Empty : ": " + row.Role)
+                    });
+                }
+            }
+            return result;
         }
 
         private void Render()

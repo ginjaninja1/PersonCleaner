@@ -86,6 +86,8 @@ internal static class Program
         Run("person builder rejects duplicate provider IDs across final people", PersonBuilderRejectsDuplicateIds);
         Run("person builder requires a destination for an unresolved identity", PersonBuilderRequiresIdentityDestination);
         Run("person builder actions precede terminal grid content", PersonBuilderActionsPrecedeGrid);
+        Run("case review out-of-scope media is enabled by default", CaseReviewMediaEnabledByDefault);
+        Run("case review adds missing live credits and compiles only moved supplements", CaseReviewAddsMissingLiveCredits);
         Run("case planning does not scan 300000 unrelated global Emby people", CasePlanningIgnoresLargeGlobalPopulation);
         Run("large unrelated provider-credit sets remain bounded", LargeProviderCreditSetRemainsBounded);
         Console.WriteLine("Passed " + passed + " entity-resolution tests; failed " + failed + ".");
@@ -1401,6 +1403,40 @@ internal static class Program
         var emptyUi = ReviewCaseDialogUI.Build(plan, emptyDraft, "server", null);
         emptyUi.Rows.Single(x => x.OutcomeId == "new:tvdb2").PersonTarget = "remove";
         True(!ReviewCaseDialogUI.Capture(emptyDraft, emptyUi, false).People.Single(x => x.OutcomeId == "new:tvdb2").Include);
+    }
+
+    private static void CaseReviewMediaEnabledByDefault()
+    {
+        True(new PersonCleaner.Configuration.PluginConfiguration().PopulateCaseReviewWithOutOfScopeMediaItems);
+    }
+
+    private static void CaseReviewAddsMissingLiveCredits()
+    {
+        var plan = BuilderPlan();
+        var rows = new[]
+        {
+            new ReviewLiveCredit { PersonEmbyId = 50, MediaEmbyId = 20, MediaType = MediaTypes.Movie, MediaName = "Disputed title", Role = "Actor: Lead" },
+            new ReviewLiveCredit { PersonEmbyId = 50, MediaEmbyId = 21, MediaType = "episode", MediaName = "Out-of-scope episode", Role = "GuestStar: Witness" },
+            new ReviewLiveCredit { PersonEmbyId = 50, MediaEmbyId = 21, MediaType = "episode", MediaName = "Out-of-scope episode", Role = "GuestStar: Witness" }
+        };
+        var missing = ReviewCaseCreditInventory.Missing(plan, rows);
+        Equal(1, missing.Count);
+        True(missing.Single().IsReviewSupplemental);
+        Equal("existing:50", missing.Single().TargetOutcomeId);
+        plan.Credits.AddRange(missing);
+
+        var draft = PersonBuilderDraft.FromPlan(plan);
+        var unchanged = IdentityCasePersonBuilder.Compile(plan, draft);
+        Equal(1, unchanged.Plan.Credits.Count);
+        True(unchanged.Plan.Credits.All(x => !x.IsReviewSupplemental));
+        var ui = ReviewCaseDialogUI.Build(plan, draft, "server", null);
+        Equal("Outside evidence scope", ui.Rows.SelectMany(x => x.Media).Single(x => x.AssignmentId == missing.Single().AssignmentId).Attribution);
+
+        draft.Credits.Single(x => x.AssignmentId == missing.Single().AssignmentId).TargetOutcomeId = "new:tvdb2";
+        var moved = IdentityCasePersonBuilder.Compile(plan, draft);
+        var supplemental = moved.Plan.Credits.Single(x => x.IsReviewSupplemental);
+        Equal("MOVE", supplemental.Disposition);
+        Equal(21L, supplemental.MediaEmbyId);
     }
 
     private static IdentityCasePlan BuilderPlan()

@@ -76,6 +76,7 @@ namespace PersonCleaner.V2.Domain
         public string Disposition { get; set; }
         public string Rationale { get; set; }
         public bool CorrectionRequired { get; set; }
+        public bool IsReviewSupplemental { get; set; }
         public List<IdentityCreditAttribution> Attributions { get; set; } = new List<IdentityCreditAttribution>();
     }
 

@@ -11,6 +11,7 @@ namespace PersonCleaner.Configuration
         public string SandboxIncludedMediaIds { get; set; } = string.Empty;
         public string SandboxIncludedPersonIds { get; set; } = string.Empty;
         public bool SandboxAutoExpandPersonMedia { get; set; } = true;
+        public bool PopulateCaseReviewWithOutOfScopeMediaItems { get; set; } = true;
 
         public string TvdbApiKey { get; set; } = string.Empty;
         public string TvdbSubscriberPin { get; set; } = string.Empty;
