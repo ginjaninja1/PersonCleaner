@@ -1274,7 +1274,7 @@ WHERE s.case_id=@case AND a.correction_id IS NULL"))
             foreach (var selection in selections)
             {
                 if (string.IsNullOrWhiteSpace(selection?.QuestionId) || string.IsNullOrWhiteSpace(selection.ChoiceId) || selection.Correction == null)
-                    throw new InvalidOperationException("An applied correction rule is missing its question or choice provenance.");
+                    throw new InvalidOperationException("An applied review choice is incomplete.");
                 selection.Correction.CorrectionId = 0;
                 selection.Correction.Note = note;
                 selection.Correction.NormalizeAndValidate();

@@ -83,6 +83,7 @@ internal static class Program
         Run("holistic planner remains bounded across 10000 cases", HolisticPlannerRemainsBounded);
         Run("person builder records only the provider rule selected by a no-op layout", PersonBuilderRecordsNoOpAdjudication);
         Run("person builder selects Tim-like exact provider credit replacement", PersonBuilderSelectsProviderReplacement);
+        Run("person builder accepts provider IDs that directly resolve a media question", PersonBuilderAcceptsIdentityResolvedQuestion);
         Run("person builder creates a suggested owner and selects one provider rule", PersonBuilderCreatesAndMoves);
         Run("person builder does not persist one-time new-person targets", PersonBuilderDoesNotPersistNewTarget);
         Run("person builder warns but permits duplicate provider IDs across final people", PersonBuilderWarnsForDuplicateIds);
@@ -1369,7 +1370,9 @@ internal static class Program
         Equal(CorrectionOperations.Unusable, compilation.Corrections.Single().Operation);
         Equal(ProviderNames.Tvdb, compilation.Corrections.Single().Provider);
         Equal("No Emby changes required", compilation.Plan.ApplyCaption);
-        True(ReviewCaseDialogUI.Build(plan, draft, "server", null).Apply != null);
+        var ui = ReviewCaseDialogUI.Build(plan, draft, "server", null);
+        True(ui.Apply != null);
+        True(!ui.Apply.ConfirmationPrompt.Contains("correction rule"));
     }
 
     private static void PersonBuilderSelectsProviderReplacement()
@@ -1411,6 +1414,29 @@ internal static class Program
         Equal("1", correction.ReplacementValue);
     }
 
+    private static void PersonBuilderAcceptsIdentityResolvedQuestion()
+    {
+        var plan = BuilderPlan();
+        var draft = PersonBuilderDraft.FromPlan(plan);
+        var existing = draft.People.Single(x => x.TargetKind == IdentityTargetKinds.Existing);
+        existing.TvdbId = "2";
+
+        var compilation = IdentityCasePersonBuilder.Compile(plan, draft);
+
+        Equal(1, compilation.Plan.Outcomes.Count);
+        Equal("2", IdentityCasePlanner.PreferredProviderId(compilation.Plan.Outcomes.Single(), ProviderNames.Tvdb));
+        Equal(0, compilation.Corrections.Count);
+        var ui = ReviewCaseDialogUI.Build(plan, draft, "server", null);
+        True(ui.Apply != null);
+        Equal(string.Empty, ui.LastAction.Caption);
+
+        existing.TvdbId = "999";
+        var unresolved = ReviewCaseDialogUI.Build(plan, draft, "server", null);
+        True(unresolved.Apply == null);
+        True(unresolved.LastAction.Caption.Contains("selected layout does not fully resolve"));
+        True(!unresolved.LastAction.Caption.Contains("correction rule"));
+    }
+
     private static void PersonBuilderCreatesAndMoves()
     {
         var plan = BuilderPlan();
@@ -1420,7 +1446,8 @@ internal static class Program
         var compilation = IdentityCasePersonBuilder.Compile(plan, draft);
 
         Equal(2, compilation.EmbyChanges);
-        Equal(2, compilation.Plan.Outcomes.Count);
+        Equal(1, compilation.Plan.Outcomes.Count);
+        Equal(IdentityTargetKinds.New, compilation.Plan.Outcomes.Single().TargetKind);
         Equal("MOVE", compilation.Plan.Credits.Single().Disposition);
         True(compilation.Plan.ApplyCaption.Contains("create 1 person") && compilation.Plan.ApplyCaption.Contains("move 1 credit"));
         Equal(1, compilation.Corrections.Count);
@@ -1467,7 +1494,29 @@ internal static class Program
         Equal("Second Alex — Emby 51", ReviewCaseDialogUI.ActionPersonLabel(plan, draft, draft.People.Single(x => x.OutcomeId == "existing:51")));
 
         draft.Credits.Single(x => x.AssignmentId == "credit-2").TargetOutcomeId = "existing:50";
+        draft.People.Single(x => x.OutcomeId == "existing:51").TmdbId = "1";
+        plan.Questions.Add(new IdentityQuestion
+        {
+            QuestionId = "question-empty-person",
+            Kind = CorrectionKinds.PersonExternalId,
+            OutcomeId = "existing:51",
+            Narrative = "Which provider ID belongs to the second person?",
+            Choices = new List<IdentityQuestionChoice>
+            {
+                new IdentityQuestionChoice
+                {
+                    ChoiceId = "question-empty-person:other",
+                    Correction = new ProviderCorrection { Kind = CorrectionKinds.PersonExternalId, Operation = CorrectionOperations.Replace, FieldName = ProviderNames.Tmdb, ReplacementValue = "999", Enabled = true }
+                }
+            }
+        });
         Equal(0, IdentityCasePersonBuilder.DuplicateProviderIdKeys(draft).Count);
+        var compiled = IdentityCasePersonBuilder.Compile(plan, draft);
+        Equal(1, compiled.Plan.Outcomes.Count);
+        Equal("existing:50", compiled.Plan.Outcomes.Single().OutcomeId);
+        Equal(1, IdentityCasePersonBuilder.MediaBearingOutcomes(compiled.Plan).Count);
+        Equal(1, compiled.EmbyChanges);
+        True(compiled.CorrectionSelections.All(x => x.QuestionId != "question-empty-person"));
         var emptied = ReviewCaseDialogUI.Build(plan, draft, "server", null);
         Equal("Persons without media associations will be removed by Emby", emptied.Rows.Single(x => x.OutcomeId == "existing:51").Status);
         True(emptied.Rows.Single(x => x.IsInformation).Media.All(x => !x.Media.Contains("assigned to multiple active people")));

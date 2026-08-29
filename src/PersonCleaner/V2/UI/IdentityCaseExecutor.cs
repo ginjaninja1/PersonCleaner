@@ -23,7 +23,7 @@ namespace PersonCleaner.V2.UI
             var liveMediaPeople = plan.Credits.Select(x => x.MediaEmbyId).Distinct().ToDictionary(x => x, ReadPeople);
             Preflight(plan, liveMediaPeople);
             var receipt = new IdentityCaseApplyReceipt();
-            foreach (var outcome in plan.Outcomes.Where(x => x.TargetEmbyId.HasValue)) receipt.OutcomeEmbyIds[outcome.OutcomeId] = outcome.TargetEmbyId.Value;
+            foreach (var outcome in IdentityCasePersonBuilder.MediaBearingOutcomes(plan).Where(x => x.TargetEmbyId.HasValue)) receipt.OutcomeEmbyIds[outcome.OutcomeId] = outcome.TargetEmbyId.Value;
             var personSnapshots = SnapshotPeople(plan.CurrentPeople.Select(x => x.EmbyId));
             var mediaSnapshots = plan.Credits.Where(x => x.Disposition == "MOVE").Select(x => x.MediaEmbyId).Distinct().ToDictionary(x => x, x => liveMediaPeople[x].Select(Clone).ToList());
             var written = HasMutations(plan);
@@ -64,23 +64,30 @@ namespace PersonCleaner.V2.UI
 
         internal static bool HasMutations(IdentityCasePlan plan)
         {
-            return IdentityCasePlanner.HasMutations(plan);
+            if (plan == null) return false;
+            var outcomes = IdentityCasePersonBuilder.MediaBearingOutcomes(plan);
+            if (plan.Credits.Any(x => x.Disposition == "MOVE") || outcomes.Any(x => x.TargetKind == IdentityTargetKinds.New)) return true;
+            foreach (var outcome in outcomes.Where(x => x.TargetEmbyId.HasValue))
+            {
+                var snapshot = plan.CurrentPeople.FirstOrDefault(x => x.EmbyId == outcome.TargetEmbyId.Value);
+                if (snapshot != null && (!Same(LocalProviderId(snapshot, ProviderNames.Tmdb), DesiredProviderId(outcome, ProviderNames.Tmdb)) || !Same(LocalProviderId(snapshot, ProviderNames.Tvdb), DesiredProviderId(outcome, ProviderNames.Tvdb)) || !Same(LocalProviderId(snapshot, ProviderNames.Imdb), DesiredProviderId(outcome, ProviderNames.Imdb)))) return true;
+            }
+            return false;
         }
 
         private void Preflight(IdentityCasePlan plan, IReadOnlyDictionary<long, List<PersonInfo>> liveMediaPeople)
         {
+            var finalOutcomes = IdentityCasePersonBuilder.MediaBearingOutcomes(plan);
             if (plan.State != IdentityPlanStates.Complete) throw new InvalidOperationException("The reviewed case is not complete.");
-            if (plan.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.New && (!x.ProviderIds.Any(y => y.Source == "native") || !plan.Credits.Any(c => c.TargetOutcomeId == x.OutcomeId))))
+            if (finalOutcomes.Any(x => x.TargetKind == IdentityTargetKinds.New && !x.ProviderIds.Any(y => y.Source == "native")))
                 throw new InvalidOperationException("A proposed new person lacks a provider-native ID or assigned media credit.");
-            if (plan.Outcomes.SelectMany(x => DesiredProviderIds(x).Select(y => new { Outcome = x, Id = y })).GroupBy(x => x.Id.Key + ":" + x.Id.Value, StringComparer.OrdinalIgnoreCase).Any(x => x.Select(y => y.Outcome.OutcomeId).Distinct().Count() > 1))
-                throw new InvalidOperationException("The plan assigns one provider person ID to more than one final identity.");
             foreach (var snapshot in plan.CurrentPeople)
             {
                 var live = library.GetItemById(snapshot.EmbyId) as Person ?? throw new InvalidOperationException("Emby person " + snapshot.EmbyId + " no longer exists.");
                 if (!string.Equals(live.Name ?? string.Empty, snapshot.Name ?? string.Empty, StringComparison.Ordinal) || !Same(ProviderId(live, ProviderNames.Tmdb), snapshot.TmdbId) || !Same(ProviderId(live, ProviderNames.Tvdb), snapshot.TvdbId) || !Same(ProviderId(live, ProviderNames.Imdb), snapshot.ImdbId))
                     throw new InvalidOperationException("Emby person " + snapshot.EmbyId + " changed after this plan was calculated. Rebuild the evidence before applying.");
             }
-            foreach (var outcome in plan.Outcomes.Where(x => x.TargetEmbyId.HasValue))
+            foreach (var outcome in finalOutcomes.Where(x => x.TargetEmbyId.HasValue))
                 if (!(library.GetItemById(outcome.TargetEmbyId.Value) is Person)) throw new InvalidOperationException("Target Emby person " + outcome.TargetEmbyId.Value + " no longer exists.");
             foreach (var mediaGroup in plan.Credits.GroupBy(x => x.MediaEmbyId))
             {
@@ -91,14 +98,14 @@ namespace PersonCleaner.V2.UI
                         throw new InvalidOperationException("The reviewed credit '" + credit.Role + "' on Emby media " + credit.MediaEmbyId + " changed after calculation.");
             }
             var currentIds = new HashSet<long>(plan.CurrentPeople.Select(x => x.EmbyId));
-            var requestedProviderIds = plan.Outcomes.SelectMany(DesiredProviderIds)
+            var requestedProviderIds = finalOutcomes.SelectMany(DesiredProviderIds)
                 .Where(x => !string.IsNullOrWhiteSpace(x.Value))
                 .Select(x => new KeyValuePair<string, string>(ProviderName(x.Key), x.Value))
                 .Distinct(ProviderIdPairComparer.Instance).ToList();
             var global = requestedProviderIds.Count == 0
                 ? new List<Person>()
                 : library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { typeof(Person).Name }, Recursive = true, AnyProviderIdEquals = requestedProviderIds }, CancellationToken.None).OfType<Person>().ToList();
-            foreach (var outcome in plan.Outcomes)
+            foreach (var outcome in finalOutcomes)
             foreach (var id in DesiredProviderIds(outcome))
             {
                 var owner = global.FirstOrDefault(x => !currentIds.Contains(x.InternalId) && Same(ProviderId(x, id.Key), id.Value));
@@ -109,7 +116,8 @@ namespace PersonCleaner.V2.UI
 
         private bool ApplyExistingProviderIds(IdentityCasePlan plan, IdentityCaseApplyReceipt receipt)
         {
-            var desired = plan.CurrentPeople.ToDictionary(x => x.EmbyId, x => plan.Outcomes.FirstOrDefault(o => o.TargetEmbyId == x.EmbyId));
+            var finalOutcomes = IdentityCasePersonBuilder.MediaBearingOutcomes(plan);
+            var desired = finalOutcomes.Where(x => x.TargetEmbyId.HasValue).ToDictionary(x => x.TargetEmbyId.Value);
             var live = plan.CurrentPeople.ToDictionary(x => x.EmbyId, x => (Person)library.GetItemById(x.EmbyId));
             var changed = false;
 
@@ -117,7 +125,7 @@ namespace PersonCleaner.V2.UI
             // an existing person to a new outcome). Ordinary replacement does not
             // need a separate remove write before the final value is stored.
             var releases = new Dictionary<long, HashSet<string>>();
-            foreach (var outcome in plan.Outcomes)
+            foreach (var outcome in finalOutcomes)
             foreach (var id in DesiredProviderIds(outcome))
             foreach (var owner in plan.CurrentPeople.Where(x => Same(LocalProviderId(x, id.Key), id.Value) && (!outcome.TargetEmbyId.HasValue || x.EmbyId != outcome.TargetEmbyId.Value)))
             {
@@ -133,7 +141,7 @@ namespace PersonCleaner.V2.UI
 
             foreach (var snapshot in plan.CurrentPeople)
             {
-                var outcome = desired[snapshot.EmbyId];
+                if (!desired.TryGetValue(snapshot.EmbyId, out var outcome)) continue;
                 var person = live[snapshot.EmbyId]; var personChanged = false;
                 foreach (var provider in new[] { ProviderNames.Tmdb, ProviderNames.Tvdb, ProviderNames.Imdb })
                 {
@@ -210,7 +218,7 @@ namespace PersonCleaner.V2.UI
 
         private void ApplyNewProviderIds(IdentityCasePlan plan, IdentityCaseApplyReceipt receipt)
         {
-            foreach (var outcome in plan.Outcomes.Where(x => x.TargetKind == IdentityTargetKinds.New))
+            foreach (var outcome in IdentityCasePersonBuilder.MediaBearingOutcomes(plan).Where(x => x.TargetKind == IdentityTargetKinds.New))
             {
                 var person = library.GetItemById(receipt.OutcomeEmbyIds[outcome.OutcomeId]) as Person ?? throw new InvalidOperationException("The new Emby person for " + outcome.DisplayName + " could not be reloaded.");
                 foreach (var provider in new[] { ProviderNames.Tmdb, ProviderNames.Tvdb, ProviderNames.Imdb }) SetProviderId(person, provider, DesiredProviderId(outcome, provider));

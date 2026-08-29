@@ -66,11 +66,10 @@ namespace PersonCleaner.V2.UI
                 if (plan.State != IdentityPlanStates.Applied && plan.State != IdentityPlanStates.Blocked && preview.State == IdentityPlanStates.Complete)
                 {
                     var caption = IdentityCaseExecutor.HasMutations(preview) ? preview.ApplyCaption : "Apply: confirm layout";
-                    var rules = compilation.Corrections.Count;
                     ui.Apply = new ButtonItem(caption)
                     {
                         CommandId = ReviewCaseCommands.Apply,
-                        ConfirmationPrompt = "Apply exactly this person-ID and media-credit layout after re-reading live Emby? " + rules + " minimum correction rule(s) will be recorded only after the apply commits." + DuplicateConfirmation(draft, duplicateIdKeys)
+                        ConfirmationPrompt = "Apply exactly this person-ID and media-credit layout to Emby after re-reading live Emby?" + DuplicateConfirmation(draft, duplicateIdKeys)
                     };
                 }
             }
@@ -536,8 +535,10 @@ namespace PersonCleaner.V2.UI
             }
             catch (Exception ex)
             {
+                var editing = commandId == ReviewCaseCommands.IdentityGrid || commandId == ReviewCaseCommands.MediaGrid;
                 result = !applyCommitted && !string.IsNullOrWhiteSpace(pendingAction?.Failure)
                     ? pendingAction.Failure
+                    : editing ? "Layout needs attention: " + ex.Message
                     : applyCommitted ? "Apply committed, but the follow-up workflow failed: " + ex.Message : ex.Message.IndexOf("rollback also failed", StringComparison.OrdinalIgnoreCase) >= 0 ? "Apply failed and Emby may contain partial changes: " + ex.Message : "Nothing was written: " + ex.Message;
                 logger.ErrorException("Unable to process PersonCleaner person-builder case " + caseId, ex);
                 Render(); Refresh();

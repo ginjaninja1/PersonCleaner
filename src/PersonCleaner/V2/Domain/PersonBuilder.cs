@@ -116,12 +116,14 @@ namespace PersonCleaner.V2.Domain
             var referenced = new HashSet<string>(credits.Values.Select(x => x.TargetOutcomeId), StringComparer.Ordinal);
             var excludedTarget = people.Values.FirstOrDefault(x => !x.Include && referenced.Contains(x.OutcomeId));
             if (excludedTarget != null) throw new InvalidOperationException("Move every media credit away from '" + excludedTarget.DisplayName + "' before removing that person row.");
-            var activeIds = new HashSet<string>(people.Values.Where(x => x.Include && (x.TargetKind != IdentityTargetKinds.New || referenced.Contains(x.OutcomeId))).Select(x => x.OutcomeId), StringComparer.Ordinal);
+            // The executable plan contains final Emby identities, not every row
+            // displayed by the builder. An existing row with no assigned media is
+            // retained in the draft for operator context, but Emby will remove that
+            // person after its last credit moves away.
+            var activeIds = new HashSet<string>(people.Values.Where(x => x.Include && referenced.Contains(x.OutcomeId)).Select(x => x.OutcomeId), StringComparer.Ordinal);
             var existingTargets = people.Values.Where(x => activeIds.Contains(x.OutcomeId) && x.TargetKind == IdentityTargetKinds.Existing).ToList();
             var duplicateTarget = existingTargets.GroupBy(x => x.TargetEmbyId.Value).FirstOrDefault(x => x.Count() > 1);
             if (duplicateTarget != null) throw new InvalidOperationException("Emby person " + duplicateTarget.Key + " can only be represented by one final person row.");
-            var missingExisting = source.CurrentPeople.FirstOrDefault(x => existingTargets.All(y => y.TargetEmbyId != x.EmbyId));
-            if (missingExisting != null) throw new InvalidOperationException("Choose one final person row to maintain Emby person " + missingExisting.EmbyId + ".");
             foreach (var person in people.Values.Where(x => referenced.Contains(x.OutcomeId)))
                 if (person.TmdbId.Length == 0 && person.TvdbId.Length == 0)
                     throw new InvalidOperationException("Person '" + person.DisplayName + "' has assigned media and needs a TMDB or TVDB person ID.");
@@ -178,22 +180,27 @@ namespace PersonCleaner.V2.Domain
             foreach (var question in source.Questions.OrderBy(x => x.QuestionId, StringComparer.Ordinal))
             {
                 IdentityQuestionChoice selected = null;
+                IdentityOutcome selectedOutcome = null;
                 if (!string.IsNullOrWhiteSpace(question.AssignmentId) && credits.TryGetValue(question.AssignmentId, out var credit))
                 {
-                    var outcome = result.Outcomes.FirstOrDefault(x => x.OutcomeId == credit.TargetOutcomeId);
-                    selected = question.Choices.Where(x => CreditChoiceTargets(x?.Correction, outcome, credit.TargetOutcomeId))
+                    selectedOutcome = result.Outcomes.FirstOrDefault(x => x.OutcomeId == credit.TargetOutcomeId);
+                    selected = question.Choices.Where(x => CreditChoiceTargets(x?.Correction, selectedOutcome, credit.TargetOutcomeId))
                         .OrderBy(x => x.Correction.Kind == CorrectionKinds.MediaCredit ? 0 : 1).ThenBy(x => x.ChoiceId, StringComparer.Ordinal).FirstOrDefault();
                 }
                 else if (!string.IsNullOrWhiteSpace(question.OutcomeId) && people.TryGetValue(question.OutcomeId, out var person))
                 {
+                    // Questions belonging only to a person with no final media do
+                    // not describe a correction that will be written to Emby.
+                    if (!result.Outcomes.Any(x => x.OutcomeId == question.OutcomeId)) continue;
                     var original = source.Outcomes.FirstOrDefault(x => x.OutcomeId == question.OutcomeId);
                     selected = question.Choices.Where(x => IdentityChoiceMatches(x?.Correction, original, person)).OrderBy(x => x.ChoiceId, StringComparer.Ordinal).FirstOrDefault();
                 }
 
                 if (selected?.Correction == null)
                 {
+                    if (QuestionResolvedBySelectedIdentity(source, question, selectedOutcome)) continue;
                     if (question.Choices.Count > 0)
-                        throw new InvalidOperationException("The selected layout does not identify one correction rule for: " + question.Narrative);
+                        throw new InvalidOperationException("The selected layout does not fully resolve: " + question.Narrative + " Review that media destination and the provider IDs on its person.");
                     continue;
                 }
                 yield return new PersonBuilderCorrectionSelection
@@ -203,6 +210,16 @@ namespace PersonCleaner.V2.Domain
                     Correction = Clone(selected.Correction)
                 };
             }
+        }
+
+        private static bool QuestionResolvedBySelectedIdentity(IdentityCasePlan source, IdentityQuestion question, IdentityOutcome selectedOutcome)
+        {
+            if (source == null || question == null || selectedOutcome == null || string.IsNullOrWhiteSpace(question.AssignmentId)) return false;
+            var credit = source.Credits.FirstOrDefault(x => x.AssignmentId == question.AssignmentId);
+            var assertions = (credit?.Attributions ?? new List<IdentityCreditAttribution>())
+                .Where(x => !string.IsNullOrWhiteSpace(x.Provider) && !string.IsNullOrWhiteSpace(x.ProviderPersonId))
+                .GroupBy(x => x.Provider + ":" + x.ProviderPersonId, StringComparer.OrdinalIgnoreCase).Select(x => x.First()).ToList();
+            return assertions.Count > 0 && assertions.All(assertion => selectedOutcome.ProviderIds.Any(x => x.Source == "native" && Same(x.Provider, assertion.Provider) && Same(x.ProviderId, assertion.ProviderPersonId)));
         }
 
         private static bool CreditChoiceTargets(ProviderCorrection correction, IdentityOutcome outcome, string outcomeId)
@@ -269,10 +286,11 @@ namespace PersonCleaner.V2.Domain
 
         private static int CompleteProjection(IdentityCasePlan plan)
         {
-            var creates = plan.Outcomes.Count(x => x.TargetKind == IdentityTargetKinds.New);
+            var finalOutcomes = MediaBearingOutcomes(plan);
+            var creates = finalOutcomes.Count(x => x.TargetKind == IdentityTargetKinds.New);
             var moves = plan.Credits.Count(x => x.Disposition == "MOVE");
             var changes = 0;
-            foreach (var outcome in plan.Outcomes.Where(x => x.TargetEmbyId.HasValue))
+            foreach (var outcome in finalOutcomes.Where(x => x.TargetEmbyId.HasValue))
             {
                 var current = plan.CurrentPeople.FirstOrDefault(x => x.EmbyId == outcome.TargetEmbyId.Value);
                 if (current == null) continue;
@@ -285,8 +303,15 @@ namespace PersonCleaner.V2.Domain
             if (moves > 0) parts.Add("move " + moves + " credit" + (moves == 1 ? string.Empty : "s"));
             if (changes > 0) parts.Add("change " + changes + " ID" + (changes == 1 ? string.Empty : "s"));
             plan.ApplyCaption = parts.Count == 0 ? "No Emby changes required" : "Apply: " + string.Join(", ", parts);
-            plan.Summary = "Person builder result: maintain " + plan.Outcomes.Count(x => x.TargetKind == IdentityTargetKinds.Existing) + " existing person(s), create " + creates + " person(s), move " + moves + " media credit(s), and change " + changes + " provider ID(s).";
+            plan.Summary = "Person builder result: maintain " + finalOutcomes.Count(x => x.TargetKind == IdentityTargetKinds.Existing) + " existing person(s), create " + creates + " person(s), move " + moves + " media credit(s), and change " + changes + " provider ID(s).";
             return creates + moves + changes;
+        }
+
+        public static List<IdentityOutcome> MediaBearingOutcomes(IdentityCasePlan plan)
+        {
+            if (plan == null) return new List<IdentityOutcome>();
+            var outcomeIds = new HashSet<string>((plan.Credits ?? new List<IdentityCreditOutcome>()).Select(x => x.TargetOutcomeId).Where(x => !string.IsNullOrWhiteSpace(x)), StringComparer.Ordinal);
+            return (plan.Outcomes ?? new List<IdentityOutcome>()).Where(x => outcomeIds.Contains(x.OutcomeId)).ToList();
         }
 
         private static List<IdentityProviderId> DesiredProviderIds(IdentityOutcome original, PersonBuilderIdentity desired)
