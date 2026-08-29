@@ -39,12 +39,13 @@ namespace PersonCleaner.V2.UI
             draft = draft ?? PersonBuilderDraft.FromPlan(plan);
             var desiredPeople = draft.People.ToDictionary(x => x.OutcomeId, StringComparer.Ordinal);
             var desiredCredits = draft.Credits.ToDictionary(x => x.AssignmentId, StringComparer.Ordinal);
+            var duplicateIdKeys = IdentityCasePersonBuilder.DuplicateProviderIdKeys(draft);
             var personOutcomes = plan.Outcomes.Where(x => desiredPeople[x.OutcomeId].Include).OrderBy(x => x.SortOrder).ThenBy(x => x.OutcomeId, StringComparer.Ordinal).ToList();
             var newOrdinals = personOutcomes.Where(x => desiredPeople[x.OutcomeId].TargetKind != IdentityTargetKinds.Existing)
                 .Select((x, index) => new { x.OutcomeId, Ordinal = index + 1 }).ToDictionary(x => x.OutcomeId, x => x.Ordinal, StringComparer.Ordinal);
             var rows = personOutcomes
-                .Select(x => BuildIdentity(plan, x, desiredPeople[x.OutcomeId], desiredCredits, serverId, NewOrdinal(newOrdinals, x.OutcomeId)))
-                .Concat(InformationRows(plan, draft, result)).ToArray();
+                .Select(x => BuildIdentity(plan, x, desiredPeople[x.OutcomeId], desiredCredits, duplicateIdKeys, serverId, NewOrdinal(newOrdinals, x.OutcomeId)))
+                .Concat(InformationRows(plan, draft, duplicateIdKeys, result)).ToArray();
             var targets = personOutcomes.Select(x => new ReviewTargetChoice { Value = x.OutcomeId, Caption = TargetCaption(desiredPeople[x.OutcomeId], NewOrdinal(newOrdinals, x.OutcomeId)) }).ToArray();
             var personTargets = plan.CurrentPeople.OrderBy(x => x.EmbyId).Select(x => new ReviewTargetChoice { Value = "existing:" + x.EmbyId, Caption = "Maintain " + x.EmbyId })
                 .Concat(new[] { new ReviewTargetChoice { Value = "new", Caption = "Create" }, new ReviewTargetChoice { Value = "remove", Caption = "Remove" } }).ToArray();
@@ -69,11 +70,14 @@ namespace PersonCleaner.V2.UI
                     ui.Apply = new ButtonItem(caption)
                     {
                         CommandId = ReviewCaseCommands.Apply,
-                        ConfirmationPrompt = "Apply exactly this person-ID and media-credit layout after re-reading live Emby? " + rules + " minimum correction rule(s) will be recorded only after the apply commits."
+                        ConfirmationPrompt = "Apply exactly this person-ID and media-credit layout after re-reading live Emby? " + rules + " minimum correction rule(s) will be recorded only after the apply commits." + DuplicateConfirmation(draft, duplicateIdKeys)
                     };
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                ui.LastAction = new ButtonItem(string.IsNullOrWhiteSpace(result) ? "Apply unavailable: " + ex.Message : result) { IsEnabled = false };
+            }
             return ui;
         }
 
@@ -217,11 +221,16 @@ namespace PersonCleaner.V2.UI
             }
         }
 
-        private static ReviewIdentityRow BuildIdentity(IdentityCasePlan plan, IdentityOutcome outcome, PersonBuilderIdentity desired, IDictionary<string, PersonBuilderCredit> credits, string serverId, int newOrdinal)
+        private static ReviewIdentityRow BuildIdentity(IdentityCasePlan plan, IdentityOutcome outcome, PersonBuilderIdentity desired, IDictionary<string, PersonBuilderCredit> credits, IReadOnlyCollection<string> duplicateIdKeys, string serverId, int newOrdinal)
         {
             LocalPerson current = null;
             if (desired.TargetKind == IdentityTargetKinds.Existing && desired.TargetEmbyId.HasValue) current = plan.CurrentPeople.FirstOrDefault(x => x.EmbyId == desired.TargetEmbyId.Value);
             if (current == null) current = outcome.SourceEmbyIds.Select(id => plan.CurrentPeople.FirstOrDefault(x => x.EmbyId == id)).FirstOrDefault(x => x != null);
+            var hasMedia = credits.Values.Any(x => x.TargetOutcomeId == outcome.OutcomeId);
+            var status = desired.TargetKind == IdentityTargetKinds.Existing
+                ? hasMedia ? "Maintain existing person" : "Persons without media associations will be removed by Emby"
+                : desired.TargetKind == IdentityTargetKinds.New ? hasMedia ? "Create suggested person" : outcome.Outcome == "Operator-added Emby person" ? "Allocate IDs and associate media" : "Do not create — no assigned media" : "Choose maintain or create";
+            var duplicateStatus = DuplicateStatus(desired, duplicateIdKeys);
             var row = new ReviewIdentityRow
             {
                 RowId = outcome.OutcomeId, OutcomeId = outcome.OutcomeId,
@@ -233,7 +242,7 @@ namespace PersonCleaner.V2.UI
                 TmdbId = desired.TmdbId, TvdbId = desired.TvdbId, ImdbId = desired.ImdbId,
                 PlannerNotes = desired.PlannerNotes ?? string.Empty,
                 ChangeSummary = Changes(desired.TargetKind == IdentityTargetKinds.New ? null : current, desired),
-                Status = desired.TargetKind == IdentityTargetKinds.Existing ? "Maintain existing person" : desired.TargetKind == IdentityTargetKinds.New ? credits.Values.Any(x => x.TargetOutcomeId == outcome.OutcomeId) ? "Create suggested person" : outcome.Outcome == "Operator-added Emby person" ? "Allocate IDs and associate media" : "Do not create — no assigned media" : "Choose maintain or create"
+                Status = string.IsNullOrWhiteSpace(duplicateStatus) ? status : status + " — " + duplicateStatus
             };
             row.Media = plan.Credits.Where(x => credits[x.AssignmentId].TargetOutcomeId == outcome.OutcomeId)
                 .OrderBy(x => x.MediaName, StringComparer.Ordinal).ThenBy(x => x.MediaEmbyId).ThenBy(x => x.Role, StringComparer.Ordinal)
@@ -291,8 +300,11 @@ namespace PersonCleaner.V2.UI
             if (credit.IsReviewSupplemental) return "Outside evidence scope";
             var rows = credit.Attributions ?? new List<IdentityCreditAttribution>();
             if (rows.Count == 0) return "No provider assertion";
-            if (rows.GroupBy(x => x.Provider, StringComparer.Ordinal).Any(x => x.Select(y => y.OutcomeId).Distinct(StringComparer.Ordinal).Count() > 1)) return "Competing owners within one provider";
-            if (rows.Select(x => x.OutcomeId).Distinct(StringComparer.Ordinal).Count() > 1) return "Providers disagree";
+            var owners = string.Join(" / ", rows.GroupBy(x => x.Provider, StringComparer.Ordinal)
+                .OrderBy(x => x.Key, StringComparer.Ordinal)
+                .Select(x => x.Key.ToUpperInvariant() + " " + string.Join(" / ", x.Select(y => y.ProviderPersonId).Where(y => !string.IsNullOrWhiteSpace(y)).Distinct(StringComparer.Ordinal).OrderBy(y => y, StringComparer.Ordinal))));
+            if (rows.GroupBy(x => x.Provider, StringComparer.Ordinal).Any(x => x.Select(y => y.OutcomeId).Distinct(StringComparer.Ordinal).Count() > 1)) return "Competing owners: " + owners;
+            if (rows.Select(x => x.OutcomeId).Distinct(StringComparer.Ordinal).Count() > 1) return "Different owners: " + owners;
             return rows.Select(x => x.Provider).Distinct(StringComparer.Ordinal).Count() > 1 ? "Providers agree" : "One-provider support";
         }
 
@@ -310,8 +322,10 @@ namespace PersonCleaner.V2.UI
             changes.Add(string.IsNullOrWhiteSpace(after) ? "Remove " + provider + " " + before : string.IsNullOrWhiteSpace(before) ? "Add " + provider + " " + after : provider + " " + before + " → " + after);
         }
 
-        private static IEnumerable<ReviewIdentityRow> InformationRows(IdentityCasePlan plan, PersonBuilderDraft draft, string result)
+        private static IEnumerable<ReviewIdentityRow> InformationRows(IdentityCasePlan plan, PersonBuilderDraft draft, IReadOnlyCollection<string> duplicateIdKeys, string result)
         {
+            var warnings = (plan.Warning ?? string.Empty).Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
+                .Concat(DuplicateWarnings(draft, duplicateIdKeys)).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.Ordinal).ToList();
             var ids = plan.Outcomes.SelectMany(x => x.ProviderIds.Select(y => new { y.Provider, Id = y.ProviderId }))
                 .Concat(draft.People.Where(x => x.Include).SelectMany(x => new[]
                 {
@@ -321,17 +335,86 @@ namespace PersonCleaner.V2.UI
                 }))
                 .Where(x => !string.IsNullOrWhiteSpace(x.Id)).GroupBy(x => x.Provider + ":" + x.Id, StringComparer.OrdinalIgnoreCase).Select(x => x.First())
                 .OrderBy(x => x.Provider, StringComparer.Ordinal).ThenBy(x => x.Id, StringComparer.Ordinal).ToList();
-            if (ids.Count == 0) yield break;
+            if (ids.Count == 0 && warnings.Count == 0) yield break;
             yield return new ReviewIdentityRow
             {
                 RowId = "information", IsInformation = true, Name = "Information",
-                Status = "Participating provider IDs",
-                Media = ids.Select(x => new ReviewMediaRow
+                Status = warnings.Count == 0 ? "Participating provider IDs" : "Review warnings and participating provider IDs",
+                Media = warnings.Select((x, index) => new ReviewMediaRow
+                {
+                    RowId = "information:warning:" + index,
+                    Media = "<strong>Review warning:</strong> " + WebUtility.HtmlEncode(x)
+                }).Concat(ids.Select(x => new ReviewMediaRow
                 {
                     RowId = "information:id:" + x.Provider + ":" + x.Id,
                     Media = WebUtility.HtmlEncode(x.Provider.ToUpperInvariant()) + " — " + CaseLinks.Person(x.Provider, x.Id)
-                }).Concat(new[] { new ReviewMediaRow { RowId = "information:spacer", Media = "spacer" } }).ToArray()
+                })).Concat(new[] { new ReviewMediaRow { RowId = "information:spacer", Media = "spacer" } }).ToArray()
             };
+        }
+
+        private static string DuplicateStatus(PersonBuilderIdentity person, IEnumerable<string> duplicateIdKeys)
+        {
+            var ids = duplicateIdKeys.Where(x => HasProviderId(person, x)).Select(FriendlyProviderKey).ToList();
+            return ids.Count == 0 ? null : "duplicate " + string.Join(", ", ids) + "; remove from all but one person";
+        }
+
+        private static string DuplicateConfirmation(PersonBuilderDraft draft, IReadOnlyCollection<string> duplicateIdKeys)
+        {
+            var warnings = DuplicateWarnings(draft, duplicateIdKeys);
+            return warnings.Count == 0 ? string.Empty : " Warning: " + string.Join(" ", warnings) + " Apply anyway?";
+        }
+
+        private static List<string> DuplicateWarnings(PersonBuilderDraft draft, IEnumerable<string> duplicateIdKeys)
+        {
+            var people = ActivePeople(draft).ToList();
+            var result = new List<string>();
+            foreach (var key in duplicateIdKeys)
+            {
+                var owners = people.Where(x => HasProviderId(x, key)).Select(DraftPersonLabel).Distinct(StringComparer.Ordinal).ToList();
+                result.Add(FriendlyProviderKey(key) + " is assigned to multiple active people: " + string.Join("; ", owners) + ". Remove it from all but one person unless this warned layout is intentional.");
+            }
+            return result;
+        }
+
+        private static IEnumerable<PersonBuilderIdentity> ActivePeople(PersonBuilderDraft draft)
+        {
+            var referenced = new HashSet<string>((draft.Credits ?? new List<PersonBuilderCredit>()).Select(x => x.TargetOutcomeId).Where(x => !string.IsNullOrWhiteSpace(x)), StringComparer.Ordinal);
+            return (draft.People ?? new List<PersonBuilderIdentity>()).Where(x => x.Include && referenced.Contains(x.OutcomeId));
+        }
+
+        private static bool HasProviderId(PersonBuilderIdentity person, string providerKey)
+        {
+            var separator = (providerKey ?? string.Empty).IndexOf(':');
+            if (separator <= 0) return false;
+            var provider = providerKey.Substring(0, separator);
+            var id = providerKey.Substring(separator + 1);
+            var current = provider == ProviderNames.Tmdb ? person.TmdbId : provider == ProviderNames.Tvdb ? person.TvdbId : provider == ProviderNames.Imdb ? person.ImdbId : null;
+            return string.Equals((current ?? string.Empty).Trim(), id, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string FriendlyProviderKey(string providerKey)
+        {
+            var separator = (providerKey ?? string.Empty).IndexOf(':');
+            return separator <= 0 ? providerKey : providerKey.Substring(0, separator).ToUpperInvariant() + " " + providerKey.Substring(separator + 1);
+        }
+
+        private static string DraftPersonLabel(PersonBuilderIdentity person)
+        {
+            var name = string.IsNullOrWhiteSpace(person.DisplayName) ? "Unnamed person" : person.DisplayName;
+            return person.TargetKind == IdentityTargetKinds.Existing && person.TargetEmbyId.HasValue ? name + " (Emby " + person.TargetEmbyId.Value + ")" : "New — " + name;
+        }
+
+        public static string ActionPersonLabel(IdentityCasePlan plan, PersonBuilderDraft draft, PersonBuilderIdentity person)
+        {
+            if (person == null) return "person";
+            if (person.TargetKind == IdentityTargetKinds.Existing)
+            {
+                var name = plan.CurrentPeople.FirstOrDefault(x => x.EmbyId == person.TargetEmbyId)?.Name ?? person.DisplayName ?? "Emby person";
+                return person.TargetEmbyId.HasValue ? name + " — Emby " + person.TargetEmbyId.Value : name;
+            }
+            var activeNew = draft.People.Where(x => x.Include && x.TargetKind != IdentityTargetKinds.Existing).ToList();
+            var ordinal = activeNew.FindIndex(x => x.OutcomeId == person.OutcomeId) + 1;
+            return ordinal > 0 ? "New " + ordinal : person.DisplayName ?? "new person";
         }
 
         private static int NewOrdinal(IDictionary<string, int> ordinals, string outcomeId) => ordinals.TryGetValue(outcomeId, out var ordinal) ? ordinal : 0;
@@ -621,12 +704,7 @@ namespace PersonCleaner.V2.UI
 
         private string PersonLabel(PersonBuilderIdentity person)
         {
-            if (person == null) return "person";
-            if (person.TargetKind == IdentityTargetKinds.Existing)
-                return plan.CurrentPeople.FirstOrDefault(x => x.EmbyId == person.TargetEmbyId)?.Name ?? person.DisplayName ?? "Emby person";
-            var activeNew = draft.People.Where(x => x.Include && x.TargetKind != IdentityTargetKinds.Existing).ToList();
-            var ordinal = activeNew.FindIndex(x => x.OutcomeId == person.OutcomeId) + 1;
-            return ordinal > 0 ? "New " + ordinal : person.DisplayName ?? "new person";
+            return ReviewCaseDialogUI.ActionPersonLabel(plan, draft, person);
         }
 
         private static bool Same(string a, string b) => string.Equals(a ?? string.Empty, b ?? string.Empty, StringComparison.OrdinalIgnoreCase);

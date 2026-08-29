@@ -85,7 +85,8 @@ internal static class Program
         Run("person builder selects Tim-like exact provider credit replacement", PersonBuilderSelectsProviderReplacement);
         Run("person builder creates a suggested owner and selects one provider rule", PersonBuilderCreatesAndMoves);
         Run("person builder does not persist one-time new-person targets", PersonBuilderDoesNotPersistNewTarget);
-        Run("person builder rejects duplicate provider IDs across final people", PersonBuilderRejectsDuplicateIds);
+        Run("person builder warns but permits duplicate provider IDs across final people", PersonBuilderWarnsForDuplicateIds);
+        Run("person builder requires a native provider ID for every media-bearing person", PersonBuilderRequiresNativeIdForMediaOwner);
         Run("person builder requires a destination for an unresolved identity", PersonBuilderRequiresIdentityDestination);
         Run("person builder actions precede terminal grid content", PersonBuilderActionsPrecedeGrid);
         Run("person builder Create appends an empty row and retains the existing person", PersonBuilderCreateAppendsEmptyRow);
@@ -1438,17 +1439,54 @@ internal static class Program
         True(!compilation.Corrections.Any(x => x.Kind == CorrectionKinds.IdentityTarget && x.ReplacementValue == "new"));
     }
 
-    private static void PersonBuilderRejectsDuplicateIds()
+    private static void PersonBuilderWarnsForDuplicateIds()
+    {
+        var plan = BuilderPlan();
+        plan.CurrentPeople.Add(new LocalPerson { EmbyId = 51, Name = "Second Alex", TmdbId = "9", ImdbId = "nm1" });
+        plan.Outcomes.Add(new IdentityOutcome
+        {
+            OutcomeId = "existing:51", SortOrder = 2, TargetKind = IdentityTargetKinds.Existing, TargetEmbyId = 51, DisplayName = "Second Alex", Outcome = "Retain Emby person 51",
+            SourceEmbyIds = new List<long> { 51 }, ProviderIds = new List<IdentityProviderId> { new IdentityProviderId { Provider = ProviderNames.Tmdb, ProviderId = "9", Source = "native" }, new IdentityProviderId { Provider = ProviderNames.Imdb, ProviderId = "nm1", Source = "external" } }
+        });
+        plan.Credits.Add(new IdentityCreditOutcome
+        {
+            AssignmentId = "credit-2", SourcePersonEmbyId = 51, TargetOutcomeId = "existing:51", MediaEmbyId = 21, MediaType = MediaTypes.Movie,
+            MediaName = "Second disputed title", Role = "Actor: Lead", Disposition = "KEEP"
+        });
+        var draft = PersonBuilderDraft.FromPlan(plan);
+        Equal("imdb:nm1", IdentityCasePersonBuilder.DuplicateProviderIdKeys(draft).Single());
+        Equal(IdentityPlanStates.Complete, IdentityCasePersonBuilder.Compile(plan, draft).Plan.State);
+
+        var ui = ReviewCaseDialogUI.Build(plan, draft, "server", null);
+        True(ui.Apply != null);
+        True(ui.Apply.ConfirmationPrompt.Contains("IMDB nm1 is assigned to multiple active people") && ui.Apply.ConfirmationPrompt.Contains("Apply anyway?"));
+        var information = ui.Rows.Single(x => x.IsInformation);
+        True(information.Media.Any(x => x.Media.Contains("Review warning:") && x.Media.Contains("IMDB nm1 is assigned to multiple active people")));
+        True(ui.Rows.Single(x => x.OutcomeId == "existing:50").Status.Contains("duplicate IMDB nm1"));
+        True(ui.Rows.Single(x => x.OutcomeId == "existing:51").Status.Contains("duplicate IMDB nm1"));
+        Equal("Second Alex — Emby 51", ReviewCaseDialogUI.ActionPersonLabel(plan, draft, draft.People.Single(x => x.OutcomeId == "existing:51")));
+
+        draft.Credits.Single(x => x.AssignmentId == "credit-2").TargetOutcomeId = "existing:50";
+        Equal(0, IdentityCasePersonBuilder.DuplicateProviderIdKeys(draft).Count);
+        var emptied = ReviewCaseDialogUI.Build(plan, draft, "server", null);
+        Equal("Persons without media associations will be removed by Emby", emptied.Rows.Single(x => x.OutcomeId == "existing:51").Status);
+        True(emptied.Rows.Single(x => x.IsInformation).Media.All(x => !x.Media.Contains("assigned to multiple active people")));
+    }
+
+    private static void PersonBuilderRequiresNativeIdForMediaOwner()
     {
         var plan = BuilderPlan();
         var draft = PersonBuilderDraft.FromPlan(plan);
-        var suggested = draft.People.Single(x => x.TargetKind == IdentityTargetKinds.New);
-        suggested.TmdbId = "1";
-        draft.Credits.Single().TargetOutcomeId = suggested.OutcomeId;
+        var existing = draft.People.Single(x => x.TargetKind == IdentityTargetKinds.Existing);
+        existing.TmdbId = string.Empty; existing.TvdbId = string.Empty;
         var failed = false;
         try { IdentityCasePersonBuilder.Compile(plan, draft); }
-        catch (InvalidOperationException ex) { failed = ex.Message.Contains("cannot belong to more than one"); }
+        catch (InvalidOperationException ex) { failed = ex.Message.Contains("has assigned media and needs a TMDB or TVDB person ID"); }
         True(failed);
+
+        var ui = ReviewCaseDialogUI.Build(plan, draft, "server", null);
+        True(ui.Apply == null);
+        True(ui.LastAction.Caption.Contains("Apply unavailable:") && ui.LastAction.Caption.Contains("needs a TMDB or TVDB person ID"));
     }
 
     private static void PersonBuilderRequiresIdentityDestination()
@@ -1473,11 +1511,13 @@ internal static class Program
         True(properties.IndexOf(nameof(ReviewCaseDialogUI.BackToAllCases)) < properties.IndexOf(nameof(ReviewCaseDialogUI.PersonBuilder)));
         True(properties.IndexOf(nameof(ReviewCaseDialogUI.LastAction)) < properties.IndexOf(nameof(ReviewCaseDialogUI.PersonBuilder)));
         var plan = BuilderPlan();
+        plan.Warning = "Existing planner warning";
         var draft = PersonBuilderDraft.FromPlan(plan);
         draft.Credits.Single().TargetOutcomeId = draft.People.Single(x => x.TargetKind == IdentityTargetKinds.New).OutcomeId;
         var ui = ReviewCaseDialogUI.Build(plan, draft, "server", null);
         var information = ui.Rows.Single(x => x.IsInformation);
         Equal("Information", information.Name);
+        True(information.Media.Any(x => x.Media.Contains("Existing planner warning")));
         True(information.Media.Any(x => x.Media.Contains("TMDB") && x.Media.Contains("themoviedb.org/person/1")));
         True(information.Media.All(x => !x.Media.Contains("Alex Example")));
         Equal("spacer", information.Media.Last().Media);
@@ -1494,6 +1534,7 @@ internal static class Program
         True(media.CurrentPerson.Contains(">50</a>"));
         True(!media.TmdbOwner.Contains("Alex Example") && !media.TmdbOwner.Contains("Lead"));
         True(!media.TvdbOwner.Contains("Alex Example") && !media.TvdbOwner.Contains("Lead"));
+        Equal("Different owners: TMDB 1 / TVDB 2", media.Attribution);
         True(ui.Rows.Single(x => x.OutcomeId == "existing:50").Name.Contains("#!/item?id=50"));
         True(ui.Apply != null);
         True(ui.LastAction != null && !ui.LastAction.IsEnabled && ui.LastAction.Caption == string.Empty);

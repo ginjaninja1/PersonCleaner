@@ -44,7 +44,7 @@ namespace PersonCleaner.V2.Tasks
                 if (caseIds.Count == 0) { logger.Info("PersonCleaner Mass Corrections found no unapplied, satisfied changes in the latest completed evidence run."); progress.Report(100); return Task.CompletedTask; }
 
                 var executor = new IdentityCaseExecutor(library);
-                var failures = new List<string>(); var applied = 0;
+                var failures = new List<string>(); var applied = 0; var skipped = 0;
                 logger.Info("PersonCleaner Mass Corrections starting {0} persisted, satisfied case(s). Problem and no-change cases were excluded by the database query.", caseIds.Count);
                 for (var index = 0; index < caseIds.Count; index++)
                 {
@@ -55,7 +55,16 @@ namespace PersonCleaner.V2.Tasks
                         var plan = repository.IdentityCase(caseId);
                         if (plan.State != IdentityPlanStates.Complete || plan.PresentationPurpose != CasePresentationPurposes.SatisfiedChange || !IdentityCasePlanner.HasMutations(plan))
                             throw new InvalidOperationException("The persisted case is no longer classified as a complete, satisfied change.");
-                        var compilation = IdentityCasePersonBuilder.Compile(plan, PersonBuilderDraft.FromPlan(plan));
+                        var draft = PersonBuilderDraft.FromPlan(plan);
+                        var duplicateIds = IdentityCasePersonBuilder.DuplicateProviderIdKeys(draft);
+                        if (duplicateIds.Count > 0)
+                        {
+                            skipped++;
+                            logger.Warn("PersonCleaner Mass Corrections skipped case {0} because its default layout assigns provider ID(s) {1} to multiple active people; review and apply this case manually.", caseId, string.Join(", ", duplicateIds));
+                            progress.Report(100.0 * (index + 1) / caseIds.Count);
+                            continue;
+                        }
+                        var compilation = IdentityCasePersonBuilder.Compile(plan, draft);
                         var before = IdentityApplyAudit.CaptureBefore(compilation.Plan, library);
                         var receipt = executor.Apply(compilation.Plan, committed => repository.CommitIdentityCase(compilation, committed));
                         IdentityApplyAudit.Log(compilation.Plan, receipt, before, library, logger);
@@ -72,7 +81,7 @@ namespace PersonCleaner.V2.Tasks
                     }
                     progress.Report(100.0 * (index + 1) / caseIds.Count);
                 }
-                logger.Info("PersonCleaner Mass Corrections finished: {0} applied, {1} failed, {2} selected.", applied, failures.Count, caseIds.Count);
+                logger.Info("PersonCleaner Mass Corrections finished: {0} applied, {1} skipped for duplicate provider IDs, {2} failed, {3} selected.", applied, skipped, failures.Count, caseIds.Count);
                 if (failures.Count > 0)
                     throw new InvalidOperationException("Mass Corrections applied " + applied + " case(s), but " + failures.Count + " case(s) failed live preflight or application: " + string.Join(" | ", failures.Take(10)));
             }

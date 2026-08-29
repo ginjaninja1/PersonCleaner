@@ -122,13 +122,12 @@ namespace PersonCleaner.V2.Domain
             if (duplicateTarget != null) throw new InvalidOperationException("Emby person " + duplicateTarget.Key + " can only be represented by one final person row.");
             var missingExisting = source.CurrentPeople.FirstOrDefault(x => existingTargets.All(y => y.TargetEmbyId != x.EmbyId));
             if (missingExisting != null) throw new InvalidOperationException("Choose one final person row to maintain Emby person " + missingExisting.EmbyId + ".");
-            foreach (var person in people.Values.Where(x => activeIds.Contains(x.OutcomeId) && x.TargetKind == IdentityTargetKinds.New))
+            foreach (var person in people.Values.Where(x => referenced.Contains(x.OutcomeId)))
                 if (person.TmdbId.Length == 0 && person.TvdbId.Length == 0)
-                    throw new InvalidOperationException("New person '" + person.DisplayName + "' needs a TMDB or TVDB person ID.");
+                    throw new InvalidOperationException("Person '" + person.DisplayName + "' has assigned media and needs a TMDB or TVDB person ID.");
             foreach (var credit in credits.Values)
                 if (!activeIds.Contains(credit.TargetOutcomeId)) throw new InvalidOperationException("A media credit cannot target an unused suggested person.");
 
-            ValidateUniqueProviderIds(people.Values.Where(x => activeIds.Contains(x.OutcomeId)));
             var plan = CloneHeader(source);
             foreach (var original in source.Outcomes.OrderBy(x => x.SortOrder).ThenBy(x => x.OutcomeId, StringComparer.Ordinal))
             {
@@ -312,16 +311,22 @@ namespace PersonCleaner.V2.Domain
             Role = x.Role, RoleCategory = x.RoleCategory, OutcomeId = x.OutcomeId
         };
 
-        private static void ValidateUniqueProviderIds(IEnumerable<PersonBuilderIdentity> people)
+        public static List<string> DuplicateProviderIdKeys(PersonBuilderDraft draft)
         {
-            var duplicates = people.SelectMany(x => new[]
+            if (draft == null) return new List<string>();
+            var referenced = new HashSet<string>((draft.Credits ?? new List<PersonBuilderCredit>()).Select(x => x.TargetOutcomeId).Where(x => !string.IsNullOrWhiteSpace(x)), StringComparer.Ordinal);
+            var active = (draft.People ?? new List<PersonBuilderIdentity>()).Where(x => x.Include && referenced.Contains(x.OutcomeId));
+            return active.SelectMany(x => new[]
             {
                 Pair(ProviderNames.Tmdb, x.TmdbId, x.OutcomeId), Pair(ProviderNames.Tvdb, x.TvdbId, x.OutcomeId), Pair(ProviderNames.Imdb, x.ImdbId, x.OutcomeId)
-            }).Where(x => x != null).GroupBy(x => x.Provider + ":" + x.Id, StringComparer.OrdinalIgnoreCase).FirstOrDefault(x => x.Select(y => y.OutcomeId).Distinct(StringComparer.Ordinal).Count() > 1);
-            if (duplicates != null) throw new InvalidOperationException("Provider person ID " + duplicates.Key + " cannot belong to more than one final Emby person.");
+            }).Where(x => x != null)
+                .GroupBy(x => x.Provider + ":" + x.Id, StringComparer.OrdinalIgnoreCase)
+                .Where(x => x.Select(y => y.OutcomeId).Distinct(StringComparer.Ordinal).Count() > 1)
+                .Select(x => x.First().Provider + ":" + x.First().Id)
+                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
         }
 
-        private static ProviderAssignment Pair(string provider, string id, string outcomeId) => string.IsNullOrWhiteSpace(id) ? null : new ProviderAssignment { Provider = provider, Id = id, OutcomeId = outcomeId };
+        private static ProviderAssignment Pair(string provider, string id, string outcomeId) => string.IsNullOrWhiteSpace(id) ? null : new ProviderAssignment { Provider = provider, Id = id.Trim(), OutcomeId = outcomeId };
         private sealed class ProviderAssignment { public string Provider { get; set; } public string Id { get; set; } public string OutcomeId { get; set; } }
 
         private static Dictionary<string, T> Unique<T>(IEnumerable<T> rows, Func<T, string> key, string label)
