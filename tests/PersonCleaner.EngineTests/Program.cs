@@ -80,7 +80,7 @@ internal static class Program
         Run("holistic crosswalk conflict does not become a title-credit dispute", HolisticCrosswalkConflictDoesNotDisputeCredit);
         Run("holistic IMDb conflict retains the current Emby ID and provider-owner matrix", HolisticImdbConflictRetainsCurrentId);
         Run("holistic planner keeps compatible current IDs together beside a conflicting alternative", HolisticCurrentIdentitySubsetRemainsTogether);
-        Run("holistic planner remains bounded across 1600 cases", HolisticPlannerRemainsBounded);
+        Run("holistic planner remains bounded across 10000 cases", HolisticPlannerRemainsBounded);
         Run("person builder records only the provider rule selected by a no-op layout", PersonBuilderRecordsNoOpAdjudication);
         Run("person builder selects Tim-like exact provider credit replacement", PersonBuilderSelectsProviderReplacement);
         Run("person builder creates a suggested owner and selects one provider rule", PersonBuilderCreatesAndMoves);
@@ -97,6 +97,7 @@ internal static class Program
         Run("case review adds missing live credits and compiles only moved supplements", CaseReviewAddsMissingLiveCredits);
         Run("case planning does not scan 300000 unrelated global Emby people", CasePlanningIgnoresLargeGlobalPopulation);
         Run("large unrelated provider-credit sets remain bounded", LargeProviderCreditSetRemainsBounded);
+        Run("matched reconciliation components remain linear", MatchedReconciliationComponentsRemainLinear);
         Console.WriteLine("Passed " + passed + " entity-resolution tests; failed " + failed + ".");
         return failed == 0 ? 0 : 1;
     }
@@ -1336,7 +1337,7 @@ internal static class Program
 
     private static void HolisticPlannerRemainsBounded()
     {
-        const int count = 1600;
+        const int count = 10000;
         var input = new ResolutionInput(); var decisions = new List<ResolutionDecision>(); var clusters = new List<ResolutionClusterSnapshot>();
         for (var i = 1; i <= count; i++)
         {
@@ -1720,6 +1721,44 @@ internal static class Program
         clock.Stop();
         Equal(0, engine.Diagnostics.BlockedCrossProviderPairs);
         True(clock.Elapsed < TimeSpan.FromSeconds(5));
+    }
+
+    private static void MatchedReconciliationComponentsRemainLinear()
+    {
+        const int componentCount = 5000;
+        var input = new ResolutionInput();
+        for (var i = 0; i < componentCount; i++)
+        {
+            var suffix = i.ToString();
+            var mediaKey = "canonical:matched:" + suffix;
+            var tmdb = Person(ProviderNames.Tmdb, "matched-tmdb-" + suffix, "Matched Person " + suffix, null, null, mediaKey);
+            var tvdb = Person(ProviderNames.Tvdb, "matched-tvdb-" + suffix, "Matched Person " + suffix, null, null, mediaKey);
+            AddObservedCredit(tmdb, mediaKey, "Actor", "Matched Role");
+            AddObservedCredit(tvdb, mediaKey, "Actor", "Matched Role");
+            input.ProviderPeople.Add(tmdb);
+            input.ProviderPeople.Add(tvdb);
+            input.ProviderCredits.AddRange(tmdb.Credits);
+            input.ProviderCredits.AddRange(tvdb.Credits);
+
+            var mediaId = i + 1L;
+            var media = Media(mediaId, "Matched Media " + suffix);
+            media.CanonicalMediaKeys.Add(mediaKey);
+            input.Media.Add(media);
+            input.LocalPeople.Add(new LocalPerson { EmbyId = mediaId, Name = "Matched Person " + suffix, TmdbId = tmdb.ProviderId, TvdbId = tvdb.ProviderId });
+            input.LocalCredits.Add(new LocalCredit { PersonEmbyId = mediaId, MediaEmbyId = mediaId, Role = "Actor: Matched Role" });
+        }
+
+        var engine = new ResolutionEngine();
+        var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        var clock = Stopwatch.StartNew();
+        var decisions = engine.Resolve(input, new ResolutionSettings());
+        clock.Stop();
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+
+        Equal(componentCount, decisions.Count);
+        Equal(componentCount, engine.PairEvaluations.Count);
+        True(clock.Elapsed < TimeSpan.FromSeconds(5));
+        True(allocated < 512L * 1024 * 1024);
     }
 
     private static void CasePlanningIgnoresLargeGlobalPopulation()

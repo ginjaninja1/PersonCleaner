@@ -149,13 +149,14 @@ namespace PersonCleaner.V2.Domain
             var decisionList = (decisions ?? new ResolutionDecision[0]).OrderBy(x => x.DecisionId, StringComparer.Ordinal).ToList();
             var clusterList = (clusters ?? new ResolutionClusterSnapshot[0]).ToList();
             var planner = new PlannerIndex(input);
+            var clusterIndex = new ClusterIndex(clusterList);
             var result = new List<IdentityCasePlan>();
             foreach (var group in CaseGroups(decisionList))
-                result.Add(BuildCase(runId, input, planner, group, clusterList));
+                result.Add(BuildCase(runId, input, planner, group, clusterIndex));
             return result;
         }
 
-        private static IdentityCasePlan BuildCase(long runId, ResolutionInput input, PlannerIndex planner, List<ResolutionDecision> decisions, List<ResolutionClusterSnapshot> allClusters)
+        private static IdentityCasePlan BuildCase(long runId, ResolutionInput input, PlannerIndex planner, List<ResolutionDecision> decisions, ClusterIndex clusterIndex)
         {
             var providerKeys = new HashSet<string>(decisions.SelectMany(x => Keys(x.ProviderKeys)), StringComparer.Ordinal);
             var personIds = new HashSet<long>(decisions.Where(x => x.AnchorEmbyPersonId.HasValue).Select(x => x.AnchorEmbyPersonId.Value));
@@ -167,7 +168,7 @@ namespace PersonCleaner.V2.Domain
             foreach (var key in providerKeys)
                 if (planner.LocalPeopleByProviderKey.TryGetValue(key, out var owners)) foreach (var person in owners) personIds.Add(person.EmbyId);
 
-            var clusters = allClusters.Where(x => x.ProviderKeys.Any(providerKeys.Contains) || x.AnchorEmbyPersonId.HasValue && personIds.Contains(x.AnchorEmbyPersonId.Value)).OrderBy(x => x.ClusterId, StringComparer.Ordinal).ToList();
+            var clusters = clusterIndex.Find(providerKeys, personIds);
             if (clusters.Count == 0)
                 clusters.AddRange(providerKeys.Select((key, index) => new ResolutionClusterSnapshot { ClusterId = "synthetic-" + index, ProviderKeys = new List<string> { key }, AnchorEmbyPersonId = decisions.Select(x => x.AnchorEmbyPersonId).FirstOrDefault(x => x.HasValue) }));
 
@@ -561,28 +562,52 @@ namespace PersonCleaner.V2.Domain
 
         private static List<List<ResolutionDecision>> CaseGroups(List<ResolutionDecision> decisions)
         {
-            var result = new List<List<ResolutionDecision>>();
-            var remaining = new HashSet<ResolutionDecision>(decisions);
-            while (remaining.Count > 0)
+            var parent = Enumerable.Range(0, decisions.Count).ToArray();
+            var rank = new byte[decisions.Count];
+            var byProviderKey = new Dictionary<string, int>(StringComparer.Ordinal);
+            var byAnchor = new Dictionary<long, int>();
+
+            for (var index = 0; index < decisions.Count; index++)
             {
-                var first = remaining.OrderBy(x => x.DecisionId, StringComparer.Ordinal).First();
-                remaining.Remove(first);
-                var group = new List<ResolutionDecision> { first };
-                var changed = true;
-                while (changed)
+                foreach (var key in Keys(decisions[index].ProviderKeys).Distinct(StringComparer.Ordinal))
                 {
-                    changed = false;
-                    var keys = new HashSet<string>(group.SelectMany(x => Keys(x.ProviderKeys)), StringComparer.Ordinal);
-                    var anchors = new HashSet<long>(group.Where(x => x.AnchorEmbyPersonId.HasValue).Select(x => x.AnchorEmbyPersonId.Value));
-                    foreach (var candidate in remaining.ToList())
-                    {
-                        if (!Keys(candidate.ProviderKeys).Any(keys.Contains) && (!candidate.AnchorEmbyPersonId.HasValue || !anchors.Contains(candidate.AnchorEmbyPersonId.Value))) continue;
-                        remaining.Remove(candidate); group.Add(candidate); changed = true;
-                    }
+                    if (byProviderKey.TryGetValue(key, out var existing)) Union(parent, rank, index, existing);
+                    else byProviderKey[key] = index;
                 }
-                result.Add(group.OrderBy(x => x.DecisionId, StringComparer.Ordinal).ToList());
+                if (!decisions[index].AnchorEmbyPersonId.HasValue) continue;
+                var anchor = decisions[index].AnchorEmbyPersonId.Value;
+                if (byAnchor.TryGetValue(anchor, out var anchored)) Union(parent, rank, index, anchored);
+                else byAnchor[anchor] = index;
             }
-            return result;
+
+            return decisions.Select((decision, index) => new { Decision = decision, Root = Find(parent, index) })
+                .GroupBy(x => x.Root)
+                .Select(x => x.Select(y => y.Decision).OrderBy(y => y.DecisionId, StringComparer.Ordinal).ToList())
+                .OrderBy(x => x[0].DecisionId, StringComparer.Ordinal)
+                .ToList();
+        }
+
+        private static int Find(int[] parent, int value)
+        {
+            while (parent[value] != value)
+            {
+                parent[value] = parent[parent[value]];
+                value = parent[value];
+            }
+            return value;
+        }
+
+        private static void Union(int[] parent, byte[] rank, int left, int right)
+        {
+            var leftRoot = Find(parent, left);
+            var rightRoot = Find(parent, right);
+            if (leftRoot == rightRoot) return;
+            if (rank[leftRoot] < rank[rightRoot]) parent[leftRoot] = rightRoot;
+            else
+            {
+                parent[rightRoot] = leftRoot;
+                if (rank[leftRoot] == rank[rightRoot]) rank[leftRoot]++;
+            }
         }
 
         public static string PreferredProviderId(IdentityOutcome outcome, string provider) => outcome?.ProviderIds.Where(x => x.Provider == provider).OrderBy(x => x.Source == "native" ? 0 : 1).Select(x => x.ProviderId).FirstOrDefault();
@@ -714,6 +739,37 @@ namespace PersonCleaner.V2.Domain
         }
         private sealed class OutcomeBuilder { public List<ResolutionClusterSnapshot> Clusters { get; set; } public HashSet<string> Keys { get; set; } public LocalPerson Selected { get; set; } public ProviderCorrection Override { get; set; } }
         private sealed class ProviderIdProjection { public List<IdentityProviderId> ProviderIds { get; set; } = new List<IdentityProviderId>(); public List<string> Warnings { get; set; } = new List<string>(); }
+        private sealed class ClusterIndex
+        {
+            private readonly Dictionary<string, List<ResolutionClusterSnapshot>> byProviderKey = new Dictionary<string, List<ResolutionClusterSnapshot>>(StringComparer.Ordinal);
+            private readonly Dictionary<long, List<ResolutionClusterSnapshot>> byAnchor = new Dictionary<long, List<ResolutionClusterSnapshot>>();
+
+            public ClusterIndex(IEnumerable<ResolutionClusterSnapshot> clusters)
+            {
+                foreach (var cluster in clusters ?? Enumerable.Empty<ResolutionClusterSnapshot>())
+                {
+                    foreach (var key in cluster.ProviderKeys ?? new List<string>()) Add(byProviderKey, key, cluster);
+                    if (cluster.AnchorEmbyPersonId.HasValue) Add(byAnchor, cluster.AnchorEmbyPersonId.Value, cluster);
+                }
+            }
+
+            public List<ResolutionClusterSnapshot> Find(IEnumerable<string> providerKeys, IEnumerable<long> anchors)
+            {
+                var matches = new HashSet<ResolutionClusterSnapshot>();
+                foreach (var key in providerKeys)
+                    if (byProviderKey.TryGetValue(key, out var keyed)) matches.UnionWith(keyed);
+                foreach (var anchor in anchors)
+                    if (byAnchor.TryGetValue(anchor, out var anchored)) matches.UnionWith(anchored);
+                return matches.OrderBy(x => x.ClusterId, StringComparer.Ordinal).ToList();
+            }
+
+            private static void Add<TKey>(Dictionary<TKey, List<ResolutionClusterSnapshot>> index, TKey key, ResolutionClusterSnapshot cluster)
+            {
+                if (!index.TryGetValue(key, out var rows)) index[key] = rows = new List<ResolutionClusterSnapshot>();
+                rows.Add(cluster);
+            }
+        }
+
         private sealed class PlannerIndex
         {
             private readonly IEnumerable<LocalPerson> globalPeople;
