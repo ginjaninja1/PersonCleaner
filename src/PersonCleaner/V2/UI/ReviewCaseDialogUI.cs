@@ -54,8 +54,9 @@ namespace PersonCleaner.V2.UI
                     ? "Emby " + desiredPeople[x.OutcomeId].TargetEmbyId
                     : "New " + NewOrdinal(newOrdinals, x.OutcomeId))
             });
-            var personTargets = plan.CurrentPeople.OrderBy(x => x.EmbyId).Select(x => new ReviewTargetChoice { Value = "existing:" + x.EmbyId, Caption = "Maintain " + x.EmbyId })
-                .Concat(new[] { new ReviewTargetChoice { Value = "new", Caption = "Create" }, new ReviewTargetChoice { Value = "remove", Caption = "Remove" } })
+            // This lookup is an action menu, not an identity selector.  The current person remains
+            // the row's default value; the available choices must all perform an operation.
+            var personTargets = new[] { new ReviewTargetChoice { Value = "new", Caption = "Create" }, new ReviewTargetChoice { Value = "remove", Caption = "Remove" } }
                 .Concat(moveTargets).ToArray();
             var master = Grid(new ReviewIdentityRow(), nameof(ReviewIdentityRow.RowId), ReviewCaseCommands.IdentityGrid);
             master.heightMode = DxGridOptions.GridHeightMode.fullHeight;
@@ -117,14 +118,13 @@ namespace PersonCleaner.V2.UI
                     if (credits.TryGetValue(media.AssignmentId ?? string.Empty, out var credit) && !string.IsNullOrWhiteSpace(media.TargetOutcomeId)) credit.TargetOutcomeId = media.TargetOutcomeId;
             }
             var assignedToRemoved = draft.People.FirstOrDefault(x => !x.Include && draft.Credits.Any(y => y.TargetOutcomeId == x.OutcomeId));
-            if (assignedToRemoved != null) throw new InvalidOperationException("Move every media credit away from this person before removing its row.");
+            if (assignedToRemoved != null) throw new InvalidOperationException("Move every media credit away from this person before removing it.");
             if (detectDeletedPeople && incoming?.Rows != null)
             {
                 var visible = new HashSet<string>(incoming.Rows.Select(x => x.OutcomeId).Where(x => !string.IsNullOrWhiteSpace(x)), StringComparer.Ordinal);
                 foreach (var person in draft.People.Where(x => !visible.Contains(x.OutcomeId)))
                 {
-                    if (person.TargetKind == IdentityTargetKinds.Existing) throw new InvalidOperationException("An existing Emby person row cannot be removed; move its media and clear or change its IDs instead.");
-                    if (draft.Credits.Any(x => x.TargetOutcomeId == person.OutcomeId)) throw new InvalidOperationException("Move every media credit away from this suggested person before removing its row.");
+                    if (draft.Credits.Any(x => x.TargetOutcomeId == person.OutcomeId)) throw new InvalidOperationException("Move every media credit away from this person before removing it.");
                     person.Include = false;
                 }
             }
@@ -221,7 +221,6 @@ namespace PersonCleaner.V2.UI
         {
             if (string.Equals(value, "remove", StringComparison.Ordinal))
             {
-                if (person.TargetKind == IdentityTargetKinds.Existing) throw new InvalidOperationException("Only an unassigned new-person row can be removed.");
                 person.Include = false; return;
             }
             person.Include = true;

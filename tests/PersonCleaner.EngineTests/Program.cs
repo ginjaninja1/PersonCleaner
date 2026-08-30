@@ -1696,6 +1696,12 @@ internal static class Program
         emptyUi.Rows.Single(x => x.OutcomeId == "new:tvdb2").PersonTarget = "remove";
         True(!ReviewCaseDialogUI.Capture(emptyDraft, emptyUi, false).People.Single(x => x.OutcomeId == "new:tvdb2").Include);
 
+        var removeExistingDraft = PersonBuilderDraft.FromPlan(plan);
+        var removeExistingUi = ReviewCaseDialogUI.Build(plan, removeExistingDraft, "server", null);
+        removeExistingUi.Rows.Single(x => x.OutcomeId == "existing:50").PersonTarget = "remove";
+        removeExistingUi.Rows.SelectMany(x => x.Media).Single(x => x.AssignmentId == "credit-1").TargetOutcomeId = "new:tvdb2";
+        True(!ReviewCaseDialogUI.Capture(removeExistingDraft, removeExistingUi, false).People.Single(x => x.OutcomeId == "existing:50").Include);
+
         var namingDraft = PersonBuilderDraft.FromPlan(plan);
         var namingUi = ReviewCaseDialogUI.Build(plan, namingDraft, "server", null);
         namingUi.Rows.Single(x => x.OutcomeId == "existing:50").Name = "Ignored existing rename";
@@ -1755,6 +1761,10 @@ internal static class Program
         var ui = ReviewCaseDialogUI.Build(plan, draft, "server", null);
         var identityChoices = (ReviewTargetChoice[])ui.PersonBuilder.Options.columns
             .Single(x => x.dataField == nameof(ReviewIdentityRow.PersonTarget)).lookup.dataSource;
+        True(identityChoices.Any(x => x.Value == "new" && x.Caption == "Create"));
+        True(identityChoices.Any(x => x.Value == "remove" && x.Caption == "Remove"));
+        True(identityChoices.All(x => !x.Caption.StartsWith("Maintain ", StringComparison.Ordinal)));
+        True(identityChoices.All(x => !x.Value.StartsWith("existing:", StringComparison.Ordinal)));
         Equal("Move to Emby 50", identityChoices.Single(x => x.Value == "move:existing:50").Caption);
         Equal("Move to New 1", identityChoices.Single(x => x.Value == "move:new:tvdb2").Caption);
 
