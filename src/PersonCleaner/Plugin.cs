@@ -46,6 +46,15 @@ namespace PersonCleaner
         /// </summary>
         public static Plugin Instance { get; private set; }
 
+        /// <summary>The shared plugin logger used by all PersonCleaner services and tasks.</summary>
+        public ILogger Logger => this.logger;
+
+        /// <summary>Writes a consistent section marker for plugin operations.</summary>
+        public static void LogHeading(ILogger logger, string heading)
+        {
+            logger.Info("========== {0} ==========", heading);
+        }
+
 
         public override string Description =>
             "Builds a media-first evidence graph and persists validated Emby person updates for manual review or configuration-gated mass correction.";

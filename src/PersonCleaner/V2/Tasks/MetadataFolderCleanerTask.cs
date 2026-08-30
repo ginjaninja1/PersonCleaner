@@ -27,7 +27,8 @@ namespace PersonCleaner.V2.Tasks
         public MetadataFolderCleanerTask(ILibraryManager library, IApplicationPaths paths, ILogManager logs)
         {
             this.library = library;
-            logger = logs.GetLogger("PersonCleaner metadata folder cleaner");
+            // Keep task output under the same logger/category as the plugin.
+            logger = Plugin.Instance?.Logger ?? logs.GetLogger("PersonCleaner");
             peopleMetadataRoot = Path.Combine(paths.ProgramDataPath, "metadata", "people");
         }
 
@@ -41,7 +42,8 @@ namespace PersonCleaner.V2.Tasks
         {
             var testMode = Plugin.Instance.Configuration.MetadataFolderCleanerTestMode;
             var root = Canonical(peopleMetadataRoot);
-            logger.Info("PersonCleaner Metadata Folder Cleaner starting: TestMode={0}; people metadata root={1}.", testMode, root);
+            Plugin.LogHeading(logger, "Metadata folder cleaner");
+            logger.Info("Metadata Folder Cleaner starting: TestMode={0}; people metadata root={1}.", testMode, root);
 
             if (!Directory.Exists(root))
                 throw new DirectoryNotFoundException("Emby people metadata directory does not exist: " + root);
@@ -57,38 +59,20 @@ namespace PersonCleaner.V2.Tasks
             // This deliberately excludes Artist- and Composer-only people.
             var scopedPersonIds = AuditedPersonIds(cancellationToken);
             var auditedPeople = people.Where(x => scopedPersonIds.Contains(x.InternalId)).ToList();
-            var ownedFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var person in people)
-            {
-                var folder = MetadataFolder(person);
-                if (!string.IsNullOrWhiteSpace(folder)) ownedFolders.Add(Canonical(folder));
-            }
-            logger.Info("PersonCleaner Metadata Folder Cleaner scope: all Emby persons={0}; audited Actor/GuestStar/Director/Writer/Producer persons={1}; non-scope persons protected but not logged={2}.", people.Count, auditedPeople.Count, people.Count - auditedPeople.Count);
-            var wrongTmdbFolders = 0;
-            for (var index = 0; index < auditedPeople.Count; index++)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var person = auditedPeople[index];
-                var tmdb = ProviderId(person, MetadataProviders.Tmdb);
-                var tvdb = ProviderId(person, MetadataProviders.Tvdb);
-                var imdb = ProviderId(person, MetadataProviders.Imdb);
-                var folder = MetadataFolder(person);
-                var folderType = FolderType(person.Name, tmdb, folder);
-                var imageType = ImageTypeFor(person);
-                var nfoMatch = NfoMatch(folder, tmdb, tvdb, imdb, out var nfoDetail);
+            Plugin.LogHeading(logger, "Live Emby person-folder status");
+            var ownedFolders = LivePersonFolders(people);
+            var liveFolders = people.Select(person => new { Person = person, Folder = MetadataFolder(person) })
+                .Where(x => !string.IsNullOrWhiteSpace(x.Folder))
+                .GroupBy(x => Canonical(x.Folder), StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var nameTmdbFolders = liveFolders.Count(group => group.Any(x => string.Equals(FolderType(x.Person.Name, ProviderId(x.Person, MetadataProviders.Tmdb), x.Folder), "FolderTMDB", StringComparison.Ordinal)));
+            var nameFolders = liveFolders.Count(group => !group.Any(x => string.Equals(FolderType(x.Person.Name, ProviderId(x.Person, MetadataProviders.Tmdb), x.Folder), "FolderTMDB", StringComparison.Ordinal)) && group.Any(x => string.Equals(FolderType(x.Person.Name, ProviderId(x.Person, MetadataProviders.Tmdb), x.Folder), "FolderVanilla", StringComparison.Ordinal)));
+            logger.Info("Live Emby person folders: people={0}; name-tmdb-id folders={1}; name folders={2}; other folders={3}.", people.Count, nameTmdbFolders, nameFolders, ownedFolders.Count - nameTmdbFolders - nameFolders);
+            foreach (var duplicate in liveFolders.Where(x => x.Count() > 1))
+                logger.Warn("Multiple Emby persons share metadata folder: FolderPath={0}; EmbyPersonIDs={1}; Names={2}.", duplicate.Key, string.Join(",", duplicate.Select(x => x.Person.InternalId)), string.Join(" | ", duplicate.Select(x => Value(x.Person.Name))));
 
-                logger.Info("PersonCleaner Metadata Folder Person: Name={0}; EmbyID={1}; TMDBID={2}; TVDBID={3}; IMDBID={4}; FolderPath={5}; FolderType={6}; Image={7}; NfoIdsMatch={8}; NfoDetail={9}.",
-                    Value(person.Name), person.InternalId, Value(tmdb), Value(tvdb), Value(imdb), Value(folder), folderType, imageType, nfoMatch, nfoDetail);
-
-                if (!string.IsNullOrWhiteSpace(tmdb) && !string.Equals(folderType, "FolderTMDB", StringComparison.Ordinal))
-                {
-                    wrongTmdbFolders++;
-                    logger.Warn("PersonCleaner Metadata Folder TMDB mismatch: Name={0}; EmbyID={1}; FolderPath={2}; expected FolderTMDB={3}.", Value(person.Name), person.InternalId, Value(folder), (person.Name ?? string.Empty) + "-tmdb-" + tmdb);
-                }
-                progress.Report(auditedPeople.Count == 0 ? 50 : 70.0 * (index + 1) / auditedPeople.Count);
-            }
-
-            var folders = Directory.EnumerateDirectories(root, "*", SearchOption.TopDirectoryOnly).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+            Plugin.LogHeading(logger, "Orphan metadata folder removal");
+            var folders = PersonMetadataFolders(root);
             var orphanCount = 0;
             var deletedCount = 0;
             for (var index = 0; index < folders.Count; index++)
@@ -101,31 +85,32 @@ namespace PersonCleaner.V2.Tasks
                 var nfoPath = Path.Combine(folder, "person.nfo");
                 var nfo = File.Exists(nfoPath) ? new FileInfo(nfoPath) : null;
                 var imagePresent = HasLocalImage(folder);
-                logger.Debug("PersonCleaner Metadata Folder Orphan: FolderName={0}; FolderType={1}; LocalImagePresent={2}; DateCreated={3:o}; DateModified={4:o}; DateAccessed={5:o}; Person.NFO Present={6}; NfoDateCreated={7}; NfoDateModified={8}; NfoDateAccessed={9}.",
+                logger.Debug("Orphan metadata folder: FolderName={0}; FolderType={1}; LocalImagePresent={2}; DateCreated={3:o}; DateModified={4:o}; DateAccessed={5:o}; Person.NFO Present={6}; NfoDateCreated={7}; NfoDateModified={8}; NfoDateAccessed={9}.",
                     info.Name, FolderTypeFromName(info.Name), Lower(imagePresent), info.CreationTimeUtc, info.LastWriteTimeUtc, info.LastAccessTimeUtc, Lower(nfo != null), Date(nfo, x => x.CreationTimeUtc), Date(nfo, x => x.LastWriteTimeUtc), Date(nfo, x => x.LastAccessTimeUtc));
 
                 if (!testMode)
                 {
-                    RequireDirectChild(root, folder);
+                    RequirePersonFolderLayout(root, folder);
                     if ((info.Attributes & FileAttributes.ReparsePoint) != 0)
                     {
-                        logger.Warn("PersonCleaner Metadata Folder Cleaner refused to delete orphan reparse-point folder: {0}.", folder);
+                        logger.Warn("Metadata Folder Cleaner refused to delete orphan reparse-point folder: {0}.", folder);
                         continue;
                     }
                     Directory.Delete(folder, true);
                     deletedCount++;
-                    logger.Info("PersonCleaner Metadata Folder Cleaner deleted confirmed orphan direct-child folder: {0}.", folder);
+                    logger.Info("Orphaned Folder Removed: {0}.", folder);
                 }
                 progress.Report(70 + (folders.Count == 0 ? 30 : 30.0 * (index + 1) / folders.Count));
             }
 
             progress.Report(100);
-            logger.Info("PersonCleaner Metadata Folder Cleaner finished: TestMode={0}; audited persons={1}; all protected Emby persons={2}; TMDB folder mismatches={3}; owned folders={4}; orphan folders={5}; deleted folders={6}.", testMode, auditedPeople.Count, people.Count, wrongTmdbFolders, ownedFolders.Count, orphanCount, deletedCount);
+            logger.Info("Metadata Folder Cleaner finished: TestMode={0}; audited persons={1}; all protected Emby persons={2}; owned folders={3}; orphan folders={4}; deleted folders={5}.", testMode, auditedPeople.Count, people.Count, ownedFolders.Count, orphanCount, deletedCount);
             return Task.CompletedTask;
         }
 
         private HashSet<long> AuditedPersonIds(CancellationToken cancellationToken)
         {
+            Plugin.LogHeading(logger, "Audited-person scope");
             var result = new HashSet<long>();
             var itemIds = library.GetItemList(new InternalItemsQuery { Recursive = true }, cancellationToken)
                 .Where(x => x.SupportsPeople).Select(x => x.InternalId).Distinct().ToArray();
@@ -153,6 +138,24 @@ namespace PersonCleaner.V2.Tasks
             if (string.IsNullOrWhiteSpace(path)) path = person.Path;
             if (string.IsNullOrWhiteSpace(path)) return null;
             return File.Exists(path) ? Path.GetDirectoryName(path) : path;
+        }
+
+        /// <summary>Enumerates person folders in both Emby layouts: people\name and people\x\name.</summary>
+        private static List<string> PersonMetadataFolders(string root)
+        {
+            var folders = new List<string>();
+            foreach (var directChild in Directory.EnumerateDirectories(root, "*", SearchOption.TopDirectoryOnly))
+            {
+                var isShard = IsAlphabetShard(directChild) && Directory.EnumerateDirectories(directChild, "*", SearchOption.TopDirectoryOnly).Any();
+                if (!isShard) folders.Add(Canonical(directChild));
+                if (IsAlphabetShard(directChild)) folders.AddRange(Directory.EnumerateDirectories(directChild, "*", SearchOption.TopDirectoryOnly).Select(Canonical));
+            }
+            return folders.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
+        private static HashSet<string> LivePersonFolders(IEnumerable<Person> people)
+        {
+            return new HashSet<string>(people.Select(MetadataFolder).Where(x => !string.IsNullOrWhiteSpace(x)).Select(Canonical), StringComparer.OrdinalIgnoreCase);
         }
 
         private static string FolderType(string name, string tmdb, string folder)
@@ -233,11 +236,19 @@ namespace PersonCleaner.V2.Tasks
             catch { return false; }
         }
 
-        private static void RequireDirectChild(string root, string folder)
+        private static void RequirePersonFolderLayout(string root, string folder)
         {
             var parent = Canonical(Path.GetDirectoryName(folder));
-            if (!string.Equals(parent, Canonical(root), StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("Refusing to delete a folder that is not a direct child of the Emby people metadata root: " + folder);
+            var canonicalRoot = Canonical(root);
+            if (string.Equals(parent, canonicalRoot, StringComparison.OrdinalIgnoreCase)) return;
+            if (IsAlphabetShard(parent) && string.Equals(Canonical(Path.GetDirectoryName(parent)), canonicalRoot, StringComparison.OrdinalIgnoreCase)) return;
+            throw new InvalidOperationException("Refusing to delete a folder outside a supported Emby people metadata layout: " + folder);
+        }
+
+        private static bool IsAlphabetShard(string path)
+        {
+            var name = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            return name.Length == 1 && ((name[0] >= 'A' && name[0] <= 'Z') || (name[0] >= 'a' && name[0] <= 'z'));
         }
 
         private static string Canonical(string path) => Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
