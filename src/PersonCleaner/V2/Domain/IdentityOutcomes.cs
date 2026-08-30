@@ -18,7 +18,6 @@ namespace PersonCleaner.V2.Domain
     {
         public const string Complete = "COMPLETE";
         public const string CorrectionRequired = "CORRECTION_REQUIRED";
-        public const string Blocked = "BLOCKED";
         public const string Applied = "APPLIED";
     }
 
@@ -283,13 +282,14 @@ namespace PersonCleaner.V2.Domain
             foreach (var outcome in plan.Outcomes.Where(x => x.TargetKind == IdentityTargetKinds.Existing && plan.Credits.Any(c => c.TargetOutcomeId == x.OutcomeId)))
                 outcome.Outcome = "Retain Emby person " + outcome.TargetEmbyId;
             PreserveUnopposedExistingIds(plan, input, currentPeople);
+            BuildIdentityRelationQuestions(plan, decisions);
             BuildIdentityQuestions(plan, input, provisional);
 
             PruneUnassignedNewOutcomes(plan);
-            var blocked = decisions.Any(x => x.Action == ResolutionActions.IncompleteScope);
-            plan.State = blocked ? IdentityPlanStates.Blocked : plan.Questions.Count > 0 || plan.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.Unresolved) || plan.Credits.Any(x => x.CorrectionRequired) ? IdentityPlanStates.CorrectionRequired : IdentityPlanStates.Complete;
+            var incompleteScope = decisions.Any(x => x.Action == ResolutionActions.IncompleteScope);
+            plan.State = incompleteScope || plan.Questions.Count > 0 || plan.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.Unresolved) || plan.Credits.Any(x => x.CorrectionRequired) ? IdentityPlanStates.CorrectionRequired : IdentityPlanStates.Complete;
             CompleteSummaries(plan, planner);
-            if (blocked) plan.CaseType = "Blocked by out-of-scope records";
+            if (incompleteScope) plan.CaseType = "Provider ID also exists outside calculated scope";
             else if (plan.State == IdentityPlanStates.Complete)
                 plan.CaseType = plan.RequiresManualReview && !HasMutations(plan)
                     ? "Unverified combined identity — no changes proposed"
@@ -467,6 +467,65 @@ namespace PersonCleaner.V2.Domain
             }
         }
 
+        private static void BuildIdentityRelationQuestions(IdentityCasePlan plan, IEnumerable<ResolutionDecision> decisions)
+        {
+            EnsureIdentityRelationQuestions(plan, (decisions ?? Enumerable.Empty<ResolutionDecision>())
+                .SelectMany(x => x.IdentityRelationReviews ?? new List<IdentityRelationReview>()));
+        }
+
+        public static void EnsureIdentityRelationQuestions(IdentityCasePlan plan, IEnumerable<IdentityRelationReview> reviews)
+        {
+            if (plan == null) throw new ArgumentNullException(nameof(plan));
+            var existing = new HashSet<string>(plan.Questions.SelectMany(x => x.Choices)
+                .Where(x => x?.Correction?.Kind == CorrectionKinds.IdentityRelation)
+                .Select(x => RelationKey(x.Correction.Provider, x.Correction.ProviderPersonId, x.Correction.SecondaryProvider, x.Correction.SecondaryId)), StringComparer.Ordinal);
+            var relations = (reviews ?? Enumerable.Empty<IdentityRelationReview>())
+                .GroupBy(RelationKey, StringComparer.Ordinal)
+                .Select(x => x.First())
+                .Where(x => !existing.Contains(RelationKey(x)))
+                .OrderBy(RelationKey, StringComparer.Ordinal)
+                .ToList();
+            foreach (var relation in relations)
+            {
+                var key = RelationKey(relation);
+                var questionId = "question-relation-" + StableHash(key);
+                var left = relation.LeftProvider.ToUpperInvariant() + " " + relation.LeftProviderPersonId;
+                var right = relation.RightProvider.ToUpperInvariant() + " " + relation.RightProviderPersonId;
+                var question = new IdentityQuestion
+                {
+                    QuestionId = questionId,
+                    Kind = CorrectionKinds.IdentityRelation,
+                    Narrative = left + " and " + right + " have positive but non-automatic identity evidence. Arrange the final Person Builder layout to confirm whether they represent the same person or different people."
+                };
+                question.Choices.Add(Choice(questionId, "same", "Same person", "Place both provider IDs on one active Person Builder row. Apply will persist the confirmed identity relation with the final Emby layout.", IdentityRelationCorrection(relation, CorrectionOperations.Same, plan.CaseId)));
+                question.Choices.Add(Choice(questionId, "different", "Different people", "Keep the provider IDs on different active Person Builder rows. Apply will persist the rejected identity relation with the final Emby layout.", IdentityRelationCorrection(relation, CorrectionOperations.Different, plan.CaseId)));
+                plan.Questions.Add(question);
+            }
+        }
+
+        private static ProviderCorrection IdentityRelationCorrection(IdentityRelationReview relation, string operation, string caseId) => new ProviderCorrection
+        {
+            Kind = CorrectionKinds.IdentityRelation,
+            Operation = operation,
+            Provider = relation.LeftProvider,
+            ProviderPersonId = relation.LeftProviderPersonId,
+            SecondaryProvider = relation.RightProvider,
+            SecondaryId = relation.RightProviderPersonId,
+            Reason = "OPERATOR_IDENTITY_RELATION",
+            Note = "Selected from final Person Builder layout for identity case " + caseId,
+            Enabled = true
+        };
+
+        private static string RelationKey(IdentityRelationReview relation)
+            => RelationKey(relation.LeftProvider, relation.LeftProviderPersonId, relation.RightProvider, relation.RightProviderPersonId);
+
+        private static string RelationKey(string leftProvider, string leftId, string rightProvider, string rightId)
+        {
+            var left = (leftProvider ?? string.Empty) + ":" + (leftId ?? string.Empty);
+            var right = (rightProvider ?? string.Empty) + ":" + (rightId ?? string.Empty);
+            return string.CompareOrdinal(left, right) <= 0 ? left + "|" + right : right + "|" + left;
+        }
+
         private static ProviderCorrection IdentityTargetCorrection(string[] key, string replacement, string caseId) => new ProviderCorrection
         {
             Kind = CorrectionKinds.IdentityTarget, Operation = CorrectionOperations.Replace, Provider = key.Length > 0 ? key[0] : ProviderNames.Tmdb,
@@ -515,9 +574,30 @@ namespace PersonCleaner.V2.Domain
             resultParts.AddRange(mutationParts);
             if (plan.State == IdentityPlanStates.CorrectionRequired && plan.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.Unresolved))
             {
-                plan.ApplyCaption = "Correction required — no Emby changes proposed yet";
-                plan.Summary = plan.DisplayName + " remains on the current Emby person while conflicting provider assertions are reviewed. No Emby person deletion, replacement, or ID change is proposed until the provider error is corrected.";
-                plan.Summary += " A human correction is required before Apply is available.";
+                plan.ApplyCaption = "Apply Person Builder layout";
+                plan.Summary = plan.DisplayName + " contains a provider identity whose destination was not determined automatically. Set the final person, provider-ID and credit layout in Person Builder, then Apply once.";
+                return;
+            }
+            var relationQuestions = plan.Questions.Where(x => x.Kind == CorrectionKinds.IdentityRelation).ToList();
+            if (plan.State == IdentityPlanStates.CorrectionRequired && relationQuestions.Count > 0)
+            {
+                var people = plan.CurrentPeople.Count;
+                plan.ApplyCaption = "Apply reviewed Person Builder layout";
+                plan.Summary = plan.DisplayName + " currently has " + people + " existing Emby " + (people == 1 ? "person" : "people") + " in this case. " +
+                    (relationQuestions.Count == 1 ? "One cross-provider relationship" : relationQuestions.Count + " cross-provider relationships") +
+                    " has positive but non-automatic identity evidence. Review the final person, provider-ID and credit layout, then Apply once.";
+                return;
+            }
+            if (plan.State == IdentityPlanStates.CorrectionRequired)
+            {
+                var people = plan.CurrentPeople.Count;
+                var ambiguousCredits = plan.Credits.Count(x => x.CorrectionRequired);
+                plan.ApplyCaption = "Apply reviewed Person Builder layout";
+                plan.Summary = plan.DisplayName + " currently has " + people + " existing Emby " + (people == 1 ? "person" : "people") + " in this case. " +
+                    (ambiguousCredits > 0
+                        ? ambiguousCredits + " local credit " + (ambiguousCredits == 1 ? "destination is" : "destinations are") + " not determined automatically. "
+                        : "The automatic evidence did not determine one complete final layout. ") +
+                    "Review the final person, provider-ID and credit layout, then Apply once.";
                 return;
             }
             plan.ApplyCaption = mutationParts.Count == 0 ? "No Emby changes required" : "Apply: " + string.Join(", ", mutationParts);
@@ -525,8 +605,7 @@ namespace PersonCleaner.V2.Domain
             plan.Summary = plan.DisplayName + " will become " + outcomes + " provider-identified Emby " + (outcomes == 1 ? "person" : "people") + ". " + (mutationParts.Count == 0 ? "No Emby changes are required." : char.ToUpperInvariant(resultParts[0][0]) + resultParts[0].Substring(1) + (resultParts.Count > 1 ? ", " + string.Join(", ", resultParts.Skip(1)) : string.Empty) + ".");
             if (plan.CaseType == "Provider records agree" && changes > 0)
                 AppendWarning(plan, "The provider records agree with each other, but the current Emby person still differs by " + changes + " provider ID" + (changes == 1 ? string.Empty : "s") + "; the reviewed plan shows that pending Emby alignment explicitly.");
-            if (plan.State == IdentityPlanStates.CorrectionRequired) plan.Summary += " A human correction is required before Apply is available.";
-            if (plan.State == IdentityPlanStates.Blocked) plan.Summary += " The current scope is incomplete, so Apply is unavailable.";
+            if (plan.State == IdentityPlanStates.CorrectionRequired) plan.Summary += " The final Person Builder layout remains an operator decision.";
         }
 
         private static bool BindingExplicitlyDiscredited(ResolutionInput input, LocalPerson person, string provider, string providerPersonId)
@@ -723,16 +802,20 @@ namespace PersonCleaner.V2.Domain
         private static string LocalId(LocalPerson person, string provider) => provider == ProviderNames.Tmdb ? person.TmdbId : provider == ProviderNames.Tvdb ? person.TvdbId : person.ImdbId;
         private static string FriendlyType(IEnumerable<ResolutionDecision> decisions)
         {
-            var values = decisions.Select(x => x.Status).Distinct(StringComparer.Ordinal).ToList();
+            var decisionList = decisions.ToList();
+            var relations = decisionList.SelectMany(x => x.IdentityRelationReviews ?? new List<IdentityRelationReview>()).ToList();
+            if (relations.Any(x => !x.HasConflict)) return "Possible cross-provider identity match";
+            if (relations.Count > 0) return "Cross-provider identity requires review";
+            var values = decisionList.Select(x => x.Status).Distinct(StringComparer.Ordinal).ToList();
             if (values.Count > 1) return "Mixed identity issues";
-            switch (values.FirstOrDefault()) { case "SPLIT": return "Possible combined identities"; case "CONFLATION": return "Provider attribution disagreement"; case "REALIGNMENT": return "Credits assigned to the wrong Emby person"; case "DRIFT": return "Emby provider-ID drift"; case "ORPHAN": return "Provider identity missing"; case "MATCH_WITH_CONFLICT": return "Identity aligned; provider metadata warning"; case "MATCH": return "Provider records agree"; default: return values.FirstOrDefault() ?? "Identity case"; }
+            switch (values.FirstOrDefault()) { case "SPLIT": return "Possible combined identities"; case "CONFLATION": return "Provider attribution disagreement"; case "REALIGNMENT": return "Local credit ownership requires review"; case "DRIFT": return "Emby provider-ID drift"; case "ORPHAN": return "Provider identity missing"; case "MATCH_WITH_CONFLICT": return "Identity aligned; provider metadata warning"; case "MATCH": return "Provider records agree"; default: return values.FirstOrDefault() ?? "Identity case"; }
         }
         private static void AppendWarning(IdentityCasePlan plan, string warning)
         {
             if (string.IsNullOrWhiteSpace(warning)) return;
             plan.Warning = string.IsNullOrWhiteSpace(plan.Warning) ? warning : plan.Warning + Environment.NewLine + warning;
         }
-        private static string Canonical(IdentityCasePlan plan) => plan.CaseId + "|" + plan.State + "|" + string.Join(";", plan.Outcomes.OrderBy(x => x.OutcomeId).Select(x => x.OutcomeId + ":" + x.TargetKind + ":" + x.TargetEmbyId + ":" + string.Join(",", x.ProviderIds.Select(y => y.Provider + "=" + y.ProviderId)))) + "|" + string.Join(";", plan.Credits.OrderBy(x => x.AssignmentId).Select(x => x.AssignmentId + ":" + x.TargetOutcomeId + ":" + x.CorrectionRequired + ":" + string.Join(",", x.Attributions.OrderBy(y => y.Provider, StringComparer.Ordinal).ThenBy(y => y.ProviderPersonId, StringComparer.Ordinal).Select(y => y.Provider + "=" + y.ProviderPersonId + "@" + y.OutcomeId + "#" + y.Role))));
+        private static string Canonical(IdentityCasePlan plan) => plan.CaseId + "|" + plan.State + "|" + string.Join(";", plan.Outcomes.OrderBy(x => x.OutcomeId).Select(x => x.OutcomeId + ":" + x.TargetKind + ":" + x.TargetEmbyId + ":" + string.Join(",", x.ProviderIds.Select(y => y.Provider + "=" + y.ProviderId)))) + "|" + string.Join(";", plan.Credits.OrderBy(x => x.AssignmentId).Select(x => x.AssignmentId + ":" + x.TargetOutcomeId + ":" + x.CorrectionRequired + ":" + string.Join(",", x.Attributions.OrderBy(y => y.Provider, StringComparer.Ordinal).ThenBy(y => y.ProviderPersonId, StringComparer.Ordinal).Select(y => y.Provider + "=" + y.ProviderPersonId + "@" + y.OutcomeId + "#" + y.Role)))) + "|" + string.Join(";", plan.Questions.OrderBy(x => x.QuestionId, StringComparer.Ordinal).Select(x => x.QuestionId + ":" + x.Kind + ":" + string.Join(",", x.Choices.OrderBy(y => y.ChoiceId, StringComparer.Ordinal).Select(y => y.Correction?.Kind + "=" + y.Correction?.Operation))));
         private static string StableHash(string value)
         {
             using (var sha = SHA256.Create()) return string.Concat(sha.ComputeHash(Encoding.UTF8.GetBytes(value ?? string.Empty)).Take(8).Select(x => x.ToString("x2", CultureInfo.InvariantCulture)));

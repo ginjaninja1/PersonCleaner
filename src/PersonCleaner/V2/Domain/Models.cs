@@ -262,6 +262,19 @@ namespace PersonCleaner.V2.Domain
         public List<MediaExample> ImpactedMedia { get; set; } = new List<MediaExample>();
         public List<MediaExample> MediaExamples { get; set; } = new List<MediaExample>();
         public List<ResolutionCreditAssignment> CreditAssignments { get; set; } = new List<ResolutionCreditAssignment>();
+        public List<IdentityRelationReview> IdentityRelationReviews { get; set; } = new List<IdentityRelationReview>();
+    }
+
+    public sealed class IdentityRelationReview
+    {
+        public string LeftProvider { get; set; }
+        public string LeftProviderPersonId { get; set; }
+        public string LeftName { get; set; }
+        public string RightProvider { get; set; }
+        public string RightProviderPersonId { get; set; }
+        public string RightName { get; set; }
+        public double Confidence { get; set; }
+        public bool HasConflict { get; set; }
     }
 
     public sealed class ResolutionCreditAssignment

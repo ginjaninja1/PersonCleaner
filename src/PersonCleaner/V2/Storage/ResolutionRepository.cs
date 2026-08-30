@@ -653,6 +653,21 @@ WHERE a.run_id=@run AND a.outcome='PRESENT'";
                     s.Bind("@run", runId); s.Bind("@case", caseId);
                     foreach (var r in s.Rows()) if (questions.TryGetValue(r.GetString(0), out var q)) q.Choices.Add(new IdentityQuestionChoice { ChoiceId = r.GetString(1), Caption = r.GetString(2), Effect = r.GetString(3), Correction = new ProviderCorrection { Kind = r.GetString(4), Operation = r.GetString(5), Provider = r.GetString(6), MediaType = r.GetString(7), ProviderMediaId = r.GetString(8), ProviderPersonId = r.GetString(9), FieldName = r.GetString(10), CurrentValue = r.GetString(11), ReplacementValue = r.GetString(12), SecondaryProvider = r.GetString(13), SecondaryId = r.GetString(14), EmbyId = r.IsDBNull(15) ? (long?)null : r.GetInt64(15), Reason = r.GetString(16), Note = r.GetString(17), Enabled = true } });
                 }
+                var nativeKeys = new HashSet<string>(plan.Outcomes.SelectMany(x => x.ProviderIds)
+                    .Where(x => x.Source == "native")
+                    .Select(x => x.Provider + ":" + x.ProviderId), StringComparer.Ordinal);
+                var legacyRelations = new List<IdentityRelationReview>();
+                using (var s = db.PrepareStatement("SELECT left_provider,left_provider_person_id,right_provider,right_provider_person_id,confidence FROM resolution_pair WHERE run_id=@run AND disposition='human-review' ORDER BY pair_id"))
+                {
+                    s.Bind("@run", runId);
+                    foreach (var r in s.Rows())
+                    {
+                        var leftProvider = r.GetString(0); var leftId = r.GetString(1); var rightProvider = r.GetString(2); var rightId = r.GetString(3);
+                        if (!nativeKeys.Contains(leftProvider + ":" + leftId) || !nativeKeys.Contains(rightProvider + ":" + rightId)) continue;
+                        legacyRelations.Add(new IdentityRelationReview { LeftProvider = leftProvider, LeftProviderPersonId = leftId, RightProvider = rightProvider, RightProviderPersonId = rightId, Confidence = r.GetDouble(4) });
+                    }
+                }
+                IdentityCasePlanner.EnsureIdentityRelationQuestions(plan, legacyRelations);
                 return plan;
             }
         }
@@ -886,8 +901,12 @@ FROM resolution_case c WHERE c.run_id=@run"))
             switch (value)
             {
                 case "Blocked by out-of-scope records": return "BLOCKED_BY_OUT_OF_SCOPE";
+                case "Provider ID also exists outside calculated scope": return "OUT_OF_SCOPE_ID_REVIEW";
                 case "Provider attribution disagreement": return "CONFLATION";
                 case "Credits assigned to the wrong Emby person": return "REALIGNMENT";
+                case "Local credit ownership requires review": return "REALIGNMENT";
+                case "Possible cross-provider identity match": return "IDENTITY_RELATION_REVIEW";
+                case "Cross-provider identity requires review": return "IDENTITY_RELATION_CONFLICT";
                 case "Possible combined identities": return "SPLIT";
                 case "Emby provider-ID drift": return "DRIFT";
                 case "Provider identity missing": return "ORPHAN";
@@ -920,8 +939,8 @@ ORDER BY CASE c.presentation_purpose WHEN 'PROBLEM' THEN 0 WHEN 'SATISFIED_CHANG
                         var row = new DashboardDecision
                         {
                             CaseId = r.GetString(0), Person = r.GetString(2), Status = r.GetString(3), Decision = summary,
-                            Action = applied ? "Applied" : purpose == CasePresentationPurposes.SatisfiedNoChange ? "No Emby changes required" : state == IdentityPlanStates.Complete ? apply : state == IdentityPlanStates.Blocked ? "Blocked — incomplete scope" : "Correction required",
-                            Automation = applied ? "Applied" : purpose == CasePresentationPurposes.SatisfiedNoChange ? "No work required" : purpose == CasePresentationPurposes.SatisfiedChange ? "Ready for Mass Corrections" : state == IdentityPlanStates.Blocked ? "Blocked" : "Manual oversight required",
+                            Action = applied ? "Applied" : purpose == CasePresentationPurposes.SatisfiedNoChange ? "No Emby changes required" : state == IdentityPlanStates.Complete ? apply : "Review in Person Builder",
+                            Automation = applied ? "Applied" : purpose == CasePresentationPurposes.SatisfiedNoChange ? "No work required" : purpose == CasePresentationPurposes.SatisfiedChange ? "Ready for Mass Corrections" : "Manual oversight required",
                             AutomationReason = string.IsNullOrWhiteSpace(warning) ? summary : summary + " " + warning,
                             Why = string.IsNullOrWhiteSpace(warning) ? summary : summary + " " + warning,
                             ImpactedTitles = r.GetInt(10), EmbyAnchor = "—", CurrentProviderIds = "No current provider IDs", ProviderIdentities = string.Empty
@@ -1107,8 +1126,8 @@ ORDER BY p.case_id,p.emby_id"))
                     var wasApplied = applied.Contains(plan.CaseId + "\n" + plan.PlanHash);
                     var hasMutations = HasMutationCaption(plan.ApplyCaption);
                     var noWork = plan.State == IdentityPlanStates.Complete && !hasMutations;
-                    row.Action = wasApplied ? "Applied" : noWork ? "No Emby changes required" : plan.State == IdentityPlanStates.Complete && !hasMutations ? "No Emby changes proposed" : plan.State == IdentityPlanStates.Complete ? plan.ApplyCaption : plan.State == IdentityPlanStates.Blocked ? "Blocked — incomplete scope" : "Correction required";
-                    row.Automation = wasApplied ? "Applied" : noWork ? "No work required" : plan.State == IdentityPlanStates.Complete && !hasMutations ? "Review evidence" : plan.State == IdentityPlanStates.Complete ? "Ready to apply" : plan.State == IdentityPlanStates.Blocked ? "Blocked" : "Correction required";
+                    row.Action = wasApplied ? "Applied" : noWork ? "No Emby changes required" : plan.State == IdentityPlanStates.Complete && !hasMutations ? "No Emby changes proposed" : plan.State == IdentityPlanStates.Complete ? plan.ApplyCaption : "Review in Person Builder";
+                    row.Automation = wasApplied ? "Applied" : noWork ? "No work required" : plan.State == IdentityPlanStates.Complete && !hasMutations ? "Review evidence" : plan.State == IdentityPlanStates.Complete ? "Ready to apply" : "Manual oversight required";
                     row.AutomationReason = string.IsNullOrWhiteSpace(plan.Warning) ? plan.Summary : plan.Summary + " " + plan.Warning;
                     if (wasApplied) row.AutomationReason += " This exact reviewed plan has already been applied.";
                 }

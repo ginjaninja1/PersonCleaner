@@ -59,23 +59,31 @@ namespace PersonCleaner.V2.UI
             ConfigureMediaColumns(detail, targets);
             master.masterDetail = new DxGridMasterDetail { enabled = true, autoExpandAll = false, childRowsFieldName = nameof(ReviewIdentityRow.Media), detailGridOptions = detail };
             var ui = new ReviewCaseDialogUI { PersonBuilder = new DxDataGrid(master), Rows = rows, LastAction = new ButtonItem(result ?? string.Empty) { IsEnabled = false } };
+            if (plan.State != IdentityPlanStates.Applied)
+            {
+                ui.Apply = new ButtonItem("Apply Person Builder layout")
+                {
+                    CommandId = ReviewCaseCommands.Apply,
+                    ConfirmationPrompt = "Apply exactly this person-ID and media-credit layout to current Emby?" + DuplicateConfirmation(draft, duplicateIdKeys)
+                };
+            }
             try
             {
                 var compilation = IdentityCasePersonBuilder.Compile(plan, draft);
                 var preview = compilation.Plan;
-                if (plan.State != IdentityPlanStates.Applied && plan.State != IdentityPlanStates.Blocked && preview.State == IdentityPlanStates.Complete)
+                if (ui.Apply != null)
                 {
                     var caption = IdentityCaseExecutor.HasMutations(preview) ? preview.ApplyCaption : "Apply: confirm layout";
                     ui.Apply = new ButtonItem(caption)
                     {
                         CommandId = ReviewCaseCommands.Apply,
-                        ConfirmationPrompt = "Apply exactly this person-ID and media-credit layout to Emby after re-reading live Emby?" + DuplicateConfirmation(draft, duplicateIdKeys)
+                        ConfirmationPrompt = "Apply exactly this person-ID and media-credit layout to current Emby?" + DuplicateConfirmation(draft, duplicateIdKeys)
                     };
                 }
             }
             catch (Exception ex)
             {
-                ui.LastAction = new ButtonItem(string.IsNullOrWhiteSpace(result) ? "Apply unavailable: " + ex.Message : result) { IsEnabled = false };
+                ui.LastAction = new ButtonItem(string.IsNullOrWhiteSpace(result) ? "Current layout: " + ex.Message : result) { IsEnabled = false };
             }
             return ui;
         }
@@ -518,10 +526,6 @@ namespace PersonCleaner.V2.UI
                 {
                     if (!string.IsNullOrWhiteSpace(data)) draft = ReviewCaseDialogUI.Capture(draft, json.DeserializeFromString<ReviewCaseDialogUI>(data), false);
                     var compilation = IdentityCasePersonBuilder.Compile(plan, draft);
-                    var fresh = LoadPlan();
-                    if (fresh.PlanHash != compilation.ReviewedPlanHash) throw new InvalidOperationException("The evidence changed after this layout was displayed. Review the latest case before applying.");
-                    if (fresh.State == IdentityPlanStates.Applied) throw new InvalidOperationException("This exact case has already been applied.");
-                    if (fresh.State == IdentityPlanStates.Blocked) throw new InvalidOperationException("This case is blocked because the evaluated scope is incomplete.");
                     var appliedPlan = compilation.Plan;
                     var library = host.Resolve<ILibraryManager>();
                     var beforeMetadata = IdentityApplyAudit.CaptureBefore(appliedPlan, library);
@@ -585,7 +589,7 @@ namespace PersonCleaner.V2.UI
             catch (Exception ex)
             {
                 logger.ErrorException("Unable to rebuild the PersonCleaner person-builder dialog", ex);
-                plan = plan ?? new IdentityCasePlan { CaseId = caseId, DisplayName = "Selected identity case", CaseType = "Unavailable", Summary = "The case is no longer available.", State = IdentityPlanStates.Blocked };
+                plan = plan ?? new IdentityCasePlan { CaseId = caseId, DisplayName = "Selected identity case", CaseType = "Unavailable", Summary = "The case is no longer available.", State = IdentityPlanStates.CorrectionRequired };
                 draft = draft ?? PersonBuilderDraft.FromPlan(plan);
                 result = result ?? "The case could not be reloaded: " + ex.Message; Render();
             }

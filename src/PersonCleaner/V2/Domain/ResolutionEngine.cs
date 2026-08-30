@@ -602,7 +602,10 @@ namespace PersonCleaner.V2.Domain
 
             var moves = assignments.Where(x => x.Disposition == "MOVE").ToList();
             var ownersDistinct = ownerByComponent.Count == region.Components.Count && ownerByComponent.Values.Select(x => x.Person.EmbyId).Distinct().Count() == region.Components.Count;
-            var unresolvedBoundary = candidates.Any(x => x.Disposition == "human-review" && region.Components.Any(c => c.ProviderKeys.Contains(x.Left.Key)) && region.Components.Any(c => c.ProviderKeys.Contains(x.Right.Key)));
+            var reviewBoundaries = candidates.Where(x => x.Disposition == "human-review" &&
+                region.Components.Any(c => c.ProviderKeys.Contains(x.Left.Key)) &&
+                region.Components.Any(c => c.ProviderKeys.Contains(x.Right.Key))).OrderBy(x => x.PairKey, StringComparer.Ordinal).ToList();
+            var unresolvedBoundary = reviewBoundaries.Count > 0;
             var automatic = ownerAmbiguity == 0 && ownersDistinct && ambiguousCredits == 0 && moves.Count > 0 && !unresolvedBoundary;
             var providerKeys = region.Components.SelectMany(x => x.ProviderKeys).OrderBy(x => x, StringComparer.Ordinal).ToList();
             var primary = moves.GroupBy(x => x.TargetPersonEmbyId).OrderByDescending(x => x.Count()).ThenBy(x => x.Key).Select(x => (long?)x.Key).FirstOrDefault()
@@ -616,20 +619,61 @@ namespace PersonCleaner.V2.Domain
                 DisplayName = string.IsNullOrWhiteSpace(names) ? "Local person reconciliation" : names,
                 AnchorEmbyPersonId = primary,
                 ProviderKeys = string.Join(", ", providerKeys),
-                Confidence = automatic ? 1 : 0.5,
+                Confidence = reviewBoundaries.Count > 0 ? reviewBoundaries.Min(x => x.Score.Score) : automatic ? 1 : 0.5,
                 LocalAnchorConfidence = ownerAmbiguity == 0 ? 1 : 0,
-                Headline = automatic
+                Headline = reviewBoundaries.Count > 0
+                    ? IdentityRelationHeadline(reviewBoundaries)
+                    : automatic
                     ? moves.Count + " local credit relationship(s) should be redistributed between " + region.LocalPeople.Count + " existing Emby people while preserving each provider identity."
                     : "Multiple provider identities and Emby people overlap, but the exact local credit redistribution is not uniquely determined.",
-                Explanation = automatic
+                Explanation = reviewBoundaries.Count > 0
+                    ? "The provider records have enough compatible identity evidence for human review but not enough for an automatic join. Review the complete final Emby-person, provider-ID and credit layout once; Apply records the identity decision and its resulting corrections."
+                    : automatic
                     ? "Each provider component has one distinct direct Emby owner, and every affected credit maps to exactly one component by canonical media, compatible naming and role attribution. Provider IDs remain unchanged."
                     : "No automatic mutation is offered unless every component has a distinct direct owner and every relevant local credit has one unambiguous component assignment.",
                 CreditAssignments = assignments
             };
+            foreach (var boundary in reviewBoundaries)
+            {
+                decision.IdentityRelationReviews.Add(new IdentityRelationReview
+                {
+                    LeftProvider = boundary.Left.Provider,
+                    LeftProviderPersonId = boundary.Left.ProviderId,
+                    LeftName = boundary.Left.Name,
+                    RightProvider = boundary.Right.Provider,
+                    RightProviderPersonId = boundary.Right.ProviderId,
+                    RightName = boundary.Right.Name,
+                    Confidence = boundary.Score.Score,
+                    HasConflict = boundary.Score.HasMetadataConflict || boundary.Score.CompetingAttributionCount > 0
+                });
+            }
             decision.Evidence.Add(new EvidenceLine { SortOrder = 1, SignalType = "LOCAL_RECONCILIATION", Verdict = automatic ? "supports" : "review", Narrative = region.Components.Count + " provider component(s) and " + region.LocalPeople.Count + " Emby people form one connected local-attribution region; exact moves=" + moves.Count + ", ambiguous credits=" + ambiguousCredits + ", ambiguous owners=" + ownerAmbiguity + ".", Metric = "components=" + region.Components.Count + ";people=" + region.LocalPeople.Count + ";moves=" + moves.Count + ";ambiguous_credits=" + ambiguousCredits + ";ambiguous_owners=" + ownerAmbiguity });
             decision.Evidence.Add(new EvidenceLine { SortOrder = 2, SignalType = "COMPONENT_OWNERS", Verdict = ownersDistinct ? "supports" : "review", Narrative = ownerByComponent.Count == 0 ? "No component has a unique direct Emby owner." : string.Join("; ", ownerByComponent.OrderBy(x => x.Key).Select(x => string.Join(", ", region.Components.Single(c => c.Index == x.Key).ProviderKeys.OrderBy(y => y, StringComparer.Ordinal)) + " → Emby person " + x.Value.Person.EmbyId)), Metric = "resolved=" + ownerByComponent.Count + ";required=" + region.Components.Count });
+            for (var relationIndex = 0; relationIndex < reviewBoundaries.Count; relationIndex++)
+            {
+                var boundary = reviewBoundaries[relationIndex];
+                decision.Evidence.Add(new EvidenceLine
+                {
+                    SortOrder = 3 + relationIndex,
+                    SignalType = "IDENTITY_RELATION_REVIEW",
+                    Verdict = boundary.Score.HasMetadataConflict || boundary.Score.CompetingAttributionCount > 0 ? "mixed" : "supports",
+                    Narrative = ProviderPerson(boundary.Left) + " and " + ProviderPerson(boundary.Right) + " may represent the same person. The evidence score is " + boundary.Score.Score.ToString("0.000", CultureInfo.InvariantCulture) + "; no automatic identity join was made.",
+                    Metric = "left=" + boundary.Left.Key + ";right=" + boundary.Right.Key + ";score=" + boundary.Score.Score.ToString("0.000000", CultureInfo.InvariantCulture) + ";conflict=" + (boundary.Score.HasMetadataConflict || boundary.Score.CompetingAttributionCount > 0 ? "true" : "false")
+                });
+            }
+            if (reviewBoundaries.Count > 0) AddPairEvidence(decision, reviewBoundaries.OrderBy(x => x.Score.Score).First().Score);
             PopulateImpactedFromAssignments(decision, index);
             return decision;
+        }
+
+        private static string IdentityRelationHeadline(IReadOnlyCollection<Candidate> boundaries)
+        {
+            if (boundaries.Count == 1)
+            {
+                var boundary = boundaries.First();
+                return ProviderPerson(boundary.Left) + " and " + ProviderPerson(boundary.Right) + " may represent the same person; their relationship and resulting Emby layout require one human decision.";
+            }
+            return boundaries.Count + " cross-provider identity relationships have positive but non-automatic evidence; review the complete resulting Emby layout once.";
         }
 
         private static bool CreditMatchesComponent(LocalPerson local, LocalCredit credit, ComponentState state, HashSet<string> mediaKeys, string mediaType)
@@ -752,16 +796,27 @@ namespace PersonCleaner.V2.Domain
                 ProviderKeys = candidate.Left.Key + ", " + candidate.Right.Key,
                 Confidence = candidate.Score.Score,
                 Headline = uncorroboratedNativeCrosswalk
-                    ? ProviderPerson(candidate.Right) + " links to " + ProviderPerson(candidate.Left) + ", but their media credits do not confirm that they are the same person."
+                    ? ProviderPerson(candidate.Left) + " and " + ProviderPerson(candidate.Right) + " may represent the same person: one provider links them, but their media credits do not confirm the relationship."
                     : conflict
                     ? ReviewConflictHeadline(candidate, input)
-                    : ProviderPerson(candidate.Left) + " and " + ProviderPerson(candidate.Right) + " share " + candidate.Score.SharedMediaCount + " role-compatible title credit(s), but that is not enough to identify them as the same person automatically.",
+                    : ProviderPerson(candidate.Left) + " and " + ProviderPerson(candidate.Right) + " may represent the same person: they share " + candidate.Score.SharedMediaCount + " role-compatible title credit(s), but that is not enough to identify them as the same person automatically.",
                 Explanation = uncorroboratedNativeCrosswalk
                     ? "A provider person cross-reference is useful evidence, but PersonCleaner also requires corroboration from names, stable IDs, birth dates, or role-compatible credits before joining the records."
                     : conflict
                     ? ReviewConflictExplanation(candidate, input, recommendation)
                     : "The providers do not explicitly disagree. The observed support is simply below the automatic threshold; a missing provider field does not count against either person."
             };
+            decision.IdentityRelationReviews.Add(new IdentityRelationReview
+            {
+                LeftProvider = candidate.Left.Provider,
+                LeftProviderPersonId = candidate.Left.ProviderId,
+                LeftName = candidate.Left.Name,
+                RightProvider = candidate.Right.Provider,
+                RightProviderPersonId = candidate.Right.ProviderId,
+                RightName = candidate.Right.Name,
+                Confidence = candidate.Score.Score,
+                HasConflict = candidate.Score.HasMetadataConflict || candidate.Score.CompetingAttributionCount > 0
+            });
             AddPairEvidence(decision, candidate.Score);
             if (recommendation != null) decision.Evidence.Add(RecommendationEvidence(recommendation, input));
             var localIds = new List<long>();

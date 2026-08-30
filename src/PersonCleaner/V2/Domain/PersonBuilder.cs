@@ -181,7 +181,11 @@ namespace PersonCleaner.V2.Domain
             {
                 IdentityQuestionChoice selected = null;
                 IdentityOutcome selectedOutcome = null;
-                if (!string.IsNullOrWhiteSpace(question.AssignmentId) && credits.TryGetValue(question.AssignmentId, out var credit))
+                if (question.Kind == CorrectionKinds.IdentityRelation)
+                {
+                    selected = IdentityRelationChoice(question, result);
+                }
+                else if (!string.IsNullOrWhiteSpace(question.AssignmentId) && credits.TryGetValue(question.AssignmentId, out var credit))
                 {
                     selectedOutcome = result.Outcomes.FirstOrDefault(x => x.OutcomeId == credit.TargetOutcomeId);
                     selected = question.Choices.Where(x => CreditChoiceTargets(x?.Correction, selectedOutcome, credit.TargetOutcomeId))
@@ -199,8 +203,8 @@ namespace PersonCleaner.V2.Domain
                 if (selected?.Correction == null)
                 {
                     if (QuestionResolvedBySelectedIdentity(source, question, selectedOutcome)) continue;
-                    if (question.Choices.Count > 0)
-                        throw new InvalidOperationException("The selected layout does not fully resolve: " + question.Narrative + " Review that media destination and the provider IDs on its person.");
+                    // The Person Builder layout is the operation. Contextual
+                    // corrections are derived outputs and may never veto Apply.
                     continue;
                 }
                 yield return new PersonBuilderCorrectionSelection
@@ -211,6 +215,21 @@ namespace PersonCleaner.V2.Domain
                 };
             }
         }
+
+        private static IdentityQuestionChoice IdentityRelationChoice(IdentityQuestion question, IdentityCasePlan result)
+        {
+            var choices = question.Choices.Where(x => x?.Correction?.Kind == CorrectionKinds.IdentityRelation).ToList();
+            var relation = choices.Select(x => x.Correction).FirstOrDefault();
+            if (relation == null) return null;
+            var leftOwners = RelationOwners(result, relation.Provider, relation.ProviderPersonId);
+            var rightOwners = RelationOwners(result, relation.SecondaryProvider, relation.SecondaryId);
+            if (leftOwners.Count != 1 || rightOwners.Count != 1) return null;
+            var operation = leftOwners[0].OutcomeId == rightOwners[0].OutcomeId ? CorrectionOperations.Same : CorrectionOperations.Different;
+            return choices.FirstOrDefault(x => Same(x.Correction.Operation, operation));
+        }
+
+        private static List<IdentityOutcome> RelationOwners(IdentityCasePlan plan, string provider, string providerPersonId) =>
+            plan.Outcomes.Where(x => x.ProviderIds.Any(y => y.Source == "native" && Same(y.Provider, provider) && Same(y.ProviderId, providerPersonId))).ToList();
 
         private static bool QuestionResolvedBySelectedIdentity(IdentityCasePlan source, IdentityQuestion question, IdentityOutcome selectedOutcome)
         {

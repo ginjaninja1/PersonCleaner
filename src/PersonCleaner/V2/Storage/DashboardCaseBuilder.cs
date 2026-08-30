@@ -65,8 +65,8 @@ namespace PersonCleaner.V2.Storage
             string automation; string automationReason; string action;
             if (blocked)
             {
-                automation = "Blocked"; action = ResolutionActions.IncompleteScope;
-                automationReason = "Automatic resolution is withheld because the evaluated scope does not contain every relevant Emby owner or required provider observation.";
+                automation = "Manual oversight required"; action = ResolutionActions.IncompleteScope;
+                automationReason = "Automatic resolution is withheld because the evaluated scope does not contain every relevant Emby owner or required provider observation. The case remains in the normal Person Builder review workflow.";
             }
             else if (allRelationshipsRecommendOneCorrection)
             {
@@ -148,7 +148,7 @@ namespace PersonCleaner.V2.Storage
                 case "MATCH": return "Provider records agree";
                 case "MATCH_WITH_CONFLICT": return "Identity aligned; provider metadata warning";
                 case "ORPHAN": return "Provider identity missing";
-                case "REALIGNMENT": return "Credits assigned to the wrong Emby person";
+                case "REALIGNMENT": return "Local credit ownership requires review";
                 case "SPLIT": return "Possible combined identities";
                 case "MIXED": return "Mixed identity issues";
                 default: return status;
@@ -160,7 +160,7 @@ namespace PersonCleaner.V2.Storage
             switch (action)
             {
                 case "SUGGESTED_PROVIDER_CORRECTION": return "Suggested provider correction";
-                case "INCOMPLETE_SCOPE": return "Blocked — incomplete scope";
+                case "INCOMPLETE_SCOPE": return "Provider ID also exists outside calculated scope";
                 case "HUMAN_REVIEW": return "Human review";
                 case "FORCE_SPLIT_REVIEW": return "Human review — possible split";
                 case "REVIEW_REMOVE_STALE_PROVIDER_ID": return "Human review — stale provider ID";

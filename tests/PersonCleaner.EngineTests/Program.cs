@@ -40,6 +40,7 @@ internal static class Program
         Run("explicitly in-scope provider owner participates in merge", InScopeProviderOwnerParticipatesInMerge);
         Run("Samantha Kelly mixed local credits become one exact realignment", SamanthaKellyCreditsRealignExactly);
         Run("ambiguous Samantha Kelly credit withholds realignment", SamanthaKellyAmbiguityWithholdsMutation);
+        Run("possible identity realignment is adjudicated once by the person builder", PossibleIdentityRealignmentUsesSingleBuilderAdjudication);
         Run("operator bridge joins disconnected provider records", OperatorBridgeJoinsRecords);
         Run("operator rejection keeps shared-media records separate", OperatorRejectionKeepsRecordsSeparate);
         Run("orphan without provider IDs has persistable provider text", OrphanWithoutIdsHasProviderText);
@@ -496,6 +497,8 @@ internal static class Program
         var decisions = new ResolutionEngine().Resolve(input, new ResolutionSettings());
         var review = decisions.Single(x => x.Status == "CONFLATION");
         Equal(800L, review.AnchorEmbyPersonId.Value);
+        Equal(1, review.IdentityRelationReviews.Count);
+        True(review.Headline.Contains("may represent the same person"));
         True(!decisions.Any(x => x.Status == "SPLIT"));
     }
 
@@ -727,7 +730,8 @@ internal static class Program
         Equal(ResolutionActions.IncompleteScope, decision.Action);
         True(decision.Evidence.Any(x => x.SignalType == "GLOBAL_BINDING_OWNER" && x.Narrative.Contains("402058")));
         var identityCase = IdentityCasePlanner.Build(1, input, decisions, engine.Clusters).Single();
-        Equal("Blocked by out-of-scope records", identityCase.CaseType);
+        Equal("Provider ID also exists outside calculated scope", identityCase.CaseType);
+        Equal(IdentityPlanStates.CorrectionRequired, identityCase.State);
         Equal(CasePresentationPurposes.Problem, identityCase.PresentationPurpose);
         var plan = DecisionChangePlanner.Build(new DecisionChangeContext { Decision = decision, LocalPeople = input.LocalPeople, GlobalLocalPeople = input.GlobalLocalPeople, ProposedProviderPeople = input.ProviderPeople });
         Equal(0, plan.Changes.Count);
@@ -789,6 +793,91 @@ internal static class Program
         True(decision.Evidence.Any(x => x.SignalType == "LOCAL_RECONCILIATION" && x.Metric.Contains("ambiguous_credits=1")));
         var context = new DecisionChangeContext { Decision = decision, LocalPeople = input.LocalPeople, GlobalLocalPeople = input.GlobalLocalPeople, LocalCredits = input.LocalCredits, ProposedProviderPeople = input.ProviderPeople, CreditAssignments = decision.CreditAssignments };
         Equal(0, DecisionChangePlanner.Build(context).Changes.Count);
+    }
+
+    private static void PossibleIdentityRealignmentUsesSingleBuilderAdjudication()
+    {
+        const string shared = "canonical:cracker:1:4";
+        var tmdb = Person(ProviderNames.Tmdb, "1466854", "Al T. Kossy", ProviderNames.Imdb, "nm0467324", shared, "canonical:bread:1:5", "canonical:bread:5:12");
+        var tvdb = Person(ProviderNames.Tvdb, "8679071", "Al T Kossy", null, null, "canonical:cracker:1:3", shared, "canonical:cracker:1:5");
+        AddObservedCredit(tmdb, shared, "Actor", "Expert in Pub", MediaTypes.Episode, "coordinate:35:1:4");
+        AddObservedCredit(tmdb, "canonical:bread:1:5", "Actor", "Funeral Bearer", MediaTypes.Episode, "coordinate:11563:1:5");
+        AddObservedCredit(tmdb, "canonical:bread:5:12", "Actor", "Antique Dealer", MediaTypes.Episode, "coordinate:11563:5:12");
+        AddObservedCredit(tvdb, "canonical:cracker:1:3", "Actor", "Expert In Pub", MediaTypes.Episode, "293990");
+        AddObservedCredit(tvdb, shared, "Actor", "Expert In Pub", MediaTypes.Episode, "293991");
+        AddObservedCredit(tvdb, "canonical:cracker:1:5", "Actor", "Expert In Pub", MediaTypes.Episode, "293993");
+
+        var input = BaseInput(tmdb, tvdb);
+        input.ProviderCredits.AddRange(tmdb.Credits.Concat(tvdb.Credits));
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 57963, Name = "Al T. Kossy", TmdbId = "1466854" });
+        input.LocalPeople.Add(new LocalPerson { EmbyId = 418696, Name = "Al T Kossy", TvdbId = "8679071" });
+        input.GlobalLocalPeople.AddRange(input.LocalPeople);
+        AddEpisode(input, 48388, "Episode 5", "coordinate:11563:1:5", null, "canonical:bread:1:5", 57963, "GuestStar: Funeral Bearer");
+        AddEpisode(input, 48434, "Episode 12", "coordinate:11563:5:12", null, "canonical:bread:5:12", 57963, "GuestStar: Antique Dealer");
+        AddEpisode(input, 383279, "To Say I Love You (1)", null, "293990", "canonical:cracker:1:3", 418696, "Actor: Expert In Pub");
+        AddEpisode(input, 383280, "To Say I Love You (2)", "coordinate:35:1:4", "293991", shared, 418696, "Actor: Expert In Pub");
+        AddEpisode(input, 383281, "To Say I Love You (3)", null, "293993", "canonical:cracker:1:5", 418696, "Actor: Expert In Pub");
+
+        var engine = new ResolutionEngine();
+        var decisions = engine.Resolve(input, new ResolutionSettings());
+        var decision = decisions.Single(x => x.Status == "REALIGNMENT");
+        Equal("human-review", engine.PairEvaluations.Single().Disposition);
+        Equal(1, decision.IdentityRelationReviews.Count);
+        True(decision.Headline.Contains("may represent the same person"));
+        True(decision.Evidence.Any(x => x.SignalType == "IDENTITY_RELATION_REVIEW"));
+        True(decision.Evidence.Any(x => x.SignalType == "FILMOGRAPHY"));
+
+        var plan = IdentityCasePlanner.Build(41, input, decisions, engine.Clusters).Single();
+        Equal("Possible cross-provider identity match", plan.CaseType);
+        Equal(IdentityPlanStates.CorrectionRequired, plan.State);
+        True(plan.Summary.Contains("currently has 2 existing Emby people"));
+        True(!plan.Summary.Contains("will become"));
+        Equal(1, plan.Questions.Count(x => x.Kind == CorrectionKinds.IdentityRelation));
+        var legacyPlan = new IdentityCasePlan { CaseId = "legacy-kossy" };
+        IdentityCasePlanner.EnsureIdentityRelationQuestions(legacyPlan, decision.IdentityRelationReviews);
+        IdentityCasePlanner.EnsureIdentityRelationQuestions(legacyPlan, decision.IdentityRelationReviews);
+        Equal(1, legacyPlan.Questions.Count(x => x.Kind == CorrectionKinds.IdentityRelation));
+
+        var separate = IdentityCasePersonBuilder.Compile(plan, PersonBuilderDraft.FromPlan(plan));
+        True(separate.Corrections.Any(x => x.Kind == CorrectionKinds.IdentityRelation && x.Operation == CorrectionOperations.Different));
+        True(separate.Corrections.Any(x => x.Kind == CorrectionKinds.MediaCredit));
+
+        var oneSurvivorDraft = PersonBuilderDraft.FromPlan(plan);
+        var oneSurvivor = oneSurvivorDraft.People.Single(x => x.TargetEmbyId == 57963);
+        foreach (var credit in oneSurvivorDraft.Credits) credit.TargetOutcomeId = oneSurvivor.OutcomeId;
+        var oneSurvivorCompilation = IdentityCasePersonBuilder.Compile(plan, oneSurvivorDraft);
+        Equal(1, IdentityCasePersonBuilder.MediaBearingOutcomes(oneSurvivorCompilation.Plan).Count);
+        True(!oneSurvivorCompilation.Corrections.Any(x => x.Kind == CorrectionKinds.IdentityRelation));
+
+        var mergedDraft = PersonBuilderDraft.FromPlan(plan);
+        var retained = mergedDraft.People.Single(x => x.TargetEmbyId == 418696);
+        var released = mergedDraft.People.Single(x => x.TargetEmbyId == 57963);
+        retained.TmdbId = "1466854";
+        retained.TvdbId = "8679071";
+        retained.ImdbId = "nm0467324";
+        released.Include = false;
+        foreach (var credit in mergedDraft.Credits) credit.TargetOutcomeId = retained.OutcomeId;
+        var merged = IdentityCasePersonBuilder.Compile(plan, mergedDraft);
+        Equal(1, merged.Corrections.Count);
+        Equal(CorrectionKinds.IdentityRelation, merged.Corrections[0].Kind);
+        Equal(CorrectionOperations.Same, merged.Corrections[0].Operation);
+        True(!merged.Corrections.Any(x => x.Kind == CorrectionKinds.MediaCredit));
+        Equal(1, IdentityCasePersonBuilder.MediaBearingOutcomes(merged.Plan).Count);
+    }
+
+    private static void AddEpisode(ResolutionInput input, long id, string name, string tmdbId, string tvdbId, string canonicalKey, long personId, string role)
+    {
+        input.Media.Add(new MediaSeed
+        {
+            EmbyId = id,
+            MediaType = MediaTypes.Episode,
+            Name = name,
+            TmdbAcquisitionId = tmdbId,
+            TvdbId = tvdbId,
+            TvdbAcquisitionId = tvdbId,
+            CanonicalMediaKeys = new HashSet<string> { canonicalKey }
+        });
+        input.LocalCredits.Add(new LocalCredit { PersonEmbyId = personId, MediaEmbyId = id, Role = role });
     }
 
     private static ResolutionInput SamanthaKellyInput()
@@ -983,8 +1072,8 @@ internal static class Program
         row.Details = row.Details.Concat(new[] { new DashboardDetail { DetailId = "owner", Signal = "GLOBAL_BINDING_OWNER", Verdict = "blocked", Explanation = "Another Emby person owns the provider ID." } }).ToArray();
 
         var reviewCase = DashboardCaseBuilder.Build(new[] { row }).Single();
-        Equal("Blocked", reviewCase.Automation);
-        Equal("Blocked — incomplete scope", reviewCase.Action);
+        Equal("Manual oversight required", reviewCase.Automation);
+        Equal("Provider ID also exists outside calculated scope", reviewCase.Action);
     }
 
     private static void ReviewCasesDoNotGroupByName()
@@ -1216,6 +1305,8 @@ internal static class Program
         Equal(IdentityPlanStates.CorrectionRequired, plan.State);
         True(plan.Questions.Any(x => x.Kind == CorrectionKinds.LocalCreditTarget && x.Choices.Count == 2));
         True(plan.Credits.Single().CorrectionRequired);
+        True(plan.Summary.Contains("local credit destination"));
+        True(!plan.Summary.Contains("will become"));
     }
 
     private static void HolisticCrosswalkConflictDoesNotDisputeCredit()
@@ -1432,9 +1523,9 @@ internal static class Program
 
         existing.TvdbId = "999";
         var unresolved = ReviewCaseDialogUI.Build(plan, draft, "server", null);
-        True(unresolved.Apply == null);
-        True(unresolved.LastAction.Caption.Contains("selected layout does not fully resolve"));
-        True(!unresolved.LastAction.Caption.Contains("correction rule"));
+        True(unresolved.Apply != null);
+        Equal(string.Empty, unresolved.LastAction.Caption);
+        Equal(0, IdentityCasePersonBuilder.Compile(plan, draft).Corrections.Count);
     }
 
     private static void PersonBuilderCreatesAndMoves()
@@ -1534,8 +1625,12 @@ internal static class Program
         True(failed);
 
         var ui = ReviewCaseDialogUI.Build(plan, draft, "server", null);
-        True(ui.Apply == null);
-        True(ui.LastAction.Caption.Contains("Apply unavailable:") && ui.LastAction.Caption.Contains("needs a TMDB or TVDB person ID"));
+        True(ui.Apply != null);
+        True(ui.LastAction.Caption.Contains("Current layout:") && ui.LastAction.Caption.Contains("needs a TMDB or TVDB person ID"));
+
+        plan.State = IdentityPlanStates.CorrectionRequired;
+        var blocked = ReviewCaseDialogUI.Build(plan, PersonBuilderDraft.FromPlan(plan), "server", null);
+        True(blocked.Apply != null);
     }
 
     private static void PersonBuilderRequiresIdentityDestination()

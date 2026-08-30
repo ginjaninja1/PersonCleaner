@@ -6,7 +6,6 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
-using System.Threading;
 
 namespace PersonCleaner.V2.UI
 {
@@ -25,8 +24,10 @@ namespace PersonCleaner.V2.UI
             var receipt = new IdentityCaseApplyReceipt();
             foreach (var outcome in IdentityCasePersonBuilder.MediaBearingOutcomes(plan).Where(x => x.TargetEmbyId.HasValue)) receipt.OutcomeEmbyIds[outcome.OutcomeId] = outcome.TargetEmbyId.Value;
             var personSnapshots = SnapshotPeople(plan.CurrentPeople.Select(x => x.EmbyId));
-            var mediaSnapshots = plan.Credits.Where(x => x.Disposition == "MOVE").Select(x => x.MediaEmbyId).Distinct().ToDictionary(x => x, x => liveMediaPeople[x].Select(Clone).ToList());
-            var written = HasMutations(plan);
+            var mediaSnapshots = plan.Credits.Select(x => x.MediaEmbyId).Distinct().ToDictionary(x => x, x => liveMediaPeople[x].Select(Clone).ToList());
+            // Apply is authoritative. Even a plan that matched the calculation-time
+            // snapshot may need to overwrite live drift that occurred before the click.
+            var written = true;
             var resolverTokens = new Dictionary<long, string>();
             var targetPeople = new Dictionary<long, Person>();
             try
@@ -34,7 +35,7 @@ namespace PersonCleaner.V2.UI
                 ApplyExistingProviderIds(plan, receipt);
                 try
                 {
-                    foreach (var media in plan.Credits.Where(x => x.Disposition == "MOVE").GroupBy(x => x.MediaEmbyId).OrderBy(x => x.Key))
+                    foreach (var media in plan.Credits.GroupBy(x => x.MediaEmbyId).OrderBy(x => x.Key))
                         ApplyMedia(plan, media.Key, media.ToList(), liveMediaPeople, receipt, resolverTokens, targetPeople);
                 }
                 finally { RemoveResolverTokens(resolverTokens, targetPeople); }
@@ -83,34 +84,13 @@ namespace PersonCleaner.V2.UI
                 throw new InvalidOperationException("A proposed new person lacks a provider-native ID or assigned media credit.");
             foreach (var snapshot in plan.CurrentPeople)
             {
-                var live = library.GetItemById(snapshot.EmbyId) as Person ?? throw new InvalidOperationException("Emby person " + snapshot.EmbyId + " no longer exists.");
-                if (!string.Equals(live.Name ?? string.Empty, snapshot.Name ?? string.Empty, StringComparison.Ordinal) || !Same(ProviderId(live, ProviderNames.Tmdb), snapshot.TmdbId) || !Same(ProviderId(live, ProviderNames.Tvdb), snapshot.TvdbId) || !Same(ProviderId(live, ProviderNames.Imdb), snapshot.ImdbId))
-                    throw new InvalidOperationException("Emby person " + snapshot.EmbyId + " changed after this plan was calculated. Rebuild the evidence before applying.");
+                if (!(library.GetItemById(snapshot.EmbyId) is Person)) throw new InvalidOperationException("Emby person " + snapshot.EmbyId + " no longer exists.");
             }
             foreach (var outcome in finalOutcomes.Where(x => x.TargetEmbyId.HasValue))
                 if (!(library.GetItemById(outcome.TargetEmbyId.Value) is Person)) throw new InvalidOperationException("Target Emby person " + outcome.TargetEmbyId.Value + " no longer exists.");
             foreach (var mediaGroup in plan.Credits.GroupBy(x => x.MediaEmbyId))
             {
                 if (library.GetItemById(mediaGroup.Key) == null) throw new InvalidOperationException("Emby media " + mediaGroup.Key + " no longer exists.");
-                var live = liveMediaPeople[mediaGroup.Key];
-                foreach (var credit in mediaGroup)
-                    if (!live.Any(x => x.Id == credit.SourcePersonEmbyId && RoleText(x) == credit.Role))
-                        throw new InvalidOperationException("The reviewed credit '" + credit.Role + "' on Emby media " + credit.MediaEmbyId + " changed after calculation.");
-            }
-            var currentIds = new HashSet<long>(plan.CurrentPeople.Select(x => x.EmbyId));
-            var requestedProviderIds = finalOutcomes.SelectMany(DesiredProviderIds)
-                .Where(x => !string.IsNullOrWhiteSpace(x.Value))
-                .Select(x => new KeyValuePair<string, string>(ProviderName(x.Key), x.Value))
-                .Distinct(ProviderIdPairComparer.Instance).ToList();
-            var global = requestedProviderIds.Count == 0
-                ? new List<Person>()
-                : library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { typeof(Person).Name }, Recursive = true, AnyProviderIdEquals = requestedProviderIds }, CancellationToken.None).OfType<Person>().ToList();
-            foreach (var outcome in finalOutcomes)
-            foreach (var id in DesiredProviderIds(outcome))
-            {
-                var owner = global.FirstOrDefault(x => !currentIds.Contains(x.InternalId) && Same(ProviderId(x, id.Key), id.Value));
-                if (owner != null && (!outcome.TargetEmbyId.HasValue || owner.InternalId != outcome.TargetEmbyId.Value))
-                    throw new InvalidOperationException(id.Key.ToUpperInvariant() + " person ID " + id.Value + " is now owned by out-of-scope Emby person " + owner.InternalId + ".");
             }
         }
 
@@ -121,15 +101,15 @@ namespace PersonCleaner.V2.UI
             var live = plan.CurrentPeople.ToDictionary(x => x.EmbyId, x => (Person)library.GetItemById(x.EmbyId));
             var changed = false;
 
-            // Release only IDs that must move between two in-scope people (or from
-            // an existing person to a new outcome). Ordinary replacement does not
-            // need a separate remove write before the final value is stored.
+            // Release IDs from their current in-scope owner before assigning the
+            // grid's final owner. Live state is authoritative input here; the
+            // calculation-time snapshots are audit context, not a write veto.
             var releases = new Dictionary<long, HashSet<string>>();
             foreach (var outcome in finalOutcomes)
             foreach (var id in DesiredProviderIds(outcome))
-            foreach (var owner in plan.CurrentPeople.Where(x => Same(LocalProviderId(x, id.Key), id.Value) && (!outcome.TargetEmbyId.HasValue || x.EmbyId != outcome.TargetEmbyId.Value)))
+            foreach (var owner in live.Values.Where(x => Same(ProviderId(x, id.Key), id.Value) && (!outcome.TargetEmbyId.HasValue || x.InternalId != outcome.TargetEmbyId.Value)))
             {
-                if (!releases.TryGetValue(owner.EmbyId, out var providers)) releases[owner.EmbyId] = providers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (!releases.TryGetValue(owner.InternalId, out var providers)) releases[owner.InternalId] = providers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 providers.Add(id.Key);
             }
             foreach (var release in releases)
@@ -139,13 +119,13 @@ namespace PersonCleaner.V2.UI
                 library.UpdateItem(person, null, ItemUpdateType.MetadataEdit);
             }
 
-            foreach (var snapshot in plan.CurrentPeople)
+            foreach (var target in desired)
             {
-                if (!desired.TryGetValue(snapshot.EmbyId, out var outcome)) continue;
-                var person = live[snapshot.EmbyId]; var personChanged = false;
+                var outcome = target.Value;
+                var person = live[target.Key]; var personChanged = false;
                 foreach (var provider in new[] { ProviderNames.Tmdb, ProviderNames.Tvdb, ProviderNames.Imdb })
                 {
-                    var before = LocalProviderId(snapshot, provider);
+                    var before = ProviderId(person, provider);
                     var after = DesiredProviderId(outcome, provider);
                     if (Same(before, after)) continue;
                     SetProviderId(person, provider, after); personChanged = true; changed = true;
@@ -160,6 +140,16 @@ namespace PersonCleaner.V2.UI
         {
             var media = library.GetItemById(mediaId) ?? throw new InvalidOperationException("Emby media " + mediaId + " no longer exists.");
             var people = liveMediaPeople[mediaId].Select(Clone).ToList();
+            var changedAssignments = new HashSet<string>(StringComparer.Ordinal);
+            var requiresReconciliation = changes.Any(change =>
+            {
+                var outcome = plan.Outcomes.First(x => x.OutcomeId == change.TargetOutcomeId);
+                long targetId;
+                if (!receipt.OutcomeEmbyIds.TryGetValue(outcome.OutcomeId, out targetId)) return true;
+                return !people.Any(x => x.Id == targetId && RoleText(x) == change.Role) ||
+                    targetId != change.SourcePersonEmbyId && people.Any(x => x.Id == change.SourcePersonEmbyId && RoleText(x) == change.Role);
+            });
+            if (!requiresReconciliation) return;
             foreach (var outcome in changes.Select(x => plan.Outcomes.First(o => o.OutcomeId == x.TargetOutcomeId)).Where(x => receipt.OutcomeEmbyIds.ContainsKey(x.OutcomeId)).Distinct())
             {
                 var person = EnsureResolverToken(receipt.OutcomeEmbyIds[outcome.OutcomeId], tokens, targetPeople);
@@ -169,16 +159,38 @@ namespace PersonCleaner.V2.UI
             {
                 var outcome = plan.Outcomes.First(x => x.OutcomeId == change.TargetOutcomeId);
                 var sources = people.Where(x => x.Id == change.SourcePersonEmbyId && RoleText(x) == change.Role).ToList();
+                long existingTargetId;
+                var hasExistingTarget = receipt.OutcomeEmbyIds.TryGetValue(outcome.OutcomeId, out existingTargetId);
+                var alreadyAtTarget = hasExistingTarget && people.Any(x => x.Id == existingTargetId && RoleText(x) == change.Role);
                 foreach (var source in sources)
                 {
                     long targetId;
                     if (receipt.OutcomeEmbyIds.TryGetValue(outcome.OutcomeId, out targetId))
                     {
+                        if (source.Id == targetId) continue;
                         var target = targetPeople.TryGetValue(targetId, out var cached) ? cached : EnsureResolverToken(targetId, tokens, targetPeople);
                         if (people.Any(x => x.Id == targetId && x.Type == source.Type && string.Equals(x.Role ?? string.Empty, source.Role ?? string.Empty, StringComparison.Ordinal))) people.Remove(source);
                         else SetResolver(source, target, tokens[targetId]);
                     }
                     else { source.Id = 0; source.Guid = Guid.Empty; source.Name = outcome.DisplayName; source.ProviderIds = ProviderDictionary(outcome); }
+                    changedAssignments.Add(change.AssignmentId);
+                }
+                if (sources.Count == 0 && !alreadyAtTarget)
+                {
+                    var restored = CreditRow(change);
+                    long targetId;
+                    if (receipt.OutcomeEmbyIds.TryGetValue(outcome.OutcomeId, out targetId))
+                    {
+                        var target = targetPeople.TryGetValue(targetId, out var cached) ? cached : EnsureResolverToken(targetId, tokens, targetPeople);
+                        SetResolver(restored, target, tokens[targetId]);
+                    }
+                    else
+                    {
+                        restored.Name = outcome.DisplayName;
+                        restored.ProviderIds = ProviderDictionary(outcome);
+                    }
+                    people.Add(restored);
+                    changedAssignments.Add(change.AssignmentId);
                 }
             }
             library.UpdatePeople(media, people, false);
@@ -193,8 +205,10 @@ namespace PersonCleaner.V2.UI
             }
             foreach (var change in changes)
             {
+                if (!changedAssignments.Contains(change.AssignmentId)) continue;
                 var targetId = receipt.OutcomeEmbyIds[change.TargetOutcomeId];
-                receipt.Changes.Add(new IdentityCaseAppliedChange { Kind = "move-credit", SourceEmbyId = change.SourcePersonEmbyId, TargetEmbyId = targetId, OutcomeId = change.TargetOutcomeId, MediaEmbyId = change.MediaEmbyId, Role = change.Role, Summary = "Move '" + change.Role + "' on Emby media " + change.MediaEmbyId + " from person " + change.SourcePersonEmbyId + " to person " + targetId + "." });
+                var moved = targetId != change.SourcePersonEmbyId;
+                receipt.Changes.Add(new IdentityCaseAppliedChange { Kind = moved ? "move-credit" : "restore-credit", SourceEmbyId = change.SourcePersonEmbyId, TargetEmbyId = targetId, OutcomeId = change.TargetOutcomeId, MediaEmbyId = change.MediaEmbyId, Role = change.Role, Summary = (moved ? "Move" : "Restore") + " '" + change.Role + "' on Emby media " + change.MediaEmbyId + (moved ? " from person " + change.SourcePersonEmbyId + " to person " + targetId : " to person " + targetId) + "." });
             }
         }
 
@@ -263,6 +277,20 @@ namespace PersonCleaner.V2.UI
         }
         private List<PersonInfo> ReadPeople(long mediaId) => library.GetItemPeople(new InternalPeopleQuery { ItemIds = new[] { mediaId }, EnableIds = true, EnableProviderIds = true, EnableGroupByName = false });
         private static PersonInfo Clone(PersonInfo x) => new PersonInfo { Id = x.Id, Guid = x.Guid, Name = x.Name, Type = x.Type, Role = x.Role, ProviderIds = Copy(x.ProviderIds) };
+        private static PersonInfo CreditRow(IdentityCreditOutcome credit)
+        {
+            var text = credit.Role ?? string.Empty;
+            var separator = text.IndexOf(": ", StringComparison.Ordinal);
+            var typeText = separator < 0 ? text : text.Substring(0, separator);
+            PersonType type;
+            if (!Enum.TryParse(typeText, true, out type)) throw new InvalidOperationException("Emby person type '" + typeText + "' cannot be restored for media " + credit.MediaEmbyId + ".");
+            return new PersonInfo
+            {
+                Type = type,
+                Role = separator < 0 ? null : text.Substring(separator + 2),
+                ProviderIds = new ProviderIdDictionary()
+            };
+        }
         private static ProviderIdDictionary Copy(ProviderIdDictionary source) { var result = new ProviderIdDictionary(); if (source != null) foreach (var x in source) result[x.Key] = x.Value; return result; }
         private static ProviderIdDictionary ProviderDictionary(IdentityOutcome outcome) { var result = new ProviderIdDictionary(); foreach (var x in DesiredProviderIds(outcome)) result[ProviderName(x.Key)] = x.Value; return result; }
         private static void SetResolver(PersonInfo row, Person person, string token) { row.Id = person.InternalId; row.Guid = person.Id; row.Name = person.Name; row.ProviderIds = new ProviderIdDictionary { [ResolverTokenProvider] = token }; }
@@ -282,12 +310,6 @@ namespace PersonCleaner.V2.UI
         private static string ProviderName(string provider) => provider == ProviderNames.Tmdb ? MetadataProviders.Tmdb.ToString() : provider == ProviderNames.Tvdb ? MetadataProviders.Tvdb.ToString() : MetadataProviders.Imdb.ToString();
         private static string RoleText(PersonInfo person) => person.Type + (string.IsNullOrWhiteSpace(person.Role) ? string.Empty : ": " + person.Role);
         private static bool Same(string a, string b) => string.Equals(a ?? string.Empty, b ?? string.Empty, StringComparison.OrdinalIgnoreCase);
-        private sealed class ProviderIdPairComparer : IEqualityComparer<KeyValuePair<string, string>>
-        {
-            public static readonly ProviderIdPairComparer Instance = new ProviderIdPairComparer();
-            public bool Equals(KeyValuePair<string, string> x, KeyValuePair<string, string> y) => Same(x.Key, y.Key) && Same(x.Value, y.Value);
-            public int GetHashCode(KeyValuePair<string, string> value) => StringComparer.OrdinalIgnoreCase.GetHashCode(value.Key ?? string.Empty) ^ StringComparer.OrdinalIgnoreCase.GetHashCode(value.Value ?? string.Empty);
-        }
         private sealed class PersonSnapshot { public Person Person { get; set; } public Dictionary<string, string> ProviderIds { get; set; } }
     }
 }
