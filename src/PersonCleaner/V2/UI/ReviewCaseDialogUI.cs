@@ -47,8 +47,16 @@ namespace PersonCleaner.V2.UI
                 .Select(x => BuildIdentity(plan, x, desiredPeople[x.OutcomeId], desiredCredits, duplicateIdKeys, serverId, NewOrdinal(newOrdinals, x.OutcomeId)))
                 .Concat(InformationRows(plan, draft, duplicateIdKeys, result)).ToArray();
             var targets = personOutcomes.Select(x => new ReviewTargetChoice { Value = x.OutcomeId, Caption = TargetCaption(desiredPeople[x.OutcomeId], NewOrdinal(newOrdinals, x.OutcomeId)) }).ToArray();
+            var moveTargets = personOutcomes.Select(x => new ReviewTargetChoice
+            {
+                Value = "move:" + x.OutcomeId,
+                Caption = "Move to " + (desiredPeople[x.OutcomeId].TargetKind == IdentityTargetKinds.Existing
+                    ? "Emby " + desiredPeople[x.OutcomeId].TargetEmbyId
+                    : "New " + NewOrdinal(newOrdinals, x.OutcomeId))
+            });
             var personTargets = plan.CurrentPeople.OrderBy(x => x.EmbyId).Select(x => new ReviewTargetChoice { Value = "existing:" + x.EmbyId, Caption = "Maintain " + x.EmbyId })
-                .Concat(new[] { new ReviewTargetChoice { Value = "new", Caption = "Create" }, new ReviewTargetChoice { Value = "remove", Caption = "Remove" } }).ToArray();
+                .Concat(new[] { new ReviewTargetChoice { Value = "new", Caption = "Create" }, new ReviewTargetChoice { Value = "remove", Caption = "Remove" } })
+                .Concat(moveTargets).ToArray();
             var master = Grid(new ReviewIdentityRow(), nameof(ReviewIdentityRow.RowId), ReviewCaseCommands.IdentityGrid);
             master.heightMode = DxGridOptions.GridHeightMode.fullHeight;
             master.editing.allowAdding = true; master.editing.allowDeleting = true; master.editing.useIcons = true;
@@ -157,6 +165,56 @@ namespace PersonCleaner.V2.UI
             return result;
         }
 
+        public static string ApplyMoveSelections(IdentityCasePlan plan, PersonBuilderDraft draft, ReviewCaseDialogUI incoming)
+        {
+            if (plan == null || draft == null || incoming?.Rows == null) return null;
+            var people = draft.People.ToDictionary(x => x.OutcomeId, StringComparer.Ordinal);
+            var rows = incoming.Rows.Where(x => !x.IsInformation && !string.IsNullOrWhiteSpace(x.OutcomeId))
+                .ToDictionary(x => x.OutcomeId, StringComparer.Ordinal);
+            var media = incoming.Rows.SelectMany(x => x.Media ?? new ReviewMediaRow[0])
+                .Where(x => !string.IsNullOrWhiteSpace(x.AssignmentId)).ToDictionary(x => x.AssignmentId, StringComparer.Ordinal);
+            string result = null;
+            foreach (var sourceRow in rows.Values.Where(x => (x.PersonTarget ?? string.Empty).StartsWith("move:", StringComparison.Ordinal)).ToList())
+            {
+                if (!people.TryGetValue(sourceRow.OutcomeId, out var source)) throw new InvalidOperationException("The source person is not part of this reviewed case.");
+                var destinationId = sourceRow.PersonTarget.Substring(5);
+                if (!people.TryGetValue(destinationId, out var destination) || !destination.Include || !rows.TryGetValue(destinationId, out var destinationRow))
+                    throw new InvalidOperationException("The move destination is not part of this reviewed case.");
+                if (string.Equals(source.OutcomeId, destinationId, StringComparison.Ordinal))
+                    throw new InvalidOperationException("Choose a different person as the move destination.");
+
+                CopyProviderId(people, rows, source.OutcomeId, destinationId, sourceRow.TmdbId, () => destinationRow.TmdbId, value => destinationRow.TmdbId = value, x => x.TmdbId, x => x.TmdbId);
+                CopyProviderId(people, rows, source.OutcomeId, destinationId, sourceRow.TvdbId, () => destinationRow.TvdbId, value => destinationRow.TvdbId = value, x => x.TvdbId, x => x.TvdbId);
+                CopyProviderId(people, rows, source.OutcomeId, destinationId, sourceRow.ImdbId, () => destinationRow.ImdbId, value => destinationRow.ImdbId = value, x => x.ImdbId, x => x.ImdbId);
+
+                var moved = 0;
+                foreach (var credit in draft.Credits.Where(x => string.Equals(x.TargetOutcomeId, source.OutcomeId, StringComparison.Ordinal)))
+                    if (media.TryGetValue(credit.AssignmentId, out var mediaRow))
+                    {
+                        mediaRow.TargetOutcomeId = destinationId;
+                        moved++;
+                    }
+                sourceRow.PersonTarget = source.TargetKind == IdentityTargetKinds.Existing && source.TargetEmbyId.HasValue
+                    ? "existing:" + source.TargetEmbyId.Value
+                    : source.TargetKind == IdentityTargetKinds.New ? "new" : string.Empty;
+                result = "Moved " + moved + " media " + (moved == 1 ? "item" : "items") + " to " + ActionPersonLabel(plan, draft, destination);
+            }
+            return result;
+        }
+
+        private static void CopyProviderId(
+            IDictionary<string, PersonBuilderIdentity> people, IDictionary<string, ReviewIdentityRow> rows,
+            string sourceId, string destinationId, string sourceValue, Func<string> destinationValue,
+            Action<string> setDestination, Func<ReviewIdentityRow, string> selectRowValue, Func<PersonBuilderIdentity, string> selectDraftValue)
+        {
+            var value = (sourceValue ?? string.Empty).Trim();
+            if (value.Length == 0 || !string.IsNullOrWhiteSpace(destinationValue())) return;
+            var ownedByAnother = people.Values.Any(x => !string.Equals(x.OutcomeId, sourceId, StringComparison.Ordinal)
+                && !string.Equals(x.OutcomeId, destinationId, StringComparison.Ordinal)
+                && string.Equals(((rows.TryGetValue(x.OutcomeId, out var row) ? selectRowValue(row) : selectDraftValue(x)) ?? string.Empty).Trim(), value, StringComparison.OrdinalIgnoreCase));
+            if (!ownedByAnother) setDestination(value);
+        }
+
         private static PersonBuilderIdentity Clone(PersonBuilderIdentity x) => new PersonBuilderIdentity { OutcomeId = x.OutcomeId, Include = x.Include, DisplayName = x.DisplayName, TargetKind = x.TargetKind, TargetEmbyId = x.TargetEmbyId, TmdbId = x.TmdbId, TvdbId = x.TvdbId, ImdbId = x.ImdbId, PlannerNotes = x.PlannerNotes };
         private static PersonBuilderCredit Clone(PersonBuilderCredit x) => new PersonBuilderCredit { AssignmentId = x.AssignmentId, TargetOutcomeId = x.TargetOutcomeId };
         private static void SetPersonTarget(PersonBuilderIdentity person, string value)
@@ -236,7 +294,7 @@ namespace PersonCleaner.V2.UI
             var hasMedia = credits.Values.Any(x => x.TargetOutcomeId == outcome.OutcomeId);
             var status = desired.TargetKind == IdentityTargetKinds.Existing
                 ? hasMedia ? "Maintain existing person" : "Persons without media associations will be removed by Emby"
-                : desired.TargetKind == IdentityTargetKinds.New ? hasMedia ? "Create suggested person" : outcome.Outcome == "Operator-added Emby person" ? "Allocate IDs and associate media" : "Do not create — no assigned media" : "Choose maintain or create";
+                : desired.TargetKind == IdentityTargetKinds.New ? hasMedia ? "Create suggested person" : "Placeholder" : "Choose maintain or create";
             var duplicateStatus = DuplicateStatus(desired, duplicateIdKeys);
             var row = new ReviewIdentityRow
             {
@@ -514,8 +572,10 @@ namespace PersonCleaner.V2.UI
                     {
                         var createResult = ReviewCaseDialogUI.ExpandCreateSelections(plan, draft, incoming);
                         var addedResult = PrepareAddedPeople(incoming);
+                        var moveResult = ReviewCaseDialogUI.ApplyMoveSelections(plan, draft, incoming);
                         if (!string.IsNullOrWhiteSpace(createResult)) pendingAction = new PendingReviewAction { Success = createResult };
                         else if (!string.IsNullOrWhiteSpace(addedResult)) pendingAction = new PendingReviewAction { Success = addedResult };
+                        else if (!string.IsNullOrWhiteSpace(moveResult)) pendingAction = new PendingReviewAction { Success = moveResult };
                     }
                     draft = ReviewCaseDialogUI.Capture(draft, incoming, commandId == ReviewCaseCommands.IdentityGrid);
                     IdentityCasePersonBuilder.Compile(plan, draft);

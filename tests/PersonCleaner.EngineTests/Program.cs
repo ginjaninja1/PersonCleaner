@@ -92,6 +92,7 @@ internal static class Program
         Run("person builder requires a destination for an unresolved identity", PersonBuilderRequiresIdentityDestination);
         Run("person builder actions precede terminal grid content", PersonBuilderActionsPrecedeGrid);
         Run("person builder Create appends an empty row and retains the existing person", PersonBuilderCreateAppendsEmptyRow);
+        Run("person builder bulk move reassigns media and safely copies provider IDs", PersonBuilderBulkMoveCopiesSafeIds);
         Run("person builder planner notes remain transient across grid refreshes", PersonBuilderPlannerNotesRoundTrip);
         Run("case review episodes link both episode and series", CaseReviewEpisodeAndSeriesLinks);
         Run("case review out-of-scope media is enabled by default", CaseReviewMediaEnabledByDefault);
@@ -1691,6 +1692,7 @@ internal static class Program
 
         var emptyDraft = PersonBuilderDraft.FromPlan(plan);
         var emptyUi = ReviewCaseDialogUI.Build(plan, emptyDraft, "server", null);
+        Equal("Placeholder", emptyUi.Rows.Single(x => x.OutcomeId == "new:tvdb2").Status);
         emptyUi.Rows.Single(x => x.OutcomeId == "new:tvdb2").PersonTarget = "remove";
         True(!ReviewCaseDialogUI.Capture(emptyDraft, emptyUi, false).People.Single(x => x.OutcomeId == "new:tvdb2").Include);
 
@@ -1702,6 +1704,7 @@ internal static class Program
         var namedDraft = ReviewCaseDialogUI.Capture(namingDraft, namingUi, false);
         Equal("Alex Example", namedDraft.People.Single(x => x.OutcomeId == "existing:50").DisplayName);
         Equal("Alex Example Junior", namedDraft.People.Single(x => x.OutcomeId == "new:tvdb2").DisplayName);
+        Equal("Create suggested person", ReviewCaseDialogUI.Build(plan, namedDraft, "server", null).Rows.Single(x => x.OutcomeId == "new:tvdb2").Status);
         Equal("Alex Example Junior", IdentityCasePersonBuilder.Compile(plan, namedDraft).Plan.Outcomes.Single(x => x.OutcomeId == "new:tvdb2").DisplayName);
     }
 
@@ -1731,6 +1734,47 @@ internal static class Program
         Equal(IdentityTargetKinds.Existing, captured.People.Single(x => x.OutcomeId == "existing:50").TargetKind);
         Equal(50L, captured.People.Single(x => x.OutcomeId == "existing:50").TargetEmbyId.Value);
         True(captured.People.Single(x => x.OutcomeId == added.OutcomeId).Include);
+    }
+
+    private static void PersonBuilderBulkMoveCopiesSafeIds()
+    {
+        var plan = BuilderPlan();
+        plan.Outcomes.Add(new IdentityOutcome
+        {
+            OutcomeId = "new:other", SortOrder = 2, TargetKind = IdentityTargetKinds.New, DisplayName = "Other Alex", Outcome = "Create provider-identified Emby person",
+            ProviderIds = new List<IdentityProviderId> { new IdentityProviderId { Provider = ProviderNames.Imdb, ProviderId = "nm1", Source = "external" } }
+        });
+        plan.Credits.Add(new IdentityCreditOutcome
+        {
+            AssignmentId = "credit-2", SourcePersonEmbyId = 50, TargetOutcomeId = "existing:50", MediaEmbyId = 21,
+            MediaType = MediaTypes.Movie, MediaName = "Second title", Role = "Director", Disposition = "KEEP"
+        });
+        var draft = PersonBuilderDraft.FromPlan(plan);
+        var destination = draft.People.Single(x => x.OutcomeId == "new:tvdb2");
+        destination.ImdbId = string.Empty;
+        var ui = ReviewCaseDialogUI.Build(plan, draft, "server", null);
+        var identityChoices = (ReviewTargetChoice[])ui.PersonBuilder.Options.columns
+            .Single(x => x.dataField == nameof(ReviewIdentityRow.PersonTarget)).lookup.dataSource;
+        Equal("Move to Emby 50", identityChoices.Single(x => x.Value == "move:existing:50").Caption);
+        Equal("Move to New 1", identityChoices.Single(x => x.Value == "move:new:tvdb2").Caption);
+
+        var sourceRow = ui.Rows.Single(x => x.OutcomeId == "existing:50");
+        sourceRow.PersonTarget = "move:new:tvdb2";
+        var result = ReviewCaseDialogUI.ApplyMoveSelections(plan, draft, ui);
+
+        Equal("existing:50", sourceRow.PersonTarget);
+        True(result.Contains("Moved 2 media items to New 1"));
+        True(ui.Rows.SelectMany(x => x.Media).Where(x => x.AssignmentId == "credit-1" || x.AssignmentId == "credit-2")
+            .All(x => x.TargetOutcomeId == "new:tvdb2"));
+        var destinationRow = ui.Rows.Single(x => x.OutcomeId == "new:tvdb2");
+        Equal("1", destinationRow.TmdbId);
+        Equal("2", destinationRow.TvdbId);
+        Equal(string.Empty, destinationRow.ImdbId);
+
+        var captured = ReviewCaseDialogUI.Capture(draft, ui, false);
+        True(captured.Credits.All(x => x.TargetOutcomeId == "new:tvdb2"));
+        Equal("1", captured.People.Single(x => x.OutcomeId == "new:tvdb2").TmdbId);
+        Equal(string.Empty, captured.People.Single(x => x.OutcomeId == "new:tvdb2").ImdbId);
     }
 
     private static void PersonBuilderPlannerNotesRoundTrip()
