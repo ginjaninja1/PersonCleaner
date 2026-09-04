@@ -833,15 +833,15 @@ internal static class Program
         Equal(IdentityPlanStates.CorrectionRequired, plan.State);
         True(plan.Summary.Contains("currently has 2 existing Emby people"));
         True(!plan.Summary.Contains("will become"));
-        Equal(1, plan.Questions.Count(x => x.Kind == CorrectionKinds.IdentityRelation));
+        Equal(0, plan.Questions.Count);
         var legacyPlan = new IdentityCasePlan { CaseId = "legacy-kossy" };
         IdentityCasePlanner.EnsureIdentityRelationQuestions(legacyPlan, decision.IdentityRelationReviews);
         IdentityCasePlanner.EnsureIdentityRelationQuestions(legacyPlan, decision.IdentityRelationReviews);
         Equal(1, legacyPlan.Questions.Count(x => x.Kind == CorrectionKinds.IdentityRelation));
 
         var separate = IdentityCasePersonBuilder.Compile(plan, PersonBuilderDraft.FromPlan(plan));
-        True(separate.Corrections.Any(x => x.Kind == CorrectionKinds.IdentityRelation && x.Operation == CorrectionOperations.Different));
-        True(separate.Corrections.Any(x => x.Kind == CorrectionKinds.MediaCredit));
+        Console.WriteLine("DEBUG separate corrections: " + string.Join(", ", separate.Corrections.Select(x => x.Kind + "/" + x.Operation + "/" + x.Provider + "/" + x.ProviderPersonId)));
+        Equal(0, separate.Corrections.Count);
 
         var oneSurvivorDraft = PersonBuilderDraft.FromPlan(plan);
         var oneSurvivor = oneSurvivorDraft.People.Single(x => x.TargetEmbyId == 57963);
@@ -859,10 +859,9 @@ internal static class Program
         released.Include = false;
         foreach (var credit in mergedDraft.Credits) credit.TargetOutcomeId = retained.OutcomeId;
         var merged = IdentityCasePersonBuilder.Compile(plan, mergedDraft);
-        Equal(1, merged.Corrections.Count);
-        Equal(CorrectionKinds.IdentityRelation, merged.Corrections[0].Kind);
-        Equal(CorrectionOperations.Same, merged.Corrections[0].Operation);
-        True(!merged.Corrections.Any(x => x.Kind == CorrectionKinds.MediaCredit));
+        Equal(2, merged.Corrections.Count);
+        True(merged.Corrections.Any(x => x.Kind == CorrectionKinds.IdentityRelation && x.Operation == CorrectionOperations.Same));
+        True(merged.Corrections.Any(x => x.Kind == CorrectionKinds.LocalPersonBinding && x.Operation == CorrectionOperations.Replace));
         Equal(1, IdentityCasePersonBuilder.MediaBearingOutcomes(merged.Plan).Count);
     }
 
@@ -1517,7 +1516,9 @@ internal static class Program
 
         Equal(1, compilation.Plan.Outcomes.Count);
         Equal("2", IdentityCasePlanner.PreferredProviderId(compilation.Plan.Outcomes.Single(), ProviderNames.Tvdb));
-        Equal(0, compilation.Corrections.Count);
+        Equal(2, compilation.Corrections.Count);
+        True(compilation.Corrections.Any(x => x.Kind == CorrectionKinds.IdentityRelation && x.Operation == CorrectionOperations.Same));
+        True(compilation.Corrections.Any(x => x.Kind == CorrectionKinds.LocalPersonBinding && x.Operation == CorrectionOperations.Replace));
         var ui = ReviewCaseDialogUI.Build(plan, draft, "server", null);
         True(ui.Apply != null);
         Equal(string.Empty, ui.LastAction.Caption);
@@ -1526,7 +1527,7 @@ internal static class Program
         var unresolved = ReviewCaseDialogUI.Build(plan, draft, "server", null);
         True(unresolved.Apply != null);
         Equal(string.Empty, unresolved.LastAction.Caption);
-        Equal(0, IdentityCasePersonBuilder.Compile(plan, draft).Corrections.Count);
+        Equal(1, IdentityCasePersonBuilder.Compile(plan, draft).Corrections.Count);
     }
 
     private static void PersonBuilderCreatesAndMoves()

@@ -667,7 +667,8 @@ WHERE a.run_id=@run AND a.outcome='PRESENT'";
                         legacyRelations.Add(new IdentityRelationReview { LeftProvider = leftProvider, LeftProviderPersonId = leftId, RightProvider = rightProvider, RightProviderPersonId = rightId, Confidence = r.GetDouble(4) });
                     }
                 }
-                IdentityCasePlanner.EnsureIdentityRelationQuestions(plan, legacyRelations);
+                if (IdentityCasePlanner.QuestionBuildingEnabled)
+                    IdentityCasePlanner.EnsureIdentityRelationQuestions(plan, legacyRelations);
                 return plan;
             }
         }

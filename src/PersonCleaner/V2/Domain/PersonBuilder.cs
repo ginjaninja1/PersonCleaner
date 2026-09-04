@@ -167,12 +167,94 @@ namespace PersonCleaner.V2.Domain
 
             var compilation = new PersonBuilderCompilation { Plan = plan, ReviewedPlanHash = source.PlanHash };
             compilation.CorrectionSelections.AddRange(BuildCorrectionSelections(source, plan, people, credits));
+            compilation.CorrectionSelections.AddRange(BuildFinalLayoutCorrections(source, plan));
             compilation.CorrectionSelections = compilation.CorrectionSelections
                 .GroupBy(x => CorrectionKey(x.Correction), StringComparer.Ordinal).Select(x => x.First()).ToList();
             compilation.Corrections = compilation.CorrectionSelections.Select(x => x.Correction).ToList();
             compilation.EmbyChanges = CompleteProjection(plan);
             plan.PlanHash = Hash(Canonical(plan));
             return compilation;
+        }
+
+        // Applying an edited layout is an explicit operator assertion.  Persist
+        // only relationships and local bindings that differ from the planner's
+        // proposed layout; an unchanged automatic plan must not manufacture
+        // redundant permanent rules.
+        private static IEnumerable<PersonBuilderCorrectionSelection> BuildFinalLayoutCorrections(IdentityCasePlan source, IdentityCasePlan result)
+        {
+            const string questionId = "person-builder";
+            var sourceGroups = ProviderGroups(source);
+            var resultGroups = ProviderGroups(result);
+            var keys = sourceGroups.Keys.Concat(resultGroups.Keys).Distinct(StringComparer.Ordinal).OrderBy(x => x, StringComparer.Ordinal).ToList();
+            for (var left = 0; left < keys.Count; left++)
+            for (var right = left + 1; right < keys.Count; right++)
+            {
+                var sourceSame = SameGroup(sourceGroups, keys[left], keys[right]);
+                var resultSame = SameGroup(resultGroups, keys[left], keys[right]);
+                if (sourceSame == resultSame || !sourceGroups.ContainsKey(keys[left]) || !sourceGroups.ContainsKey(keys[right]) || !resultGroups.ContainsKey(keys[left]) || !resultGroups.ContainsKey(keys[right])) continue;
+                var a = SplitProviderKey(keys[left]); var b = SplitProviderKey(keys[right]);
+                yield return LayoutSelection(questionId, "relation:" + keys[left] + "|" + keys[right], new ProviderCorrection
+                {
+                    Kind = CorrectionKinds.IdentityRelation,
+                    Operation = resultSame ? CorrectionOperations.Same : CorrectionOperations.Different,
+                    Provider = a.Provider,
+                    ProviderPersonId = a.Id,
+                    SecondaryProvider = b.Provider,
+                    SecondaryId = b.Id,
+                    Reason = "OPERATOR_IDENTITY_RELATION",
+                    Note = "Derived from final Person Builder layout",
+                    Enabled = true
+                });
+            }
+
+            var sourceOutcomes = source.Outcomes.ToDictionary(x => x.OutcomeId, StringComparer.Ordinal);
+            foreach (var outcome in result.Outcomes.Where(x => x.TargetKind == IdentityTargetKinds.Existing && x.TargetEmbyId.HasValue))
+            {
+                if (!sourceOutcomes.TryGetValue(outcome.OutcomeId, out var original)) continue;
+                foreach (var provider in Providers)
+                {
+                    var before = Preferred(original, provider);
+                    var after = Preferred(outcome, provider);
+                    if (Same(before, after)) continue;
+                    yield return LayoutSelection(questionId, "binding:" + outcome.TargetEmbyId.Value.ToString(CultureInfo.InvariantCulture) + ":" + provider, new ProviderCorrection
+                    {
+                        Kind = CorrectionKinds.LocalPersonBinding,
+                        Operation = string.IsNullOrWhiteSpace(after) ? CorrectionOperations.Unusable : CorrectionOperations.Replace,
+                        Provider = provider,
+                        EmbyId = outcome.TargetEmbyId.Value,
+                        CurrentValue = before,
+                        ReplacementValue = after,
+                        Reason = "OPERATOR_LOCAL_PERSON_BINDING",
+                        Note = "Derived from final Person Builder layout",
+                        Enabled = true
+                    });
+                }
+            }
+        }
+
+        private static PersonBuilderCorrectionSelection LayoutSelection(string questionId, string choiceId, ProviderCorrection correction) => new PersonBuilderCorrectionSelection
+        {
+            QuestionId = questionId,
+            ChoiceId = choiceId,
+            Correction = correction
+        };
+
+        private static Dictionary<string, string> ProviderGroups(IdentityCasePlan plan)
+        {
+            var result = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var outcome in plan.Outcomes)
+            foreach (var id in outcome.ProviderIds.Where(x => x.Source == "native" && (x.Provider == ProviderNames.Tmdb || x.Provider == ProviderNames.Tvdb)))
+                result[id.Provider + ":" + id.ProviderId] = outcome.OutcomeId;
+            return result;
+        }
+
+        private static bool SameGroup(IDictionary<string, string> groups, string left, string right) =>
+            groups.TryGetValue(left, out var a) && groups.TryGetValue(right, out var b) && string.Equals(a, b, StringComparison.Ordinal);
+
+        private static ProviderAssignment SplitProviderKey(string key)
+        {
+            var separator = key.IndexOf(':');
+            return new ProviderAssignment { Provider = key.Substring(0, separator), Id = key.Substring(separator + 1) };
         }
 
         private static IEnumerable<PersonBuilderCorrectionSelection> BuildCorrectionSelections(IdentityCasePlan source, IdentityCasePlan result, IDictionary<string, PersonBuilderIdentity> people, IDictionary<string, PersonBuilderCredit> credits)

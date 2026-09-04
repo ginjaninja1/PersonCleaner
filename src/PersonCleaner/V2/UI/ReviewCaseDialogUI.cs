@@ -592,6 +592,14 @@ namespace PersonCleaner.V2.UI
                     IdentityCaseApplyReceipt receipt;
                     using (var repository = Open()) { receipt = executor.Apply(appliedPlan, committed => repository.CommitIdentityCase(compilation, committed)); applyCommitted = true; }
                     IdentityApplyAudit.Log(appliedPlan, receipt, beforeMetadata, library, logger);
+                    foreach (var selection in compilation.CorrectionSelections.Where(x => x.QuestionId == "person-builder"))
+                    {
+                        var correction = selection.Correction;
+                        var subject = correction.Kind == CorrectionKinds.IdentityRelation
+                            ? correction.Provider.ToUpperInvariant() + " " + correction.ProviderPersonId + " " + correction.Operation + " " + correction.SecondaryProvider.ToUpperInvariant() + " " + correction.SecondaryId
+                            : "Emby person " + correction.EmbyId + " " + correction.Provider.ToUpperInvariant() + " " + correction.Operation + " " + (string.IsNullOrWhiteSpace(correction.ReplacementValue) ? "(removed)" : correction.ReplacementValue);
+                        logger.Info("PersonCleaner Apply case {0}: recorded final-layout correction {1} ({2}): {3}.", appliedPlan.CaseId, correction.CorrectionId, correction.Kind, subject);
+                    }
                     logger.Info("PersonCleaner applied person-builder case {0}: {1}", appliedPlan.CaseId, receipt.Summary);
                     rebuildParent(); return Task.FromResult(parent);
                 }

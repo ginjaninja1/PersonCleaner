@@ -142,6 +142,11 @@ namespace PersonCleaner.V2.Domain
 
     public static class IdentityCasePlanner
     {
+        // The Person Builder is the operator review surface.  Keep the question
+        // model and dialogs available for a future workflow, but do not create
+        // hidden question/choice projections for ordinary case planning.
+        public static bool QuestionBuildingEnabled => false;
+
         public static List<IdentityCasePlan> Build(long runId, ResolutionInput input, IReadOnlyCollection<ResolutionDecision> decisions, IReadOnlyCollection<ResolutionClusterSnapshot> clusters)
         {
             input = input ?? new ResolutionInput();
@@ -282,12 +287,19 @@ namespace PersonCleaner.V2.Domain
             foreach (var outcome in plan.Outcomes.Where(x => x.TargetKind == IdentityTargetKinds.Existing && plan.Credits.Any(c => c.TargetOutcomeId == x.OutcomeId)))
                 outcome.Outcome = "Retain Emby person " + outcome.TargetEmbyId;
             PreserveUnopposedExistingIds(plan, input, currentPeople);
-            BuildIdentityRelationQuestions(plan, decisions);
-            BuildIdentityQuestions(plan, input, provisional);
+            if (QuestionBuildingEnabled)
+            {
+                BuildIdentityRelationQuestions(plan, decisions);
+                BuildIdentityQuestions(plan, input, provisional);
+            }
 
             PruneUnassignedNewOutcomes(plan);
             var incompleteScope = decisions.Any(x => x.Action == ResolutionActions.IncompleteScope);
-            plan.State = incompleteScope || plan.Questions.Count > 0 || plan.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.Unresolved) || plan.Credits.Any(x => x.CorrectionRequired) ? IdentityPlanStates.CorrectionRequired : IdentityPlanStates.Complete;
+            // Question generation is optional UI scaffolding.  Positive but
+            // non-automatic identity evidence remains a manual-review case even
+            // while no question rows are being built.
+            var identityRelationNeedsReview = decisions.Any(x => (x.IdentityRelationReviews ?? new List<IdentityRelationReview>()).Count > 0);
+            plan.State = incompleteScope || identityRelationNeedsReview || plan.Outcomes.Any(x => x.TargetKind == IdentityTargetKinds.Unresolved) || plan.Credits.Any(x => x.CorrectionRequired) ? IdentityPlanStates.CorrectionRequired : IdentityPlanStates.Complete;
             CompleteSummaries(plan, planner);
             if (incompleteScope) plan.CaseType = "Provider ID also exists outside calculated scope";
             else if (plan.State == IdentityPlanStates.Complete)
